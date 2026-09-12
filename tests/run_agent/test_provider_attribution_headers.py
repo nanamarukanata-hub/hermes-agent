@@ -66,6 +66,44 @@ def test_routermint_base_url_applies_user_agent_header(mock_openai):
 
 
 @patch("run_agent.OpenAI")
+def test_opencode_base_url_applies_session_header(mock_openai):
+    """opencode.ai (Zen and Go) requires x-opencode-session on every request
+    or the gateway rejects it with 400 MissingSessionID."""
+    mock_openai.return_value = MagicMock()
+    agent = AIAgent(
+        api_key="test-key",
+        base_url="https://opencode.ai/zen/v1",
+        model="test/model",
+        quiet_mode=True,
+        skip_context_files=True,
+        skip_memory=True,
+    )
+
+    agent._apply_client_headers_for_base_url("https://opencode.ai/zen/go/v1")
+
+    headers = agent._client_kwargs["default_headers"]
+    assert headers.get("x-opencode-session")
+
+
+@patch("run_agent.OpenAI")
+def test_opencode_init_applies_session_header(mock_openai):
+    """The same header must be present on the client built at __init__ time,
+    not only after a later _apply_client_headers_for_base_url call."""
+    mock_openai.return_value = MagicMock()
+    agent = AIAgent(
+        api_key="test-key",
+        base_url="https://opencode.ai/zen/go/v1",
+        model="test/model",
+        quiet_mode=True,
+        skip_context_files=True,
+        skip_memory=True,
+    )
+
+    headers = agent._client_kwargs["default_headers"]
+    assert headers.get("x-opencode-session")
+
+
+@patch("run_agent.OpenAI")
 def test_unknown_base_url_clears_default_headers(mock_openai):
     mock_openai.return_value = MagicMock()
     agent = AIAgent(

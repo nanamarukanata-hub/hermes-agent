@@ -1283,6 +1283,10 @@ def _resolve_api_key_provider() -> Tuple[Optional[OpenAI], Optional[str]]:
                 from hermes_cli.models import copilot_default_headers
 
                 extra["default_headers"] = copilot_default_headers()
+            elif base_url_host_matches(base_url, "opencode.ai"):
+                from utils import opencode_session_headers
+
+                extra["default_headers"] = opencode_session_headers()
             else:
                 try:
                     from providers import get_provider_profile as _gpf_aux
@@ -1318,6 +1322,10 @@ def _resolve_api_key_provider() -> Tuple[Optional[OpenAI], Optional[str]]:
             from hermes_cli.models import copilot_default_headers
 
             extra["default_headers"] = copilot_default_headers()
+        elif base_url_host_matches(base_url, "opencode.ai"):
+            from utils import opencode_session_headers
+
+            extra["default_headers"] = opencode_session_headers()
         else:
             try:
                 from providers import get_provider_profile as _gpf_aux2
