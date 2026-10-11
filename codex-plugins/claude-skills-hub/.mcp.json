@@ -1,0 +1,11 @@
+{
+  "mcpServers": {
+    "claude_skills_hub": {
+      "command": "python3",
+      "args": [
+        "scripts/mcp_server.py"
+      ],
+      "cwd": "."
+    }
+  }
+}
