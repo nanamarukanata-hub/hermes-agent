@@ -22,6 +22,9 @@ from pathlib import Path, PurePosixPath
 # Keep hermes state isolated from real accounts.
 os.environ.setdefault("HERMES_HOME", str(Path.cwd() / ".hermes-mirror-cache"))
 
+# Ensure this repository's packages win over optional third-party 'tools' modules.
+sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
+
 from tools.skills_hub import (
     GitHubAuth, GitHubSource, SkillsShSource, OptionalSkillSource,
     WellKnownSkillSource, ClawHubSource, ClaudeMarketplaceSource,
