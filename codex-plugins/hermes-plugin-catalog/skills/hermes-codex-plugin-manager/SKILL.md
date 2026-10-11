@@ -30,3 +30,10 @@ From the project root (when Codex MCP is not available):
 `hermes plugins info NAME`, `hermes plugins install NAME --enable`.
 
 If the Hermes binary is not installed on the user host, report that blocker.
+
+## Delegation into Hermes
+When Codex needs to **actually use** a Hermes-specific tool, call
+`catalog_delegate_task` (with `approved: true` after user authorization).
+This invokes `hermes chat -q` in the configured local Hermes runtime, where
+installed plugins may be invoked. Report actual output and failures; don't
+claim a specific plugin executed unless the Hermes agent's logs confirm it.

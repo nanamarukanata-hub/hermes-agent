@@ -52,7 +52,7 @@ byid = {x["id"]: x for x in responses}
 assert len(byid) == 4, responses
 assert "tools" in byid[1]["result"]["capabilities"]
 names = {x["name"] for x in byid[2]["result"]["tools"]}
-assert {"catalog_search", "catalog_inspect", "catalog_install_enable", "catalog_runtime_status"} <= names
+assert {"catalog_search", "catalog_inspect", "catalog_install_enable", "catalog_runtime_status", "catalog_delegate_task"} <= names
 search = json.loads(byid[3]["result"]["content"][0]["text"])
 assert any(item["name"] == "blender" for item in search["results"])
 assert search["catalog_total"] == 551
