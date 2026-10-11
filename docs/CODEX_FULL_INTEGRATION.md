@@ -30,3 +30,17 @@ expansion of ${PLUGIN_ROOT} in MCP arguments. Python 3 must be on PATH.
 External Hermes plugins vary widely in layout, host requirements, auth, cost,
 and compatibility; non-Python / portable plugin formats require an appropriate
 Hermes version. No auto-execution of third-party code occurs on startup.
+
+## Using enabled Hermes plugins from Codex
+
+The bridge also exposes `catalog_delegate_task(prompt, approved=true)`. When a
+Hermes binary is present and configured, this runs `hermes chat -q PROMPT`
+inside that user's Hermes environment. Hermes may then invoke its enabled
+plugins in its own agent session, so Codex can receive the answer through MCP.
+The actual invocation of any particular plugin must be verified in Hermes logs.
+Authorization, configured model credentials, provider login and compatible
+plugin runtime are prerequisites. Without them, the tool returns an explicit
+error; it does not pretend the 551 entries are native Codex tools.
+
+This tool is not called automatically at MCP startup. An explicit Codex tool
+call with `approved=true` is required to cross into Hermes execution.

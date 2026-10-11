@@ -101,6 +101,31 @@ def install(name: str, approved: bool = False, enable: bool = True):
             "output": (result.stdout + "\n" + result.stderr)[-3500:],
             "reminder": "Gateway restart and service credentials may still be required."}
 
+def delegate_task(prompt: str, approved: bool = False):
+    """Ask an existing Hermes agent to complete one task using its enabled plugins.
+
+    This is a delegation boundary, not a claim that the plugins become native Codex MCP tools.
+    """
+    if not approved:
+        return {"status": "approval_required",
+                "message": "The user must authorize delegating this task to the Hermes runtime."}
+    if not isinstance(prompt, str) or not prompt.strip() or len(prompt) > 12000:
+        return {"status": "invalid_prompt", "message": "Prompt must be 1..12000 characters"}
+    binary = shutil.which("hermes")
+    if not binary:
+        return {"status": "runtime_unavailable", "message": "Hermes CLI is not on PATH"}
+    try:
+        result = subprocess.run([binary, "chat", "-q", prompt], input="",
+                                capture_output=True, text=True,
+                                timeout=180, check=False)
+    except (OSError, subprocess.TimeoutExpired) as exc:
+        return {"status": "failed", "reason": str(exc)}
+    return {"status": "completed" if result.returncode == 0 else "failed",
+            "exit_code": result.returncode,
+            "answer": result.stdout[-16000:],
+            "diagnostics": result.stderr[-2000:],
+            "note": "Hermes executed this request in its own configured runtime. Check whether plugins were actually invoked in Hermes logs."}
+
 TOOLS = [
  {"name": "catalog_search", "description": "Find plugins from the 551 Hermes Plugin Catalog entries without executing code.",
   "inputSchema": {"type": "object", "properties": {"query": {"type": "string"}, "limit": {"type": "integer", "minimum": 1, "maximum": 100}}}},
@@ -110,6 +135,8 @@ TOOLS = [
   "inputSchema": {"type": "object", "properties": {}}},
  {"name": "catalog_install_enable", "description": "Install and enable one vetted catalog plugin in the LOCAL Hermes runtime. Requires explicit approved=true. This does not make its tools native Codex tools.",
   "inputSchema": {"type": "object", "properties": {"name": {"type": "string"}, "approved": {"type": "boolean"}, "enable": {"type": "boolean"}}, "required": ["name", "approved"]}},
+ {"name": "catalog_delegate_task", "description": "Delegate one authorized task to the user's Hermes Agent via hermes chat -q; Hermes may use its enabled plugins. Requires local CLI, configured model and approved=true.",
+  "inputSchema": {"type": "object", "properties": {"prompt": {"type": "string"}, "approved": {"type": "boolean"}}, "required": ["prompt", "approved"]}},
  {"name": "catalog_install_batch", "description": "Install and enable up to 10 named plugins sequentially, with explicit authorization. Report success and failures individually.",
   "inputSchema": {"type": "object", "properties": {"names": {"type": "array", "items": {"type": "string"}, "maxItems": 10}, "approved": {"type": "boolean"}}, "required": ["names", "approved"]}}
 ]
@@ -126,6 +153,8 @@ def invoke(name, arguments):
     if name == "catalog_install_enable":
         return install(arguments.get("name", ""), arguments.get("approved") is True,
                        arguments.get("enable", True) is True)
+    if name == "catalog_delegate_task":
+        return delegate_task(arguments.get("prompt", ""), arguments.get("approved") is True)
     if name == "catalog_install_batch":
         names = arguments.get("names", [])
         if not isinstance(names, list) or len(names) > 10:
