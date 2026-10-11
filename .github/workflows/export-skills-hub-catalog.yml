@@ -1,0 +1,26 @@
+name: Export Skills Hub Catalog (metadata only)
+
+on:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  export:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5  # actions/checkout@v4
+      - uses: actions/setup-python@a26af69be951a213d495a4c3e4e4022e16d87065  # actions/setup-python@v5
+        with:
+          python-version: "3.11"
+      - name: Download and validate complete upstream index response
+        run: python3 scripts/export_skillhub_catalog.py --output skillhub-export
+      - name: Upload catalog as artifact (no script execution)
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02  # actions/upload-artifact@v4
+        with:
+          name: hermes-skills-hub-catalog
+          path: skillhub-export/
+          if-no-files-found: error
+          retention-days: 30
