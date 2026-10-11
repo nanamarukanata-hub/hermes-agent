@@ -1,0 +1,12 @@
+{
+  "source": "https://claudeskills.info/skills/",
+  "fetched_utc": "2026-10-11T10:40:04.514774+00:00",
+  "expected_site_count": 42824,
+  "pages_attempted": 857,
+  "pages_succeeded": 857,
+  "pages_failed": 0,
+  "count": 42769,
+  "note": "This contains source metadata, not installed Skill code. Licenses/dependencies/actual installs are independent.",
+  "sha256": "be00c23d27619256f5486d85daedf9c6aa1edef1a67fbfa086a37a1c8809718f",
+  "coverage": 0.9987156734541379
+}
