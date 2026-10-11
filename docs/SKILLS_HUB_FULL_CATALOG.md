@@ -1,63 +1,51 @@
-# Hermes Skills Hub — entire catalog access and safe export
+# Hermes Skills Hub — Complete catalog and actual skill bundle mirroring
 
-The **public Skills Hub** at https://hermes-agent.nousresearch.com/docs/skills/
-aggregates multiple registries, potentially tens of thousands of skills.
-The number shown in the website UI is not the number installed on this fork,
-and the official generated index can cover fewer entries than the live registries.
+Goal: attempt to download **every skill indexed by upstream Hermes Skills Hub**,
+including SKILL.md and bundle resources, without executing external code.
 
-## What is already here?
-The Hermes Agent fork already includes:
-- `skills/`: bundled skills.
-- `optional-skills/`: official optional skills (not automatically activated).
-- `tools/skills_hub.py`: online registry adapters and search/install logic.
-- `tools/skills_guard.py`: security scanner for downloaded skills.
+## 1. Existing Hermes features
+Hermes already supports built-in and optional Skills, searching public registries,
+per-Skill installation and the Skills Guard safety scanner.
 
-Do not duplicate the entirety of community registries under `skills/`. The
-registry is frequently changing and third-party content may include malicious
-instructions/scripts, incompatible dependencies or copyrighted material.
-
-## Get all skills that the upstream *index actually returns* — metadata only
-Run locally:
-
+## 2. Download the entire upstream metadata index
 ```bash
-python3 scripts/export_skillhub_catalog.py --output skillhub-export
-cat skillhub-export/catalog-summary.json
+python3 scripts/export_skillhub_catalog.py --output skills-index-export
 ```
 
-The exporter downloads the index URL used by Hermes itself, checks structure,
-and creates:
-- `skillhub-export/skills-catalog.json` — the complete **index response**.
-- `skillhub-export/catalog-summary.json` — count, per-source statistics, SHA-256
-  and retrieval time.
-
-It does not execute scripts, install skills, or commit enormous third-party content.
-A mismatch between the declared and actual entry count exits nonzero.
-A successful export is **not evidence that all community skill registries were exhaustive**.
-
-### GitHub Actions
-Use **Actions → Export Skills Hub Catalog (metadata only) → Run workflow**.
-The resulting artifact is kept for 30 days. This workflow must be manually triggered
-and never installs code. It does not push credentials or user files.
-
-## Discover / inspect / selectively install safely
+## 3. Download actual Skills, not merely titles or links
 ```bash
-hermes skills browse
-hermes skills browse --source official
-hermes skills search music
-hermes skills inspect official/creative/songwriting-and-ai-music
-hermes skills install official/creative/songwriting-and-ai-music
-hermes skills audit
-hermes skills list
+python -m pip install httpx==0.28.1 pyyaml==6.0.2
+python scripts/mirror_all_skills_hub.py \
+  --catalog skills-index-export/skills-catalog.json \
+  --out skill-bundle-export --shard 0 --shards 1 --limit 0
 ```
 
-Bulk enabling 88,000+ third-party skills is intentionally NOT implemented:
-registry search is already supported without copying their code, and indiscriminate
-installation increases supply-chain attack risk and tool confusion.
+To divide the entire index into 64 partitions, each partition has a deterministic
+SHA-256 identifier mapping. The GitHub Actions workflow
+`.github/workflows/mirror-all-skills-hub.yml` automatically attempts all 64
+partitions on the specified main-branch push; the workflow can also be dispatched
+manually later. It uploads a separate inert ZIP and JSONL status ledger per shard.
 
-## Runtime versus GitHub
-Adding files to GitHub does **not** modify a running Hermes instance or
-install them into `~/.hermes/skills/`. To activate built-in/optional skills,
-use the CLI on the Hermes host and restart/reload the session as needed.
+### What counts as success
+- Actual bundle file bytes archived into ZIP under `quarantine/<identifier hash>/`.
+- Each successfully archived bundle has a SHA-256 hash for every file.
+- Failed records remain visible with a precise `unavailable` status.
+- `downloaded / attempted` is reported per shard. Claim "all downloaded"
+  **only when every shard completed and all records show downloaded**.
 
-The skill `skills/hermes-skills-hub-companion/SKILL.md` provides a repeatable,
-auditable workflow for searching, inspecting and installing selected Skills.
+### Practical limits
+- GitHub API rate limits, unavailable upstream repos, missing resolved paths and
+  registry outages mean some items can fail.
+- Maximum 20 MiB per skill, 200 files, 10 MiB per file; oversized bundles are marked failed.
+- The public site's large catalogue count is *not* equivalent to entries present in
+  the central index. Some registry entries cannot be resolved.
+- Bundles may contain copyrighted, malicious or incompatible files. ZIP content
+  is quarantined: **no downloaded code is executed or installed on production**.
+- Artifacts expire after 30 days. No repository growth from third-party bundles.
+- GitHub Actions has runtime and storage limits; review the workflow usage in Actions.
+
+### Activation of all unknown Skills is not automatic
+Trying to activate tens of thousands of unreviewed third-party Skills would expose
+the agent and user data to supply-chain and prompt-injection risks. For intended
+runtime use, inspect source, run Hermes security audit, and install vetted individual
+skills. The complete export is an archival operation, not a verification of safety.
