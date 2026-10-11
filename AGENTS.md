@@ -983,3 +983,19 @@ not the specific names.
 
 Reviewers should reject new change-detector tests; authors should convert
 them into invariants before re-requesting review.
+
+
+## Codex Plugin Marketplace (2026-10-11)
+
+This repository exposes **90 bundled + 71 optional Hermes Skills** through
+three installed-by-default project marketplace packages. The third package
+bundles the complete **551-entry pinned Plugin Catalog** and registers the
+`hermes_plugin_catalog` local MCP tool bridge. All three entries are enabled
+in `.codex/config.toml` for trusted projects.
+
+For tasks requiring an integration, use the catalog search/inspect MCP tools
+and then the explicit install/enable tool if authorized. Tool credentials,
+service authorization and the actual Hermes host runtime are separate from
+Codex configuration. Catalog metadata is not equivalent to an executable
+third-party Codex plugin. Never claim every third-party plugin works without
+checking the Hermes runtime and provider-specific requirements.

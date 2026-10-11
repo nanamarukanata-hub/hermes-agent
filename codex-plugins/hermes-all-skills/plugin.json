@@ -1,0 +1,9 @@
+{
+  "name": "hermes-all-skills",
+  "version": "1.0.0",
+  "description": "Bundled Hermes Agent Skills pack with all 90 on-demand workflows.",
+  "author": {
+    "name": "Hermes fork"
+  },
+  "repository": "https://github.com/nanamarukanata-hub/hermes-agent"
+}

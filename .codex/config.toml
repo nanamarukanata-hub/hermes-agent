@@ -1,0 +1,13 @@
+# Automatically enable project-local Codex plugins when repo is trusted.
+[plugins."hermes-all-skills@hermes-codex"]
+enabled = true
+
+[plugins."hermes-optional-skills@hermes-codex"]
+enabled = true
+
+[plugins."hermes-plugin-catalog@hermes-codex"]
+enabled = true
+
+[plugins."hermes-plugin-catalog@hermes-codex".mcp_servers.hermes_plugin_catalog]
+enabled = true
+default_tools_approval_mode = "prompt"
