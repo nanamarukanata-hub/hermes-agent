@@ -1,0 +1,9 @@
+{
+  "name": "hermes-plugin-catalog",
+  "version": "1.0.0",
+  "description": "Codex tools to browse, inspect, install and enable the 551 pinned Hermes Plugin Catalog entries through an existing Hermes runtime. Tool bridging requires local Python and Hermes CLI.",
+  "author": {
+    "name": "Hermes fork"
+  },
+  "repository": "https://github.com/nanamarukanata-hub/hermes-agent"
+}

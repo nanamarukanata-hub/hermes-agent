@@ -1,0 +1,10 @@
+{
+  "name": "hermes-optional-skills",
+  "version": "1.0.0",
+  "description": "All 71 optional Hermes Agent Skills. Capabilities may require external dependencies or API credentials.",
+  "author": {
+    "name": "Hermes fork"
+  },
+  "repository": "https://github.com/nanamarukanata-hub/hermes-agent",
+  "skills": "./skills/"
+}

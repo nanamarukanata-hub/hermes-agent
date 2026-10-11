@@ -1,0 +1,53 @@
+{
+  "name": "hermes-codex",
+  "interface": {
+    "displayName": "Hermes Codex Full Integration"
+  },
+  "plugins": [
+    {
+      "name": "hermes-all-skills",
+      "source": {
+        "source": "local",
+        "path": "./codex-plugins/hermes-all-skills"
+      },
+      "policy": {
+        "installation": "INSTALLED_BY_DEFAULT",
+        "authentication": "ON_INSTALL"
+      },
+      "category": "Productivity",
+      "interface": {
+        "displayName": "Hermes 90 Skills"
+      }
+    },
+    {
+      "name": "hermes-optional-skills",
+      "source": {
+        "source": "local",
+        "path": "./codex-plugins/hermes-optional-skills"
+      },
+      "policy": {
+        "installation": "INSTALLED_BY_DEFAULT",
+        "authentication": "ON_INSTALL"
+      },
+      "category": "Productivity",
+      "interface": {
+        "displayName": "Hermes 71 Optional Skills"
+      }
+    },
+    {
+      "name": "hermes-plugin-catalog",
+      "source": {
+        "source": "local",
+        "path": "./codex-plugins/hermes-plugin-catalog"
+      },
+      "policy": {
+        "installation": "INSTALLED_BY_DEFAULT",
+        "authentication": "ON_INSTALL"
+      },
+      "category": "Productivity",
+      "interface": {
+        "displayName": "Hermes Plugin Catalog — 551"
+      }
+    }
+  ]
+}
