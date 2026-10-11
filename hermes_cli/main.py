@@ -9806,6 +9806,12 @@ Examples:
     )
     plugins_remove.add_argument("name", help="Plugin directory name to remove")
 
+    plugins_subparsers.add_parser("browse", help="Browse the reviewed Plugin Catalog")
+    cat_search = plugins_subparsers.add_parser("search", help="Search the reviewed Plugin Catalog")
+    cat_search.add_argument("term", nargs="?", default="", help="Text to find (name, description, tools)")
+    cat_info = plugins_subparsers.add_parser("info", help="Show provenance, capabilities and pinned SHA")
+    cat_info.add_argument("name", help="Exact reviewed catalog name")
+
     plugins_subparsers.add_parser("list", aliases=["ls"], help="List installed plugins")
 
     plugins_enable = plugins_subparsers.add_parser(
