@@ -1,0 +1,11 @@
+{
+  "mcpServers": {
+    "hermes_plugin_catalog": {
+      "command": "python3",
+      "args": [
+        "scripts/mcp_server.py"
+      ],
+      "cwd": "."
+    }
+  }
+}
