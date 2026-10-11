@@ -9,7 +9,7 @@ from pathlib import Path
 repo = Path(__file__).resolve().parents[1]
 marketplace = json.loads((repo / ".agents/plugins/marketplace.json").read_text())
 config = tomllib.loads((repo / ".codex/config.toml").read_text())
-expected = {"hermes-all-skills": 90, "hermes-optional-skills": 71, "hermes-plugin-catalog": 1}
+expected = {"hermes-all-skills": 90, "hermes-optional-skills": 71, "hermes-plugin-catalog": 1, "claude-skills-hub": 1}
 assert marketplace["name"] == "hermes-codex", marketplace
 assert {x["name"] for x in marketplace["plugins"]} == set(expected)
 for item in marketplace["plugins"]:
@@ -60,3 +60,25 @@ status = json.loads(byid[4]["result"]["content"][0]["text"])
 assert status["catalog_entries"] == 551
 assert status["third_party_plugins_started"] is False
 print("PASS MCP search and handshake; catalog =", status["catalog_entries"])
+
+# Validate the additional ClaudeSkills MCP bridge from local fixtures, not network.
+extra = repo / "codex-plugins/claude-skills-hub"
+assert (extra / "index/catalog.json").exists()
+assert (extra / "scripts/indexer.py").is_file()
+server = extra / "scripts/mcp_server.py"
+reqs = [
+ {"jsonrpc":"2.0","id":1,"method":"initialize","params":{}},
+ {"jsonrpc":"2.0","id":2,"method":"tools/list"},
+ {"jsonrpc":"2.0","id":3,"method":"tools/call","params":{"name":"skills_catalog_status","arguments":{}}},
+ {"jsonrpc":"2.0","id":4,"method":"tools/call","params":{"name":"skills_install_codex","arguments":{
+  "identifier":"evil/project/name","project_path":"/tmp","approved":False,"reviewed":False}}},
+]
+proc=subprocess.run([sys.executable,str(server)],cwd=extra,
+input="".join(json.dumps(x)+"\n" for x in reqs),capture_output=True,text=True,check=True,timeout=15)
+responses={x["id"]:x for x in map(json.loads,proc.stdout.splitlines())}
+assert len(responses)==4, responses
+names={x["name"] for x in responses[2]["result"]["tools"]}
+assert {"skills_search","skills_inspect","skills_catalog_status","skills_refresh_index","skills_install_codex"} <= names
+denied=json.loads(responses[4]["result"]["content"][0]["text"])
+assert denied["status"]=="review_required", denied
+print("PASS ClaudeSkills MCP startup and no-execution guard")

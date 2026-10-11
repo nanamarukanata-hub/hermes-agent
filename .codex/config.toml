@@ -11,3 +11,10 @@ enabled = true
 [plugins."hermes-plugin-catalog@hermes-codex".mcp_servers.hermes_plugin_catalog]
 enabled = true
 default_tools_approval_mode = "prompt"
+
+[plugins."claude-skills-hub@hermes-codex"]
+enabled = true
+
+[plugins."claude-skills-hub@hermes-codex".mcp_servers.claude_skills_hub]
+enabled = true
+default_tools_approval_mode = "prompt"

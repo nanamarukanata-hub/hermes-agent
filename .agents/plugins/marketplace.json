@@ -48,6 +48,21 @@
       "interface": {
         "displayName": "Hermes Plugin Catalog — 551"
       }
+    },
+    {
+      "name": "claude-skills-hub",
+      "source": {
+        "source": "local",
+        "path": "./codex-plugins/claude-skills-hub"
+      },
+      "policy": {
+        "installation": "INSTALLED_BY_DEFAULT",
+        "authentication": "ON_INSTALL"
+      },
+      "category": "Productivity",
+      "interface": {
+        "displayName": "Claude Skills directory — Codex"
+      }
     }
   ]
 }

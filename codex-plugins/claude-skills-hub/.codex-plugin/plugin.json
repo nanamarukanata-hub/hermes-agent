@@ -1,0 +1,7 @@
+{
+  "name": "claude-skills-hub",
+  "version": "1.0.0",
+  "description": "Search ClaudeSkills.info's GitHub-hosted skill directory, inspect source and selectively install vetted skills into Codex on demand.",
+  "skills": "./skills/",
+  "mcpServers": "./.mcp.json"
+}

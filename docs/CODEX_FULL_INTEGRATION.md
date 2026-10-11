@@ -44,3 +44,22 @@ error; it does not pretend the 551 entries are native Codex tools.
 
 This tool is not called automatically at MCP startup. An explicit Codex tool
 call with `approved=true` is required to cross into Hermes execution.
+
+## ClaudeSkills.info directory
+
+The `claude-skills-hub` Codex marketplace plugin adds an MCP endpoint with
+directory search, inspection, index refresh, and user-approved Codex installs.
+The public web directory was showing 42,824 indexed Skills on 2026-10-11.
+
+`scripts/index_claudeskills_info.py` scans all directory result pages (rather
+than using the smaller `/api/v1/meta` count, which represents a different
+catalog and may be stale). The GitHub Actions workflow indexes all publicly
+listed skill detail URLs into `codex-plugins/claude-skills-hub/index/catalog.json`.
+
+Catalog entries are not actual `SKILL.md` content. The MCP allows use of
+`npx skills add owner/repo --skill skillname --agent codex --yes --copy` only
+after authorization and source review. When dependencies or licensing prohibit
+reuse, the Skill must not be silently marked installed.
+
+The personal Codex installation and credentials do not exist in this GitHub
+repository. Codex must load the repo's Marketplace and its MCP server.
