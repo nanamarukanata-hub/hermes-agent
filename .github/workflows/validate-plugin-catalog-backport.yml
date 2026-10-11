@@ -1,0 +1,39 @@
+name: Validate Plugin Catalog backport
+
+on:
+  pull_request:
+    paths:
+      - 'plugin-catalog/**'
+      - 'hermes_cli/plugin_catalog.py'
+      - 'hermes_cli/plugin_catalog_compat.py'
+      - 'hermes_cli/plugins_cmd.py'
+      - 'hermes_cli/main.py'
+      - 'tests/test_plugin_catalog_backport.py'
+      - '.github/workflows/validate-plugin-catalog-backport.yml'
+  push:
+    branches: [main]
+    paths:
+      - 'plugin-catalog/**'
+      - 'hermes_cli/plugin_catalog.py'
+      - 'hermes_cli/plugin_catalog_compat.py'
+      - 'hermes_cli/plugins_cmd.py'
+      - 'hermes_cli/main.py'
+      - 'tests/test_plugin_catalog_backport.py'
+      - '.github/workflows/validate-plugin-catalog-backport.yml'
+
+permissions:
+  contents: read
+
+jobs:
+  tests:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5
+      - uses: actions/setup-python@a26af69be951a213d495a4c3e4e4022e16d87065
+        with:
+          python-version: '3.11'
+      - name: Install catalogue and CLI dependencies
+        run: pip install pyyaml==6.0.2 rich==13.9.4 packaging==24.2
+      - name: Run catalogue tests
+        run: python -m unittest discover -s tests -p test_plugin_catalog_backport.py -v
