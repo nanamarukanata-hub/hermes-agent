@@ -409,11 +409,20 @@ def cmd_install(
 
     console = Console()
 
-    try:
-        git_url = _resolve_git_url(identifier)
-    except ValueError as e:
-        console.print(f"[red]Error:[/red] {e}")
+    from hermes_cli.plugin_catalog import get_catalog_entry, load_removed_list, match_removed
+    entry = get_catalog_entry(identifier) if "/" not in identifier and "://" not in identifier else None
+    removal = match_removed(identifier, load_removed_list())
+    if removal is not None:
+        console.print(f"[red]Blocked catalog plugin:[/red] {removal.reason}")
         sys.exit(1)
+    if entry is not None:
+        git_url = entry.repo
+    else:
+        try:
+            git_url = _resolve_git_url(identifier)
+        except ValueError as e:
+            console.print(f"[red]Error:[/red] {e}")
+            sys.exit(1)
 
     if git_url.startswith(("http://", "file://")):
         console.print(
@@ -424,10 +433,14 @@ def cmd_install(
     console.print(f"[dim]Cloning {git_url}...[/dim]")
 
     try:
-        target, installed_manifest, installed_name = _install_plugin_core(
-            identifier,
-            force=force,
-        )
+        if entry is not None:
+            from hermes_cli.plugin_catalog_compat import install_pinned_catalog_entry
+            target, installed_manifest, installed_name = install_pinned_catalog_entry(entry, force=force)
+        else:
+            target, installed_manifest, installed_name = _install_plugin_core(
+                identifier,
+                force=force,
+            )
     except PluginOperationError as e:
         console.print(f"[red]Error:[/red] {e}")
         sys.exit(1)
@@ -490,6 +503,12 @@ def cmd_update(name: str) -> None:
     except ValueError as e:
         console.print(f"[red]Error:[/red] {e}")
         sys.exit(1)
+
+    if (target / ".hermes-catalog.json").exists():
+        was_enabled = name in _get_enabled_set()
+        console.print(f"[dim]Reinstalling {name} at the current reviewed catalog SHA...[/dim]")
+        cmd_install(name, force=True, enable=was_enabled)
+        return
 
     if not (target / ".git").exists():
         console.print(
@@ -1525,6 +1544,9 @@ def plugins_command(args) -> None:
             force=getattr(args, "force", False),
             enable=enable_arg,
         )
+    elif action in ("browse", "search", "info"):
+        from hermes_cli.plugin_catalog_compat import catalog_command
+        catalog_command(action, query=getattr(args, "term", ""), name=getattr(args, "name", ""))
     elif action == "update":
         cmd_update(args.name)
     elif action in ("remove", "rm", "uninstall"):
