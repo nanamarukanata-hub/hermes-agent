@@ -1,0 +1,52 @@
+name: Validate ClaudeSkills Codex bridge
+
+on:
+  pull_request:
+    paths:
+      - 'scripts/index_claudeskills_info.py'
+      - 'tests/test_claudeskills_info.py'
+      - 'codex-plugins/claude-skills-hub/**'
+      - '.github/workflows/claudeskills-ci.yml'
+      - 'scripts/verify_codex_plugin_pack.py'
+  push:
+    branches: [main]
+    paths:
+      - 'scripts/index_claudeskills_info.py'
+      - 'tests/test_claudeskills_info.py'
+      - 'codex-plugins/claude-skills-hub/scripts/**'
+      - '.github/workflows/claudeskills-ci.yml'
+
+permissions:
+  contents: read
+
+jobs:
+  offline:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5
+      - uses: actions/setup-python@a26af69be951a213d495a4c3e4e4022e16d87065
+        with:
+          python-version: '3.11'
+      - run: PYTHONPATH=. python -m unittest tests.test_claudeskills_info -v
+      - run: python scripts/verify_codex_plugin_pack.py
+
+  source-smoke:
+    needs: offline
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5
+      - uses: actions/setup-python@a26af69be951a213d495a4c3e4e4022e16d87065
+        with:
+          python-version: '3.11'
+      - name: Fetch first two current directory pages (100 Skills)
+        run: python scripts/index_claudeskills_info.py --max-pages 2 --expected 42824 --workers 2 --out /tmp/catalog-test/catalog.json
+      - name: Upload sample and failures for inspection
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+        if: always()
+        with:
+          name: claudeskills-sample
+          path: /tmp/catalog-test/
+          retention-days: 3
+          if-no-files-found: warn
