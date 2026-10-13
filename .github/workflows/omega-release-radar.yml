@@ -1,5 +1,10 @@
 name: OMEGA Release Radar
 on:
+  push:
+    branches: [main]
+    paths:
+      - 'omega/**'
+      - '.github/workflows/omega-release-radar.yml'
   schedule:
     - cron: '17 0 * * *' # 09:17 JST
   workflow_dispatch:
