@@ -20,7 +20,7 @@ from pathlib import Path
 
 from hermes_constants import get_hermes_home
 from typing import Any, Dict, List, Optional, Tuple
-from utils import base_url_host_matches, normalize_proxy_env_vars
+from utils import base_url_host_matches, normalize_proxy_env_vars, opencode_session_headers
 
 # NOTE: `import anthropic` is deliberately NOT at module top — the SDK pulls
 # ~220 ms of imports (anthropic.types, anthropic.lib.tools._beta_runner, etc.)
@@ -609,6 +609,15 @@ def build_anthropic_client(
         kwargs["api_key"] = api_key
         if common_betas:
             kwargs["default_headers"] = {"anthropic-beta": ",".join(common_betas)}
+
+    if base_url_host_matches(normalized_base_url, "opencode.ai"):
+        # opencode.ai's Anthropic-Messages-compatible route (MiniMax on
+        # opencode-go, Claude on opencode-zen) requires the same session
+        # header as its chat-completions route — see opencode_session_headers().
+        kwargs["default_headers"] = {
+            **kwargs.get("default_headers", {}),
+            **opencode_session_headers(),
+        }
 
     return _anthropic_sdk.Anthropic(**kwargs)
 

@@ -295,3 +295,19 @@ def base_url_host_matches(base_url: str, domain: str) -> bool:
     if not domain:
         return False
     return hostname == domain or hostname.endswith("." + domain)
+
+
+def opencode_session_headers() -> dict:
+    """Return the session header OpenCode Zen/Go requires on every request.
+
+    opencode.ai's inference gateway rejects requests with no session
+    identifier (400 ``MissingSessionID``: "Request is missing
+    x-opencode-session and cannot be routed efficiently"), on both its
+    chat-completions and Anthropic-Messages-compatible routes. Hermes has
+    no OpenCode-side session of its own, so mint a fresh id per client and
+    send it on every request from that client for the life of the
+    conversation.
+    """
+    import uuid
+
+    return {"x-opencode-session": uuid.uuid4().hex}
