@@ -1,0 +1,49 @@
+name: OMEGA Release Radar
+on:
+  schedule:
+    - cron: '17 0 * * *' # 09:17 JST
+  workflow_dispatch:
+
+permissions:
+  contents: write
+  pull-requests: write
+
+concurrency:
+  group: omega-release-radar
+  cancel-in-progress: false
+
+jobs:
+  release-radar:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - name: Checkout
+        uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5
+      - name: Regression tests
+        run: python3 -m unittest discover -s omega/tests -v
+      - name: Official release metadata
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: python3 omega/scripts/release_watch.py --output omega/knowledge/latest-releases.md
+      - name: Open review PR when changed
+        shell: bash
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          set -euo pipefail
+          if git diff --quiet -- omega/knowledge/latest-releases.md; then
+            echo 'No updates'
+            exit 0
+          fi
+          git config user.name 'github-actions[bot]'
+          git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
+          branch='omega/release-radar-auto'
+          git switch -C "$branch"
+          git add omega/knowledge/latest-releases.md
+          git commit -m 'docs(omega): refresh release radar'
+          git push --force-with-lease -u origin "$branch"
+          if ! gh pr view "$branch" --json number >/dev/null 2>&1; then
+            gh pr create --head "$branch" --base "${{ github.event.repository.default_branch }}" \
+              --title "OMEGA: official release radar" \
+              --body "Automated official release metadata only. **Review before merging.** No plugin or model has been automatically installed."
+          fi
