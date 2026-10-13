@@ -21,3 +21,8 @@ Safely evaluate and improve shared workflows for ChatGPT Chat, Work and Codex. P
 
 ## Safety
 Never publish secrets or private user notes. Never auto-execute unreviewed third-party Skills or MCP servers. Do not silently change existing root AGENTS.md, CLAUDE.md or Hermes internals. Model weights and ChatGPT global plugin installation are out of scope.
+
+## Optional Vault memory extension (GBrain-inspired)
+- When the task concerns prior project knowledge and an authorized local Obsidian Vault is mounted, read `omega/skills/omega-vault-memory/SKILL.md` and `omega/docs/gbrain-obsidian-bridge.md`.
+- Use `omega/scripts/vault_brain.py` for keyword search, citation-aware notes and explicit remember/correct/withdraw commands. These are local operations; no GBrain daemon, MCP server, or automatic ChatGPT memory injection is implied.
+- Keep all private Vault content out of this public repository. Never index or write to a Vault whose path and authority are unknown. Run tests before modifying files.
