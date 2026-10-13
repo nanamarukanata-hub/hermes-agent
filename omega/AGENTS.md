@@ -21,3 +21,9 @@ Safely evaluate and improve shared workflows for ChatGPT Chat, Work and Codex. P
 
 ## Safety
 Never publish secrets or private user notes. Never auto-execute unreviewed third-party Skills or MCP servers. Do not silently change existing root AGENTS.md, CLAUDE.md or Hermes internals. Model weights and ChatGPT global plugin installation are out of scope.
+
+## Hermes Agent inside Obsidian (optional desktop integration)
+- For a user-authorized Windows desktop Obsidian integration, follow `omega/skills/omega-hermes-obsidian/SKILL.md` and inspect `omega/obsidian/hermes-bridge/README.md`.
+- The plugin is a local chat frontend, not an automatic Hermes installation or ChatGPT plugin. Do not claim its GitHub/Drive files are installed in the user's Obsidian app.
+- The user must enable the plugin, configure the local Hermes gateway/provider and supply the local API token. Never commit personal Vault notes or API keys.
+- Keep local-only `http://127.0.0.1:8642/v1` separate from future audited HTTPS/iOS architecture. GBrain MCP is a separate integration.

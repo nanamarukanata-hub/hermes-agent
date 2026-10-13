@@ -1,0 +1,9 @@
+{
+  "id": "omega-hermes-bridge",
+  "name": "Omega Hermes Bridge",
+  "version": "0.1.0",
+  "minAppVersion": "1.5.0",
+  "description": "Local, opt-in Hermes Agent chat panel and source-note bridge for Omega Vault.",
+  "author": "OMEGA",
+  "isDesktopOnly": true
+}

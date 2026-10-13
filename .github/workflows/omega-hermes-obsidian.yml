@@ -1,0 +1,30 @@
+name: OMEGA Hermes Obsidian Bridge Tests
+on:
+  pull_request:
+    paths:
+      - 'omega/obsidian/hermes-bridge/**'
+      - '.github/workflows/omega-hermes-obsidian.yml'
+  push:
+    branches: [main]
+    paths:
+      - 'omega/obsidian/hermes-bridge/**'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  test-local-bridge:
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - name: Checkout
+        uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5
+      - name: Verify Node runtime
+        run: node --version
+      - name: Syntax check
+        run: node --check omega/obsidian/hermes-bridge/main.js
+      - name: Static security and API tests
+        run: node omega/obsidian/hermes-bridge/tests/test_plugin.js
+      - name: Mock UI interaction tests
+        run: node omega/obsidian/hermes-bridge/tests/test_mock_ui.js

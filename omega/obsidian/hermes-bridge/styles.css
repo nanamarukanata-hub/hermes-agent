@@ -1,0 +1,10 @@
+.omega-hermes-root {padding: 12px; display: flex; flex-direction: column; gap: 10px; height: 100%; box-sizing: border-box;}
+.omega-hermes-root .omega-warning {font-size: .85em; opacity: .8; line-height: 1.45;}
+.omega-hermes-root .omega-wide {width: 100%; box-sizing: border-box; padding: 8px;}
+.omega-hermes-root .omega-option {display: flex; align-items: center; gap: 8px;}
+.omega-hermes-root .omega-conversation {overflow-y: auto; min-height: 100px; flex: 1 1 200px; border: 1px solid var(--background-modifier-border); border-radius: 6px; padding: 8px;}
+.omega-hermes-root .omega-msg {margin-bottom: 15px;}
+.omega-hermes-root .omega-text {white-space: pre-wrap; overflow-wrap:anywhere; font-family: inherit; margin: 5px 0 0; font-size: var(--font-ui-small);}
+.omega-hermes-root .omega-buttons {display: flex; flex-wrap: wrap; gap: 8px;}
+.omega-hermes-root .omega-buttons button {padding: 6px 12px;}
+.omega-hermes-root .omega-status {font-size: .83em; opacity:.8;}
