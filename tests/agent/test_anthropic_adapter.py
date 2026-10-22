@@ -155,6 +155,46 @@ class TestBuildAnthropicClient:
                 "anthropic-beta": "interleaved-thinking-2025-05-14"
             }
 
+    def test_opencode_go_endpoint_sends_session_header(self):
+        """opencode.ai's Anthropic-Messages route (e.g. MiniMax on
+        opencode-go) rejects requests without x-opencode-session with a 400
+        MissingSessionID error. The header must be sent alongside whatever
+        auth/beta headers the endpoint already picked up."""
+        with patch("agent.anthropic_adapter._anthropic_sdk") as mock_sdk:
+            build_anthropic_client(
+                "opencode-secret",
+                base_url="https://opencode.ai/zen/go/v1",
+            )
+            kwargs = mock_sdk.Anthropic.call_args[1]
+            assert kwargs["default_headers"].get("x-opencode-session")
+            # Still a regular third-party endpoint — plain api_key auth.
+            assert kwargs["api_key"] == "opencode-secret"
+
+    def test_opencode_zen_endpoint_sends_session_header(self):
+        with patch("agent.anthropic_adapter._anthropic_sdk") as mock_sdk:
+            build_anthropic_client(
+                "opencode-secret",
+                base_url="https://opencode.ai/zen/v1",
+            )
+            kwargs = mock_sdk.Anthropic.call_args[1]
+            assert kwargs["default_headers"].get("x-opencode-session")
+
+    def test_non_opencode_endpoint_omits_session_header(self):
+        with patch("agent.anthropic_adapter._anthropic_sdk") as mock_sdk:
+            build_anthropic_client("sk-ant-api03-x", base_url="https://custom.api.com")
+            kwargs = mock_sdk.Anthropic.call_args[1]
+            assert "x-opencode-session" not in kwargs.get("default_headers", {})
+
+    def test_opencode_session_header_is_unique_per_client(self):
+        """Each client build mints its own session id rather than reusing
+        a fixed value across every Hermes install."""
+        with patch("agent.anthropic_adapter._anthropic_sdk") as mock_sdk:
+            build_anthropic_client("k", base_url="https://opencode.ai/zen/go/v1")
+            first = mock_sdk.Anthropic.call_args[1]["default_headers"]["x-opencode-session"]
+            build_anthropic_client("k", base_url="https://opencode.ai/zen/go/v1")
+            second = mock_sdk.Anthropic.call_args[1]["default_headers"]["x-opencode-session"]
+            assert first != second
+
 
 class TestReadClaudeCodeCredentials:
     def test_reads_valid_credentials(self, tmp_path, monkeypatch):

@@ -174,7 +174,7 @@ from agent.trajectory import (
     convert_scratchpad_to_think, has_incomplete_scratchpad,
     save_trajectory as _save_trajectory_to_file,
 )
-from utils import atomic_json_write, base_url_host_matches, base_url_hostname, env_var_enabled, normalize_proxy_url
+from utils import atomic_json_write, base_url_host_matches, base_url_hostname, env_var_enabled, normalize_proxy_url, opencode_session_headers
 from hermes_cli.config import cfg_get
 
 
@@ -1463,6 +1463,8 @@ class AIAgent:
                 elif base_url_host_matches(effective_base, "chatgpt.com"):
                     from agent.auxiliary_client import _codex_cloudflare_headers
                     client_kwargs["default_headers"] = _codex_cloudflare_headers(api_key)
+                elif base_url_host_matches(effective_base, "opencode.ai"):
+                    client_kwargs["default_headers"] = opencode_session_headers()
                 elif "default_headers" not in client_kwargs:
                     # Fall back to profile.default_headers for providers that
                     # declare custom headers (e.g. Vercel AI Gateway attribution,
@@ -6477,6 +6479,8 @@ class AIAgent:
             self._client_kwargs["default_headers"] = _codex_cloudflare_headers(
                 self._client_kwargs.get("api_key", "")
             )
+        elif base_url_host_matches(base_url, "opencode.ai"):
+            self._client_kwargs["default_headers"] = opencode_session_headers()
         else:
             # No URL-specific headers — check profile.default_headers before clearing.
             _ph_headers = None
