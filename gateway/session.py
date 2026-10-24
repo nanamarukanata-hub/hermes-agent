@@ -663,7 +663,7 @@ class SessionStore:
     """
     Manages session storage and retrieval.
     
-    Uses SQLite (via SessionDB) for session metadata and message transcripts.
+    Uses the Obsidian-native SessionDB for all session state and transcripts.
     Falls back to legacy JSONL files if SQLite is unavailable.
     """
     
