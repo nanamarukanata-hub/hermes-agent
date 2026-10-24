@@ -48,9 +48,20 @@ class SessionDB:
                 fcntl.flock(fd, fcntl.LOCK_UN)
 
     def _folder(self, session_id):
-        if not isinstance(session_id, str) or not _VALID_ID.fullmatch(session_id):
+        # A valid filename is not necessarily a safe child directory: "." and
+        # ".." would otherwise address Sessions/ and its parent (including
+        # through delete_session's recursive removal path).
+        if (not isinstance(session_id, str) or session_id in (".", "..")
+                or not _VALID_ID.fullmatch(session_id)):
             raise ValueError("Invalid session ID")
-        return self.root / session_id
+        folder = self.root / session_id
+        # Reject existing symlinked session folders before any read, write or
+        # recursive deletion. Do not silently follow links outside the Vault.
+        if folder.is_symlink() or (folder.exists() and not folder.is_dir()):
+            raise RuntimeError(f"Unsafe Vault session directory: {session_id}")
+        if not folder.resolve().is_relative_to(self.root.resolve()):
+            raise RuntimeError(f"Session directory escapes Vault: {session_id}")
+        return folder
 
     @staticmethod
     def _write(path, content):
