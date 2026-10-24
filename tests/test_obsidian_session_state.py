@@ -103,6 +103,38 @@ class ObsidianStateTests(unittest.TestCase):
         self.assertTrue(target.is_file())
         self.assertIn("channel_123", ThreadParticipationTracker("discord"))
 
+    def test_thread_tracker_rejects_symlinked_json_file(self):
+        # A valid GatewayRouting directory is insufficient if its state file
+        # is a symlink to arbitrary content outside the Vault.
+        import importlib.util
+        helper_file = Path(__file__).resolve().parents[1] / "gateway" / "platforms" / "helpers.py"
+        spec = importlib.util.spec_from_file_location("_thread_symlink_test_helpers", helper_file)
+        helpers = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(helpers)
+        state = Path(self.temp.name) / "06_Automation" / "Hermes" / "GatewayRouting" / "discord_threads.json"
+        state.parent.mkdir(parents=True, exist_ok=True)
+        with tempfile.TemporaryDirectory() as outside:
+            external = Path(outside) / "external.json"
+            external.write_text('["private_thread"]', encoding="utf-8")
+            state.symlink_to(external)
+            with self.assertRaises(RuntimeError):
+                helpers.ThreadParticipationTracker("discord")
+            self.assertEqual(external.read_text(encoding="utf-8"), '["private_thread"]')
+            external.unlink()
+            # Broken symlinks must not be interpreted as an empty state file.
+            with self.assertRaises(RuntimeError):
+                helpers.ThreadParticipationTracker("discord")
+
+    def test_thread_tracker_platform_cannot_escape_vault(self):
+        import importlib.util
+        helper_file = Path(__file__).resolve().parents[1] / "gateway" / "platforms" / "helpers.py"
+        spec = importlib.util.spec_from_file_location("_thread_path_test_helpers", helper_file)
+        helpers = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(helpers)
+        for name in ("../escape", "discord/../../escape", ".", "..", "", "bad\\\\name"):
+            with self.subTest(platform=name), self.assertRaises(ValueError):
+                helpers.ThreadParticipationTracker(name)
+
     def test_dot_segment_ids_cannot_write_or_delete_parent_directories(self):
         # Both names match the filename regex but must never resolve to
         # Sessions/ or its parent, especially in delete_session().
