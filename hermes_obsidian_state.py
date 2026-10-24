@@ -196,7 +196,7 @@ class SessionDB:
     @staticmethod
     def sanitize_title(title):
         if not title: return None
-        clean = " ".join(c for c in title if c.isprintable()).strip()
+        clean = " ".join("".join(c for c in title if c.isprintable()).split())
         return clean[:100] if clean else None
 
     def set_session_title(self, session_id, title):
