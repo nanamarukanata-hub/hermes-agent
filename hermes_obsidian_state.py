@@ -40,6 +40,11 @@ class SessionDB:
 
     @contextmanager
     def _guard(self):
+        # Never follow an attacker-controlled lockfile symlink. Every writer
+        # must lock the same file inside the Vault.
+        if (self._lockfile.is_symlink() or
+                (self._lockfile.exists() and not self._lockfile.is_file())):
+            raise RuntimeError("Unsafe Vault session lockfile")
         with self._lockfile.open("a+b") as fd:
             fcntl.flock(fd, fcntl.LOCK_EX)
             try:
@@ -417,16 +422,28 @@ class SessionDB:
     def finalize_orphaned_compression_sessions(self):
         return 0
 
-    def get_meta(self, key):
+    def _read_state_meta(self):
         path = self.root / "state_meta.json"
-        return json.loads(path.read_text("utf-8")).get(key) if path.exists() else None
+        # Global metadata needs the same containment checks as per-session
+        # metadata. A dangling symlink is unsafe too.
+        if path.is_symlink() or (path.exists() and not path.is_file()):
+            raise RuntimeError("Unsafe Vault state metadata")
+        if not path.exists():
+            return {}
+        data = json.loads(path.read_text(encoding="utf-8"))
+        if not isinstance(data, dict):
+            raise RuntimeError("Invalid Vault state metadata")
+        return data
+
+    def get_meta(self, key):
+        return self._read_state_meta().get(key)
 
     def set_meta(self, key, value):
         with self._guard():
-            path = self.root / "state_meta.json"
-            data = json.loads(path.read_text("utf-8")) if path.exists() else {}
+            data = self._read_state_meta()
             data[key] = value
-            self._write(path, json.dumps(data, ensure_ascii=False, indent=2))
+            self._write(self.root / "state_meta.json",
+                        json.dumps(data, ensure_ascii=False, indent=2))
 
     def vacuum(self):
         return None
