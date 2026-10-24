@@ -227,8 +227,19 @@ class ThreadParticipationTracker:
         }
 
     def _state_path(self) -> Path:
-        from hermes_constants import get_hermes_home
-        return get_hermes_home() / f"{self._platform}_threads.json"
+        # Threads are durable conversation state and therefore belong in Vault.
+        import os
+        vault = os.environ.get("HERMES_OBSIDIAN_VAULT", "")
+        if not vault:
+            raise RuntimeError("HERMES_OBSIDIAN_VAULT is required for thread persistence")
+        path = Path(vault).expanduser().resolve()
+        if not path.is_dir():
+            raise RuntimeError("Obsidian Vault directory does not exist")
+        target = path / "06_Automation" / "Hermes" / "GatewayRouting"
+        target.mkdir(parents=True, exist_ok=True)
+        if not target.resolve().is_relative_to(path):
+            raise RuntimeError("Thread state path escaped Obsidian Vault")
+        return target / f"{self._platform}_threads.json"
 
     def _load(self) -> list[str]:
         path = self._state_path()
