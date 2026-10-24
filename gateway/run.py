@@ -1187,13 +1187,10 @@ class GatewayRunner:
         except Exception:
             pass  # Non-fatal — fail-open at scan time if unavailable
         
-        # Initialize session database for session_search tool support
-        self._session_db = None
-        try:
-            from hermes_state import SessionDB
-            self._session_db = SessionDB()
-        except Exception as e:
-            logger.debug("SQLite session store not available: %s", e)
+        # One canonical Obsidian Vault session backend. Fail at startup if
+        # persistence cannot be configured; never fall back to SQLite.
+        from hermes_state import SessionDB
+        self._session_db = SessionDB()
 
         # Opportunistic state.db maintenance: prune ended sessions older
         # than sessions.retention_days + optional VACUUM. Tracks last-run
