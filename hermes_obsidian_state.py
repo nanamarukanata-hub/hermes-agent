@@ -85,8 +85,14 @@ class SessionDB:
     def _load(self, sid):
         folder = self._folder(sid)
         metadata = folder / "metadata.json"
+        # A symlinked metadata file could leak arbitrary files outside the
+        # Vault on reads. Reject it even when the link target is missing.
+        if metadata.is_symlink():
+            raise RuntimeError(f"Unsafe Vault session metadata: {sid}")
         if not metadata.exists():
             return None
+        if not metadata.is_file():
+            raise RuntimeError(f"Invalid Vault session metadata: {sid}")
         return json.loads(metadata.read_text(encoding="utf-8"))
 
     def _save(self, sid, item):
