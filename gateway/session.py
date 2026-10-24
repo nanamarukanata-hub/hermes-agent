@@ -669,20 +669,20 @@ class SessionStore:
     
     def __init__(self, sessions_dir: Path, config: GatewayConfig,
                  has_active_processes_fn=None):
-        self.sessions_dir = sessions_dir
+        # Obsidian Vault is the sole persistent session destination.
+        vault = os.environ.get("HERMES_OBSIDIAN_VAULT")
+        if not vault:
+            raise RuntimeError("HERMES_OBSIDIAN_VAULT is required; legacy session storage is disabled")
+        self.sessions_dir = Path(vault).expanduser().resolve() / "06_Automation" / "Hermes" / "GatewayRouting"
         self.config = config
         self._entries: Dict[str, SessionEntry] = {}
         self._loaded = False
         self._lock = threading.Lock()
         self._has_active_processes_fn = has_active_processes_fn
         
-        # Initialize SQLite session database
-        self._db = None
-        try:
-            from hermes_state import SessionDB
-            self._db = SessionDB()
-        except Exception as e:
-            print(f"[gateway] Warning: SQLite session store unavailable, falling back to JSONL: {e}")
+        # Never silently fall back to JSONL outside the Vault.
+        from hermes_state import SessionDB
+        self._db = SessionDB()
     
     def _ensure_loaded(self) -> None:
         """Load sessions index from disk if not already loaded."""
