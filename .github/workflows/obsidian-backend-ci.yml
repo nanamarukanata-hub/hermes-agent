@@ -1,0 +1,20 @@
+name: Obsidian session backend
+on:
+  pull_request:
+    branches: [main]
+    paths:
+      - 'hermes_obsidian_state.py'
+      - 'hermes_state.py'
+      - 'gateway/session.py'
+      - 'tests/test_obsidian_session_state.py'
+  workflow_dispatch:
+jobs:
+  obsidian-storage:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+      - name: SQLite-free backend regression
+        run: python -m unittest discover -s tests -p 'test_obsidian_session_state.py' -v
