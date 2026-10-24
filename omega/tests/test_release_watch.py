@@ -47,11 +47,11 @@ class TestReleaseRadar(unittest.TestCase):
     def test_partial_failure_preserves_existing_file(self):
         with tempfile.TemporaryDirectory() as td:
             out = Path(td) / "latest.md"
-            out.write_text("existing\\n", encoding="utf-8")
+            out.write_text("existing\n", encoding="utf-8")
             with patch("release_watch.fetch_latest", side_effect=ValueError("test failure")):
                 with patch.object(sys, "argv", ["release_watch.py", "--output", str(out)]):
                     self.assertEqual(main(), 1)
-            self.assertEqual(out.read_text(encoding="utf-8"), "existing\\n")
+            self.assertEqual(out.read_text(encoding="utf-8"), "existing\n")
 
     def test_idempotent_success(self):
         with tempfile.TemporaryDirectory() as td:
