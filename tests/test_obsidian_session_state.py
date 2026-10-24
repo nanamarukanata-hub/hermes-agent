@@ -86,7 +86,17 @@ class ObsidianStateTests(unittest.TestCase):
         self.assertTrue((self.db.root / "gw_a" / "metadata.json").exists())
 
     def test_discord_thread_tracker_is_inside_vault(self):
-        from gateway.platforms.helpers import ThreadParticipationTracker
+        # Import the helper source directly: gateway.platforms.__init__ eagerly
+        # loads unrelated network adapters (e.g. Yuanbao/httpx). This storage
+        # regression must not require every optional platform dependency.
+        import importlib.util
+        helper_file = Path(__file__).resolve().parents[1] / "gateway" / "platforms" / "helpers.py"
+        spec = importlib.util.spec_from_file_location("_obsidian_test_gateway_helpers", helper_file)
+        self.assertIsNotNone(spec)
+        self.assertIsNotNone(spec.loader)
+        helpers = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(helpers)
+        ThreadParticipationTracker = helpers.ThreadParticipationTracker
         tracker = ThreadParticipationTracker("discord")
         tracker.mark("channel_123")
         target = Path(self.temp.name) / "06_Automation" / "Hermes" / "GatewayRouting" / "discord_threads.json"
