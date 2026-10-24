@@ -167,6 +167,46 @@ class ObsidianStateTests(unittest.TestCase):
         with self.assertRaises(RuntimeError):
             self.db.get_session("bad_meta")
 
+    def test_state_meta_symlink_and_directory_cannot_escape_vault(self):
+        with tempfile.TemporaryDirectory() as outside:
+            external = Path(outside) / "state.json"
+            original = '{"private": "outside"}'
+            external.write_text(original, encoding="utf-8")
+            meta = self.db.root / "state_meta.json"
+            meta.symlink_to(external)
+            with self.assertRaises(RuntimeError):
+                self.db.get_meta("private")
+            with self.assertRaises(RuntimeError):
+                self.db.set_meta("new", "value")
+            self.assertEqual(external.read_text(encoding="utf-8"), original)
+
+            external.unlink()  # Dangling links must not become empty state.
+            with self.assertRaises(RuntimeError):
+                self.db.get_meta("private")
+            with self.assertRaises(RuntimeError):
+                self.db.set_meta("new", "value")
+            meta.unlink()
+            meta.mkdir()
+            with self.assertRaises(RuntimeError):
+                self.db.get_meta("private")
+            with self.assertRaises(RuntimeError):
+                self.db.set_meta("new", "value")
+
+    def test_symlinked_writer_lockfile_is_rejected(self):
+        with tempfile.TemporaryDirectory() as outside:
+            external = Path(outside) / "lock"
+            external.write_text("do not modify", encoding="utf-8")
+            self.db._lockfile.symlink_to(external)
+            with self.assertRaises(RuntimeError):
+                self.db.create_session("blocked", "discord")
+            self.assertEqual(external.read_text(encoding="utf-8"), "do not modify")
+            self.assertFalse((self.db.root / "blocked").exists())
+
+    def test_global_state_meta_normal_roundtrip(self):
+        self.assertIsNone(self.db.get_meta("last_auto_prune"))
+        self.db.set_meta("last_auto_prune", "123")
+        self.assertEqual(SessionDB().get_meta("last_auto_prune"), "123")
+
     def test_sqlite_never_generated(self):
         self.db.create_session("test_s", "discord")
         self.db.append_message("test_s", "user", "persist")
