@@ -76,6 +76,23 @@ class ObsidianStateTests(unittest.TestCase):
         self.assertTrue(old_db.exists())
         self.assertFalse(list(Path(self.temp.name).rglob("*.db")))
 
+    def test_gateway_session_routing_is_inside_vault(self):
+        from gateway.config import GatewayConfig
+        from gateway.session import SessionStore
+        gateway = SessionStore(Path(self.temp.name) / "outside", GatewayConfig())
+        self.assertTrue(gateway.sessions_dir.is_relative_to(Path(self.temp.name)))
+        self.assertEqual(gateway._db.root, self.db.root)
+        gateway._db.create_session("gw_a", "discord")
+        self.assertTrue((self.db.root / "gw_a" / "metadata.json").exists())
+
+    def test_discord_thread_tracker_is_inside_vault(self):
+        from gateway.platforms.helpers import ThreadParticipationTracker
+        tracker = ThreadParticipationTracker("discord")
+        tracker.mark("channel_123")
+        target = Path(self.temp.name) / "06_Automation" / "Hermes" / "GatewayRouting" / "discord_threads.json"
+        self.assertTrue(target.is_file())
+        self.assertIn("channel_123", ThreadParticipationTracker("discord"))
+
     def test_sqlite_never_generated(self):
         self.db.create_session("test_s", "discord")
         self.db.append_message("test_s", "user", "persist")
