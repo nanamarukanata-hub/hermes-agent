@@ -134,6 +134,39 @@ class ObsidianStateTests(unittest.TestCase):
                 self.db.delete_session("linked")
             self.assertEqual(sentinel.read_text(encoding="utf-8"), "untouched")
 
+    def test_symlinked_metadata_cannot_read_outside_vault(self):
+        # Folder-level symlink checks are insufficient: metadata.json may
+        # itself point to a file outside the Vault (including broken links).
+        with tempfile.TemporaryDirectory() as outside:
+            external = Path(outside) / "external.json"
+            external.write_text(
+                '{"id": "linked_meta", "source": "discord", "messages": []}',
+                encoding="utf-8",
+            )
+            folder = self.db.root / "linked_meta"
+            folder.mkdir()
+            (folder / "metadata.json").symlink_to(external)
+            with self.assertRaises(RuntimeError):
+                self.db.get_session("linked_meta")
+            with self.assertRaises(RuntimeError):
+                self.db.create_session("linked_meta", "discord")
+            with self.assertRaises(RuntimeError):
+                self.db.delete_session("linked_meta")
+            self.assertIn('"linked_meta"', external.read_text(encoding="utf-8"))
+
+            # A dangling symlink must not be treated as a missing session.
+            external.unlink()
+            with self.assertRaises(RuntimeError):
+                self.db.get_session("linked_meta")
+            with self.assertRaises(RuntimeError):
+                self.db.create_session("linked_meta", "discord")
+
+    def test_metadata_directory_cannot_be_treated_as_file(self):
+        folder = self.db.root / "bad_meta"
+        (folder / "metadata.json").mkdir(parents=True)
+        with self.assertRaises(RuntimeError):
+            self.db.get_session("bad_meta")
+
     def test_sqlite_never_generated(self):
         self.db.create_session("test_s", "discord")
         self.db.append_message("test_s", "user", "persist")
