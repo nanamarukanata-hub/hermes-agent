@@ -1,5 +1,6 @@
 """Regression tests for the SQLite-free Obsidian session backend."""
 import os
+import sqlite3
 import tempfile
 import unittest
 from pathlib import Path
@@ -47,6 +48,33 @@ class ObsidianStateTests(unittest.TestCase):
         self.db.end_session("test_a", "test")
         self.assertTrue(self.db.delete_session("test_a"))
         self.assertEqual(self.db.session_count(), 0)
+
+    def test_offline_legacy_migration_dry_run_and_commit(self):
+        from scripts.migrate_sessions_to_obsidian import migrate
+
+        old_dir = Path(self.temp.name).parent / (Path(self.temp.name).name + ".legacy")
+        old_dir.mkdir()
+        old_db = old_dir / "state.db"
+        self.addCleanup(lambda: __import__("shutil").rmtree(old_dir, ignore_errors=True))
+
+        # Migration's only SQLite use is the explicitly supplied legacy file,
+        # not the runtime or the Obsidian Vault.
+        with sqlite3.connect(old_db) as conn:
+            conn.execute("CREATE TABLE sessions (id TEXT, source TEXT, started_at REAL, model TEXT)")
+            conn.execute("CREATE TABLE messages (id INTEGER, session_id TEXT, role TEXT, content TEXT, timestamp REAL, tool_calls TEXT)")
+            conn.execute("INSERT INTO sessions VALUES (?, ?, ?, ?)", ("legacy1", "discord", 100, "test-model"))
+            conn.execute("INSERT INTO messages VALUES (?, ?, ?, ?, ?, ?)",
+                         (1, "legacy1", "user", "legacy content", 101, None))
+        dry = migrate(old_db)
+        self.assertEqual(dry["mode"], "dry-run")
+        self.assertEqual(dry["written"], 0)
+        self.assertIsNone(self.db.get_session("legacy1"))
+
+        completed = migrate(old_db, commit=True)
+        self.assertEqual(completed["written"], 1)
+        self.assertEqual(self.db.get_messages("legacy1")[0]["content"], "legacy content")
+        self.assertTrue(old_db.exists())
+        self.assertFalse(list(Path(self.temp.name).rglob("*.db")))
 
     def test_sqlite_never_generated(self):
         self.db.create_session("test_s", "discord")
