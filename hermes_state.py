@@ -2672,3 +2672,9 @@ class SessionDB:
 
         return result
 
+
+
+# The Obsidian-native implementation is the only exported session backend.
+# The legacy SQLite implementation above is retained temporarily as historical
+# source while its ancillary callers are migrated; it is never instantiated.
+from hermes_obsidian_state import SessionDB as SessionDB
