@@ -227,6 +227,12 @@ class ThreadParticipationTracker:
         }
 
     def _state_path(self) -> Path:
+        # The platform becomes a filename; reject separators and dot segments
+        # rather than allowing a caller to redirect persistence outside Vault.
+        if (not isinstance(self._platform, str) or not self._platform
+                or len(self._platform) > 64 or not self._platform.isascii()
+                or not all(c.isalnum() or c in "_-" for c in self._platform)):
+            raise ValueError("Invalid thread tracker platform name")
         # Threads are durable conversation state and therefore belong in Vault.
         import os
         vault = os.environ.get("HERMES_OBSIDIAN_VAULT", "")
@@ -239,7 +245,12 @@ class ThreadParticipationTracker:
         target.mkdir(parents=True, exist_ok=True)
         if not target.resolve().is_relative_to(path):
             raise RuntimeError("Thread state path escaped Obsidian Vault")
-        return target / f"{self._platform}_threads.json"
+        state_file = target / f"{self._platform}_threads.json"
+        # The directory check alone does not protect a symlinked JSON file.
+        # Reject even dangling links before any read or write.
+        if state_file.is_symlink() or (state_file.exists() and not state_file.is_file()):
+            raise RuntimeError("Unsafe Obsidian thread state file")
+        return state_file
 
     def _load(self) -> list[str]:
         path = self._state_path()
