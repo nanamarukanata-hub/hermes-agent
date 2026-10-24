@@ -103,6 +103,37 @@ class ObsidianStateTests(unittest.TestCase):
         self.assertTrue(target.is_file())
         self.assertIn("channel_123", ThreadParticipationTracker("discord"))
 
+    def test_dot_segment_ids_cannot_write_or_delete_parent_directories(self):
+        # Both names match the filename regex but must never resolve to
+        # Sessions/ or its parent, especially in delete_session().
+        sentinel = self.db.root.parent / "parent-sentinel.txt"
+        sentinel.write_text("untouched", encoding="utf-8")
+        for session_id in (".", ".."):
+            with self.subTest(session_id=session_id):
+                with self.assertRaises(ValueError):
+                    self.db.create_session(session_id, "discord")
+                with self.assertRaises(ValueError):
+                    self.db.delete_session(session_id)
+        self.assertEqual(sentinel.read_text(encoding="utf-8"), "untouched")
+        self.assertTrue(self.db.root.is_dir())
+
+    def test_symlink_session_folder_cannot_read_write_or_delete_target(self):
+        # A symlink inside the Vault must not redirect storage outside it.
+        with tempfile.TemporaryDirectory() as outside:
+            target = Path(outside)
+            sentinel = target / "keep.txt"
+            sentinel.write_text("untouched", encoding="utf-8")
+            (target / "metadata.json").write_text(
+                '{"id": "linked", "messages": []}', encoding="utf-8")
+            (self.db.root / "linked").symlink_to(target, target_is_directory=True)
+            with self.assertRaises(RuntimeError):
+                self.db.get_session("linked")
+            with self.assertRaises(RuntimeError):
+                self.db.create_session("linked", "discord")
+            with self.assertRaises(RuntimeError):
+                self.db.delete_session("linked")
+            self.assertEqual(sentinel.read_text(encoding="utf-8"), "untouched")
+
     def test_sqlite_never_generated(self):
         self.db.create_session("test_s", "discord")
         self.db.append_message("test_s", "user", "persist")
