@@ -31,7 +31,17 @@ class SessionDB:
         self.vault = Path(base).expanduser().resolve()
         if not self.vault.is_dir():
             raise RuntimeError(f"Obsidian Vault directory is missing: {self.vault}")
-        self.root = self.vault / "06_Automation" / "Hermes" / "Sessions"
+        # Validate every path component BEFORE mkdir: a symlinked parent
+        # could otherwise cause mkdir(parents=True) to create directories
+        # outside the Vault before the final root check rejects it.
+        root = self.vault
+        for part in ("06_Automation", "Hermes", "Sessions"):
+            root = root / part
+            if root.is_symlink() or not root.resolve().is_relative_to(self.vault):
+                raise RuntimeError("Sessions directory must remain inside the Vault")
+            if root.exists() and not root.is_dir():
+                raise RuntimeError("Vault session path component is not a directory")
+        self.root = root
         self.root.mkdir(parents=True, exist_ok=True)
         if self.root.is_symlink() or not self.root.resolve().is_relative_to(self.vault):
             raise RuntimeError("Sessions directory must remain inside the Vault")
