@@ -25,11 +25,6 @@ jobs:
   queue-regression:
     runs-on: ubuntu-latest
     timeout-minutes: 15
-    env:
-      HERMES_OBSIDIAN_VAULT: ${{ runner.temp }}/retaindb-test-vault
-      OPENROUTER_API_KEY: ""
-      OPENAI_API_KEY: ""
-      NOUS_API_KEY: ""
     steps:
       - uses: actions/checkout@v4
       - uses: astral-sh/setup-uv@v5
@@ -40,6 +35,11 @@ jobs:
           uv venv .venv --python 3.11
           uv pip install --python .venv/bin/python -e ".[all,dev]"
       - name: Test Vault-backed queue and read-only legacy migration
+        env:
+          HERMES_OBSIDIAN_VAULT: ${{ runner.temp }}/retaindb-test-vault
+          OPENROUTER_API_KEY: ""
+          OPENAI_API_KEY: ""
+          NOUS_API_KEY: ""
         run: |
           mkdir -p "$HERMES_OBSIDIAN_VAULT"
           .venv/bin/python -m pytest \
