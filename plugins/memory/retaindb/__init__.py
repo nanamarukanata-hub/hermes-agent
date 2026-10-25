@@ -4,7 +4,7 @@ Cross-session memory via RetainDB cloud API.
 
 Features:
 - Correct API routes for all operations
-- Durable Obsidian Vault JSON write-behind queue (crash-safe, async ingest)
+- Durable SQLite write-behind queue (crash-safe, async ingest)
 - Semantic search + user profile retrieval
 - Context query with deduplication overlay
 - Dialectic synthesis (LLM-powered user understanding, prefetched each turn)
@@ -20,12 +20,12 @@ Config (env vars or hermes config.yaml under retaindb:):
 
 from __future__ import annotations
 
+import fcntl
 import json
 import logging
 import os
 import queue
 import re
-import uuid
 import threading
 import time
 from datetime import datetime, timezone
@@ -34,7 +34,6 @@ from typing import Any, Dict, List
 from urllib.parse import quote
 
 from agent.memory_provider import MemoryProvider
-from hermes_hybrid.vault_kv import VaultDir, resolve_vault_root
 from tools.registry import tool_error
 
 logger = logging.getLogger(__name__)
@@ -328,55 +327,113 @@ class _Client:
 # Durable write-behind queue
 # ---------------------------------------------------------------------------
 
+def _vault_queue_dir() -> Path:
+    """Return the Vault-format queue directory (profile-aware).
+
+    ``HERMES_OBSIDIAN_VAULT`` wins; otherwise the same Vault layout is
+    used under ``<hermes_home>/06_Automation/Hermes/RetainQueue`` so the
+    on-disk format never depends on whether a Vault root was configured.
+    """
+    vault = os.environ.get("HERMES_OBSIDIAN_VAULT", "").strip()
+    if vault:
+        return Path(vault).expanduser() / "06_Automation" / "Hermes" / "RetainQueue"
+    from hermes_constants import get_hermes_home
+
+    return get_hermes_home() / "06_Automation" / "Hermes" / "RetainQueue"
+
+
+def _atomic_write_json(path: Path, data: dict) -> None:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    tmp = path.with_name(f".{path.name}.tmp-{os.getpid()}")
+    with open(tmp, "w", encoding="utf-8") as f:
+        f.write(json.dumps(data, indent=2, ensure_ascii=False) + "\n")
+        f.flush()
+        os.fsync(f.fileno())
+    os.replace(tmp, path)
+
+
 class _WriteQueue:
-    """Vault-backed durable async queue; pending JSON records replay on startup."""
+    """Vault-backed async write queue. Survives crashes — pending files replay on startup.
+
+    One JSON file per pending ingest (``<id>.json``) under the Vault
+    RetainQueue directory, written atomically and serialised with a
+    per-directory flock file.  No SQLite is used.  A legacy ``*.db`` path
+    passed as ``queue_dir`` is interpreted as the queue directory's
+    stem (its parent + stem), so old callers keep working without
+    losing the queue location.
+    """
 
     def __init__(self, client: _Client, queue_dir: Path):
         self._client = client
-        self._queue_dir = Path(queue_dir)
-        self._store = VaultDir(self._queue_dir)
+        path = Path(queue_dir).expanduser()
+        if path.suffix == ".db":
+            path = path.parent / path.stem
+        self._queue_dir = path
+        self._queue_dir.mkdir(parents=True, exist_ok=True)
+        # Back-compat attribute name for callers/tests that inspected it.
+        self._db_path = self._queue_dir
         self._q: queue.Queue = queue.Queue()
-        # Reconstruct pending work before starting the worker. Invalid records
-        # remain untouched for manual inspection rather than being deleted.
-        for row in self._store.list_records():
-            row_id = row.get("id")
-            user_id = row.get("user_id")
-            session_id = row.get("session_id")
-            messages = row.get("messages")
-            if (isinstance(row_id, str) and isinstance(user_id, str)
-                    and isinstance(session_id, str) and isinstance(messages, list)):
-                self._q.put((row_id, user_id, session_id, messages))
-        self._thread = threading.Thread(
-            target=self._loop, name="retaindb-writer", daemon=True
-        )
+        self._thread = threading.Thread(target=self._loop, name="retaindb-writer", daemon=True)
         self._thread.start()
+        # Replay any files left from a previous crash
+        for row_id, user_id, session_id, messages in self._pending_rows():
+            self._q.put((row_id, user_id, session_id, messages))
+
+    def _lock(self):
+        lock_path = self._queue_dir / ".vault-writer.lock"
+        lock_path.parent.mkdir(parents=True, exist_ok=True)
+        return open(lock_path, "a+", encoding="utf-8")
+
+    def _pending_rows(self) -> list:
+        rows = []
+        for p in sorted(self._queue_dir.glob("*.json")):
+            if p.is_symlink():
+                continue
+            try:
+                data = json.loads(p.read_text(encoding="utf-8"))
+            except (OSError, json.JSONDecodeError):
+                continue
+            if isinstance(data, dict) and "user_id" in data and "session_id" in data:
+                rows.append((p.stem, data["user_id"], data["session_id"], data.get("messages", [])))
+        return rows[:200]
+
+    def pending_count(self) -> int:
+        return len(self._pending_rows())
 
     def enqueue(self, user_id: str, session_id: str, messages: list) -> None:
-        row_id = uuid.uuid4().hex
-        self._store.write(row_id, {
-            "id": row_id,
+        now = datetime.now(timezone.utc).isoformat()
+        import uuid
+
+        row_id = f"{int(time.time() * 1000)}-{uuid.uuid4().hex[:12]}"
+        data = {
             "user_id": user_id,
             "session_id": session_id,
             "messages": messages,
-            "created_at": datetime.now(timezone.utc).isoformat(),
+            "created_at": now,
             "last_error": None,
-        })
+        }
+        with self._lock() as lock:
+            fcntl.flock(lock.fileno(), fcntl.LOCK_EX)
+            try:
+                _atomic_write_json(self._queue_dir / f"{row_id}.json", data)
+            finally:
+                fcntl.flock(lock.fileno(), fcntl.LOCK_UN)
         self._q.put((row_id, user_id, session_id, messages))
 
-    def pending_count(self) -> int:
-        return len(self._store.list_ids())
-
-    def _flush_row(self, row_id: str, user_id: str,
-                   session_id: str, messages: list) -> None:
+    def _flush_row(self, row_id: str, user_id: str, session_id: str, messages: list) -> None:
         try:
             self._client.ingest_session(user_id, session_id, messages)
-            self._store.delete(row_id)
+            (self._queue_dir / f"{row_id}.json").unlink(missing_ok=True)
         except Exception as exc:
-            logger.warning("RetainDB ingest failed (will retry after restart): %s", exc)
-            row = self._store.read(row_id)
-            if row is not None:
-                row["last_error"] = str(exc)
-                self._store.write(row_id, row)
+            logger.warning("RetainDB ingest failed (will retry): %s", exc)
+            p = self._queue_dir / f"{row_id}.json"
+            if p.exists():
+                try:
+                    data = json.loads(p.read_text(encoding="utf-8"))
+                    data["last_error"] = str(exc)
+                    _atomic_write_json(p, data)
+                except (OSError, json.JSONDecodeError):
+                    pass
             time.sleep(2)
 
     def _loop(self) -> None:
@@ -396,7 +453,6 @@ class _WriteQueue:
         self._thread.join(timeout=10)
 
 
-# ---------------------------------------------------------------------------
 # ---------------------------------------------------------------------------
 # Overlay formatter
 # ---------------------------------------------------------------------------
@@ -497,11 +553,9 @@ class RetainDBMemoryProvider(MemoryProvider):
 
         from hermes_constants import get_hermes_home
         hermes_home_path = get_hermes_home()
-        vault_root = resolve_vault_root()
-        if vault_root is None:
-            raise RuntimeError("HERMES_OBSIDIAN_VAULT is required for RetainDB's durable queue")
-        queue_dir = vault_root / "06_Automation" / "Hermes" / "RetainQueue"
-        self._queue = _WriteQueue(self._client, queue_dir)
+        # Vault-format queue directory; a legacy retaindb_queue.db file
+        # is left untouched (migration script exports it, see scripts/).
+        self._queue = _WriteQueue(self._client, _vault_queue_dir())
 
         # Seed agent identity from SOUL.md in background
         soul_path = hermes_home_path / "SOUL.md"
