@@ -140,8 +140,8 @@ def boards_root() -> Path:
 
 
 def current_board_path() -> Path:
-    """Return the path to ``<root>/kanban/current``."""
-    return kanban_home() / "kanban" / "current"
+    """Persist the active board selector inside the configured Vault."""
+    return _checked_kanban_file(kanban_store_dir(board=DEFAULT_BOARD).parent / ".current-board")
 
 
 def get_current_board() -> str:
@@ -196,12 +196,15 @@ def board_dir(board: Optional[str] = None) -> Path:
 
 
 def board_exists(board: Optional[str] = None) -> bool:
-    """Return True if the board has a store or a metadata dir on disk."""
+    """Discover only Vault-backed boards; never consult legacy DB paths."""
     slug = _normalize_board_slug(board) or DEFAULT_BOARD
     if slug == DEFAULT_BOARD:
         return True
-    d = board_dir(slug)
-    return d.is_dir() or (d / "kanban.db").exists()
+    d = kanban_store_dir(board=slug)
+    return d.is_dir() and (
+        (d / "board.json").exists() or (d / "counters.json").exists()
+        or (d / "links.json").exists()
+    )
 
 
 def kanban_db_path(board: Optional[str] = None) -> Path:
@@ -297,10 +300,20 @@ def worker_logs_dir(board: Optional[str] = None) -> Path:
     return board_dir(slug) / "logs"
 
 
+def _checked_kanban_file(path: Path) -> Path:
+    """Reject symlinks that redirect a Kanban metadata file outside Vault."""
+    vault = os.environ.get("HERMES_OBSIDIAN_VAULT", "").strip()
+    if not vault:
+        raise ValueError("HERMES_OBSIDIAN_VAULT is required for Kanban persistence")
+    if not path.resolve().is_relative_to(Path(vault).expanduser().resolve()):
+        raise ValueError("Kanban metadata path escapes HERMES_OBSIDIAN_VAULT")
+    return path
+
+
 def board_metadata_path(board: Optional[str] = None) -> Path:
-    """Return the path to ``board.json`` for ``board``."""
+    """Keep board metadata in the same Vault directory as its task store."""
     slug = _normalize_board_slug(board) or DEFAULT_BOARD
-    return board_dir(slug) / "board.json"
+    return _checked_kanban_file(kanban_store_dir(board=slug) / "board.json")
 
 
 def _default_board_display_name(slug: str) -> str:
@@ -397,7 +410,7 @@ def list_boards(*, include_archived: bool = True) -> list[dict]:
     seen: set[str] = set()
     entries.append(read_board_metadata(DEFAULT_BOARD))
     seen.add(DEFAULT_BOARD)
-    root = boards_root()
+    root = kanban_store_dir(board=DEFAULT_BOARD).parent
     if root.is_dir():
         for child in sorted(root.iterdir(), key=lambda p: p.name.lower()):
             if not child.is_dir():
@@ -409,10 +422,9 @@ def list_boards(*, include_archived: bool = True) -> list[dict]:
                 continue
             if not normed or normed in seen:
                 continue
-            has_db = (child / "kanban.db").exists()
             has_meta = (child / "board.json").exists()
             has_store = (child / "links.json").exists() or (child / "counters.json").exists()
-            if not (has_db or has_meta or has_store):
+            if not (has_meta or has_store):
                 continue
             meta = read_board_metadata(normed)
             if meta.get("archived") and not include_archived:
@@ -429,13 +441,13 @@ def remove_board(slug: str, *, archive: bool = True) -> dict:
         raise ValueError("board slug is required")
     if normed == DEFAULT_BOARD:
         raise ValueError("the 'default' board cannot be removed")
-    d = board_dir(normed)
+    d = kanban_store_dir(board=normed)
     if not d.exists():
         raise ValueError(f"board {normed!r} does not exist")
     if get_current_board() == normed:
         clear_current_board()
     if archive:
-        archive_root = boards_root() / "_archived"
+        archive_root = d.parent / "_archived"
         archive_root.mkdir(parents=True, exist_ok=True)
         ts = int(time.time())
         target = archive_root / f"{normed}-{ts}"
