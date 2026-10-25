@@ -55,4 +55,8 @@ def test_restore_and_compression_reject_other_users(tmp_path):
     assert manager.restore("alice", session.session_id) is not None
     assert manager.restore("bob", session.session_id) is None
     with pytest.raises(PermissionError, match="not owned"):
+        store.save_conversation_turn("bob", session.session_id,
+                                     {"role": "user", "content": "unauthorized append"})
+    assert store.get_messages(session.session_id) == []
+    with pytest.raises(PermissionError, match="not owned"):
         store.compress_conversation("bob", session.session_id, keep_last=1)
