@@ -23,9 +23,15 @@ from __future__ import annotations
 import argparse
 import json
 import os
+import re
 import sqlite3
 import sys
 from pathlib import Path
+
+# Match kanban_db's board slug rules and vault_kv's record-id rules.
+_BOARD_SLUG_RE = re.compile(r"^[a-z0-9][a-z0-9_-]{0,63}$")
+_RECORD_ID_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9_.-]*$")
+_RESERVED_NAMES = frozenset({"links", "comments", "events", "runs"})
 
 
 def _dump_table(conn: sqlite3.Connection, name: str) -> list[dict]:
@@ -45,6 +51,10 @@ def main() -> int:
     ap.add_argument("--force", action="store_true", help="Overwrite existing Vault files")
     args = ap.parse_args()
 
+    if not _BOARD_SLUG_RE.fullmatch(args.board):
+        print(f"error: invalid board slug: {args.board!r}", file=sys.stderr)
+        return 2
+
     db_path = Path(args.db).expanduser()
     if not db_path.exists():
         print(f"error: legacy DB not found: {db_path}", file=sys.stderr)
@@ -54,7 +64,11 @@ def main() -> int:
     if marker.exists() and not args.force:
         print(f"error: already migrated (marker {marker} exists; use --force to re-export)", file=sys.stderr)
         return 2
-    out.mkdir(parents=True, exist_ok=True)
+    # A pre-existing symlink must not redirect an export outside the Vault.
+    vault_root = Path(args.vault).expanduser().resolve()
+    if not out.resolve().is_relative_to(vault_root):
+        print("error: board destination resolves outside the Vault", file=sys.stderr)
+        return 2
 
     conn = sqlite3.connect(f"file:{db_path}?mode=ro", uri=True)
     conn.row_factory = sqlite3.Row
@@ -67,13 +81,24 @@ def main() -> int:
     finally:
         conn.close()
 
-    for task in tasks:
-        task_id = str(task.get("id", ""))
-        if not task_id or task_id in (".", "..") or "/" in task_id or "\\" in task_id:
-            continue
-        dest = out / f"{task_id}.json"
-        if dest.exists() and not args.force:
-            continue
+
+    # Validate all names and preflight collisions BEFORE any Vault writes.
+    # Silent skips would incorrectly mark a partial migration successful.
+    task_ids = [str(task.get("id", "")) for task in tasks]
+    if (any(not _RECORD_ID_RE.fullmatch(task_id)
+            or task_id in (".", "..")
+            or task_id in _RESERVED_NAMES for task_id in task_ids)
+            or len(task_ids) != len(set(task_ids))):
+        print("error: unsafe, duplicate or reserved task id; no files exported", file=sys.stderr)
+        return 2
+    destinations = [out / f"{task_id}.json" for task_id in task_ids]
+    destinations.extend(out / f"{name}.json" for name in ("links", "comments", "events", "runs"))
+    if not args.force and any(dest.exists() or dest.is_symlink() for dest in destinations):
+        print("error: Vault export destination already exists; use --force to re-export", file=sys.stderr)
+        return 2
+    out.mkdir(parents=True, exist_ok=True)
+
+    for task, dest in zip(tasks, destinations):
         tmp = dest.with_name(f".{dest.name}.tmp-{os.getpid()}")
         tmp.write_text(json.dumps(task, indent=2, ensure_ascii=False, default=str) + "\n", encoding="utf-8")
         os.replace(tmp, dest)
