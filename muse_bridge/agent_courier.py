@@ -199,11 +199,13 @@ def serve(base: str, home: Path, *, max_cycles: int | None = None) -> None:
 
 def main(argv: list[str] | None = None) -> int:
     p = argparse.ArgumentParser(description="Muse VM permanent outbound Render courier")
-    p.add_argument("command", choices=["pair", "serve", "check"])
+    p.add_argument("command", choices=["pair", "serve", "check", "gpt"])
     p.add_argument("--base-url", default=DEFAULT_BASE)
     p.add_argument("--home", type=Path, default=DEFAULT_HOME)
     p.add_argument("--code-file", type=Path, help="Read one-time pairing code privately from this file")
     p.add_argument("--label", default="muse-vm")
+    p.add_argument("--prompt", help="One text question for GPT (or use --prompt-file / stdin)")
+    p.add_argument("--prompt-file", type=Path, help="Read a GPT question from a local file")
     args = p.parse_args(argv)
     base = _base_url(args.base_url)
     if args.command == "pair":
@@ -212,6 +214,25 @@ def main(argv: list[str] | None = None) -> int:
         output = pair(base, code, args.home, label=args.label)
         print(json.dumps(output, ensure_ascii=False))
         return 0 if output.get("ok") else 1
+    if args.command == "gpt":
+        if args.prompt and args.prompt_file:
+            print("select --prompt or --prompt-file, not both", file=sys.stderr)
+            return 2
+        prompt = (args.prompt if args.prompt is not None else
+                  args.prompt_file.read_text(encoding="utf-8") if args.prompt_file else
+                  sys.stdin.read(6001))
+        if not prompt.strip() or len(prompt) > 6000:
+            print("GPT prompt must be 1-6000 characters", file=sys.stderr)
+            return 2
+        token = _token(args.home)
+        status, payload = _request(base + "/agent/gpt", token=token,
+                                   body={"prompt": prompt}, timeout=85)
+        if status != 200 or payload is None:
+            print(json.dumps({"ok": False, "http_status": status,
+                              "note": "Check Muse pairing and Render OPENAI_API_KEY."}))
+            return 1
+        print(json.dumps(payload, ensure_ascii=False))
+        return 0
     if args.command == "check":
         token = _token(args.home)
         status, payload = _request(base + "/agent/next?wait=0", token=token)
