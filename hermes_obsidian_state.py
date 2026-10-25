@@ -189,6 +189,21 @@ class SessionDB:
     def update_system_prompt(self, session_id, system_prompt):
         self._edit(session_id, lambda item: item.update(system_prompt=system_prompt))
 
+    def update_session_metadata(self, session_id, model_config=None, model=None):
+        """Persist session metadata without relying on SQLite internals.
+
+        The Vault stores model_config as a JSON object, not a serialized SQL
+        column.  Keep existing metadata unless explicitly replaced.
+        """
+        def apply(item):
+            if model_config is not None:
+                item["model_config"] = model_config
+            if model is not None:
+                item["model"] = model
+            return True
+
+        return self._edit(session_id, apply) is True
+
     def update_token_counts(self, session_id, input_tokens=0, output_tokens=0, model=None,
                             cache_read_tokens=0, cache_write_tokens=0, reasoning_tokens=0,
                             estimated_cost_usd=None, actual_cost_usd=None,
