@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import concurrent.futures
+import json
 import os
 import time
 from pathlib import Path
@@ -23,6 +24,37 @@ def kanban_home(tmp_path, monkeypatch):
     return home
 
 
+def _edit_task_file(task_id, **fields):
+    """Edit a task's Vault JSON file directly (Vault-structure seeding)."""
+    path = kb.kanban_store_dir() / f"{task_id}.json"
+    data = json.loads(path.read_text(encoding="utf-8"))
+    data.update(fields)
+    path.write_text(json.dumps(data, indent=2) + "\n", encoding="utf-8")
+
+
+def _edit_run_file(run_id, **fields):
+    """Edit a run row in runs.json directly (Vault-structure seeding)."""
+    path = kb.kanban_store_dir() / "runs.json"
+    rows = json.loads(path.read_text(encoding="utf-8"))
+    for row in rows:
+        if int(row["id"]) == int(run_id):
+            row.update(fields)
+    path.write_text(json.dumps(rows, indent=2) + "\n", encoding="utf-8")
+
+
+def _append_run_file(run):
+    """Append a run row to runs.json and advance the run counter."""
+    store = kb.kanban_store_dir()
+    path = store / "runs.json"
+    rows = json.loads(path.read_text(encoding="utf-8")) if path.exists() else []
+    rows.append(run)
+    path.write_text(json.dumps(rows, indent=2) + "\n", encoding="utf-8")
+    counters_path = store / "counters.json"
+    counters = json.loads(counters_path.read_text(encoding="utf-8"))
+    counters["run"] = max(int(counters.get("run", 0)), int(run["id"]))
+    counters_path.write_text(json.dumps(counters, indent=2) + "\n", encoding="utf-8")
+
+
 # ---------------------------------------------------------------------------
 # Schema / init
 # ---------------------------------------------------------------------------
@@ -39,12 +71,16 @@ def test_init_db_is_idempotent(kanban_home):
 
 
 def test_init_creates_expected_tables(kanban_home):
+    """The Vault store has the migration layout, not SQLite tables."""
     with kb.connect() as conn:
-        rows = conn.execute(
-            "SELECT name FROM sqlite_master WHERE type='table' ORDER BY name"
-        ).fetchall()
-    names = {r["name"] for r in rows}
-    assert {"tasks", "task_links", "task_comments", "task_events"} <= names
+        tid = kb.create_task(conn, title="seed")
+    store = kb.kanban_store_dir()
+    assert (store / f"{tid}.json").exists()
+    for name in ("links", "comments", "events", "runs", "notify_subs", "counters"):
+        assert (store / f"{name}.json").exists()
+    task_data = json.loads((store / f"{tid}.json").read_text(encoding="utf-8"))
+    assert task_data["title"] == "seed"
+    assert task_data["status"] == "ready"
 
 
 # ---------------------------------------------------------------------------
@@ -186,10 +222,7 @@ def test_stale_claim_reclaimed(kanban_home, monkeypatch):
 
         kb._set_worker_pid(conn, t, 12345)
         # Rewind claim_expires so it looks stale.
-        conn.execute(
-            "UPDATE tasks SET claim_expires = ? WHERE id = ?",
-            (int(time.time()) - 3600, t),
-        )
+        _edit_task_file(t, claim_expires=int(time.time()) - 3600)
         monkeypatch.setattr(_kb, "_pid_alive", lambda _pid: state["alive"])
         reclaimed = kb.release_stale_claims(conn, signal_fn=_signal)
         assert reclaimed == 1
@@ -214,14 +247,8 @@ def test_max_runtime_uses_current_run_start_after_retry(kanban_home):
         kb.claim_task(conn, t, claimer=f"{host}:first")
         first_run_id = kb.latest_run(conn, t).id
         old_started = int(time.time()) - 20
-        conn.execute(
-            "UPDATE tasks SET started_at = ?, worker_pid = ? WHERE id = ?",
-            (old_started, 999999, t),
-        )
-        conn.execute(
-            "UPDATE task_runs SET started_at = ?, worker_pid = ? WHERE id = ?",
-            (old_started, 999999, first_run_id),
-        )
+        _edit_task_file(t, started_at=old_started, worker_pid=999999)
+        _edit_run_file(first_run_id, started_at=old_started, worker_pid=999999)
 
         timed_out = kb.enforce_max_runtime(conn, signal_fn=lambda _pid, _sig: None)
         assert timed_out == [t]
@@ -229,14 +256,8 @@ def test_max_runtime_uses_current_run_start_after_retry(kanban_home):
 
         kb.claim_task(conn, t, claimer=f"{host}:retry")
         retry_run = kb.latest_run(conn, t)
-        conn.execute(
-            "UPDATE tasks SET worker_pid = ? WHERE id = ?",
-            (999999, t),
-        )
-        conn.execute(
-            "UPDATE task_runs SET worker_pid = ? WHERE id = ?",
-            (999999, retry_run.id),
-        )
+        _edit_task_file(t, worker_pid=999999)
+        _edit_run_file(retry_run.id, worker_pid=999999)
 
         timed_out = kb.enforce_max_runtime(conn, signal_fn=lambda _pid, _sig: None)
         assert timed_out == []
@@ -250,7 +271,7 @@ def test_heartbeat_extends_claim(kanban_home):
         kb.claim_task(conn, t, claimer=claimer, ttl_seconds=60)
         original = kb.get_task(conn, t).claim_expires
         # Rewind then heartbeat.
-        conn.execute("UPDATE tasks SET claim_expires = ? WHERE id = ?", (0, t))
+        _edit_task_file(t, claim_expires=0)
         ok = kb.heartbeat_claim(conn, t, claimer=claimer, ttl_seconds=3600)
         assert ok
         new = kb.get_task(conn, t).claim_expires
@@ -493,10 +514,7 @@ def test_dispatch_reclaims_stale_before_spawning(kanban_home):
     with kb.connect() as conn:
         t = kb.create_task(conn, title="x", assignee="alice")
         kb.claim_task(conn, t)
-        conn.execute(
-            "UPDATE tasks SET claim_expires = ? WHERE id = ?",
-            (int(time.time()) - 1, t),
-        )
+        _edit_task_file(t, claim_expires=int(time.time()) - 1)
         res = kb.dispatch_once(conn, dry_run=True)
     assert res.reclaimed == 1
 
@@ -869,13 +887,10 @@ def test_latest_summary_picks_newest_when_multiple_runs(kanban_home):
     with kb.connect() as conn:
         t = kb.create_task(conn, title="retry", assignee="alice")
         kb.complete_task(conn, t, summary="first attempt")
-        # Move back to ready by direct SQL — block_task / unblock_task
-        # paths require an active claim, but we just want a second run
-        # row to exist with a later ended_at.
-        conn.execute(
-            "UPDATE tasks SET status='ready', completed_at=NULL WHERE id=?",
-            (t,),
-        )
+        # Move back to ready by editing the task JSON — block_task /
+        # unblock_task paths require an active claim, but we just want a
+        # second run row to exist with a later ended_at.
+        _edit_task_file(t, status="ready", completed_at=None)
         # Sleep 1s so the second run's ended_at is provably later than
         # the first (complete_task uses int(time.time())).
         time.sleep(1.05)
@@ -891,12 +906,14 @@ def test_latest_summary_skips_empty_string(kanban_home):
         kb.complete_task(conn, t, summary="real handoff")
         # Inject a later run with empty summary directly. Workers
         # writing "" instead of None is a real shape we want to ignore.
-        conn.execute(
-            "INSERT INTO task_runs (task_id, status, started_at, ended_at, "
-            "outcome, summary) VALUES (?, 'done', ?, ?, 'completed', ?)",
-            (t, int(time.time()) + 1, int(time.time()) + 2, ""),
-        )
-        conn.commit()
+        _append_run_file({
+            "id": 999999, "task_id": t, "profile": "alice", "step_key": None,
+            "status": "done", "claim_lock": None, "claim_expires": None,
+            "worker_pid": None, "max_runtime_seconds": None,
+            "last_heartbeat_at": None, "started_at": int(time.time()) + 1,
+            "ended_at": int(time.time()) + 2, "outcome": "completed",
+            "summary": "", "metadata": None, "error": None,
+        })
         assert kb.latest_summary(conn, t) == "real handoff"
 
 

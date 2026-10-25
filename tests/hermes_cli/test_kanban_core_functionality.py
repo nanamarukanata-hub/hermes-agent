@@ -41,6 +41,152 @@ def kanban_home(tmp_path, monkeypatch):
 
 
 # ---------------------------------------------------------------------------
+# Vault-structure seeding helpers (replacing direct-SQL fabrication)
+# ---------------------------------------------------------------------------
+# The old tests fabricated state with direct SQL inserts/updates. The
+# Vault store has no SQL: these helpers write the same state through
+# the store itself — mutating the live scope state when called inside
+# a write_txn, otherwise editing the task/run/event JSON files, which
+# the next public call reloads from disk. They assert on real store
+# structure; they do not fake table names or row shapes.
+
+def _seed_task(conn, task_id, **fields):
+    if getattr(conn, "_lock_depth", 0) > 0 and conn._state is not None:
+        row = conn._state["tasks"].get(task_id)
+        assert row is not None, task_id
+        row.update(fields)
+        conn.mark_dirty()
+        return
+    path = kb.kanban_store_dir() / f"{task_id}.json"
+    data = json.loads(path.read_text(encoding="utf-8"))
+    data.update(fields)
+    path.write_text(json.dumps(data, indent=2) + "\n", encoding="utf-8")
+
+
+def _seed_run(conn, run_id, **fields):
+    if getattr(conn, "_lock_depth", 0) > 0 and conn._state is not None:
+        row = conn._state["runs"].get(str(run_id))
+        assert row is not None, run_id
+        row.update(fields)
+        conn.mark_dirty()
+        return
+    store = kb.kanban_store_dir()
+    path = store / "runs.json"
+    rows = json.loads(path.read_text(encoding="utf-8"))
+    for row in rows:
+        if int(row["id"]) == int(run_id):
+            row.update(fields)
+    path.write_text(json.dumps(rows, indent=2) + "\n", encoding="utf-8")
+
+
+def _insert_run(conn, **fields):
+    row = {
+        "id": None, "task_id": None, "profile": None, "step_key": None,
+        "status": "done", "claim_lock": None, "claim_expires": None,
+        "worker_pid": None, "max_runtime_seconds": None,
+        "last_heartbeat_at": None, "started_at": int(time.time()),
+        "ended_at": int(time.time()), "outcome": "completed",
+        "summary": None, "metadata": None, "error": None,
+    }
+    row.update(fields)
+    if getattr(conn, "_lock_depth", 0) > 0 and conn._state is not None:
+        st = conn._state
+        st["counters"]["run"] += 1
+        row["id"] = st["counters"]["run"]
+        st["runs"][str(row["id"])] = row
+        conn.mark_dirty()
+        return row["id"]
+    store = kb.kanban_store_dir()
+    path = store / "runs.json"
+    rows = json.loads(path.read_text(encoding="utf-8")) if path.exists() else []
+    counters_path = store / "counters.json"
+    counters = json.loads(counters_path.read_text(encoding="utf-8"))
+    counters["run"] = max(int(counters.get("run", 0)), max([int(r["id"]) for r in rows], default=0)) + 1
+    row["id"] = counters["run"]
+    rows.append(row)
+    path.write_text(json.dumps(rows, indent=2) + "\n", encoding="utf-8")
+    counters_path.write_text(json.dumps(counters, indent=2) + "\n", encoding="utf-8")
+    return row["id"]
+
+
+def _insert_event(conn, task_id, kind, payload=None, created_at=None, run_id=None):
+    if getattr(conn, "_lock_depth", 0) > 0 and conn._state is not None:
+        st = conn._state
+        st["counters"]["event"] += 1
+        event_id = st["counters"]["event"]
+        st["events"].append({
+            "id": event_id, "task_id": task_id, "run_id": run_id, "kind": kind,
+            "payload": json.dumps(payload, ensure_ascii=False) if payload else None,
+            "created_at": int(created_at) if created_at is not None else int(time.time()),
+        })
+        conn.mark_dirty()
+        return event_id
+    store = kb.kanban_store_dir()
+    path = store / "events.json"
+    rows = json.loads(path.read_text(encoding="utf-8")) if path.exists() else []
+    counters_path = store / "counters.json"
+    counters = json.loads(counters_path.read_text(encoding="utf-8"))
+    counters["event"] = max(int(counters.get("event", 0)), max([int(r["id"]) for r in rows], default=0)) + 1
+    event_id = counters["event"]
+    rows.append({
+        "id": event_id, "task_id": task_id, "run_id": run_id, "kind": kind,
+        "payload": json.dumps(payload, ensure_ascii=False) if payload else None,
+        "created_at": int(created_at) if created_at is not None else int(time.time()),
+    })
+    path.write_text(json.dumps(rows, indent=2) + "\n", encoding="utf-8")
+    counters_path.write_text(json.dumps(counters, indent=2) + "\n", encoding="utf-8")
+    return event_id
+
+
+def _insert_task(conn, task_id, **fields):
+    row = {
+        "id": task_id, "title": "seeded", "body": None, "assignee": None,
+        "status": "ready", "priority": 0, "created_by": None,
+        "created_at": int(time.time()), "started_at": None,
+        "completed_at": None, "workspace_kind": "scratch",
+        "workspace_path": None, "claim_lock": None, "claim_expires": None,
+        "tenant": None, "result": None, "idempotency_key": None,
+        "consecutive_failures": 0, "worker_pid": None,
+        "last_failure_error": None, "max_runtime_seconds": None,
+        "last_heartbeat_at": None, "current_run_id": None,
+        "workflow_template_id": None, "current_step_key": None,
+        "skills": None, "max_retries": None,
+    }
+    row.update(fields)
+    if getattr(conn, "_lock_depth", 0) > 0 and conn._state is not None:
+        conn._state["tasks"][task_id] = row
+        conn.mark_dirty()
+        return task_id
+    path = kb.kanban_store_dir() / f"{task_id}.json"
+    path.write_text(json.dumps(row, indent=2) + "\n", encoding="utf-8")
+    return task_id
+
+
+def _delete_runs_for(conn, task_id):
+    if getattr(conn, "_lock_depth", 0) > 0 and conn._state is not None:
+        st = conn._state
+        st["runs"] = {k: v for k, v in st["runs"].items() if v.get("task_id") != task_id}
+        conn.mark_dirty()
+        return
+    store = kb.kanban_store_dir()
+    path = store / "runs.json"
+    rows = json.loads(path.read_text(encoding="utf-8")) if path.exists() else []
+    rows = [r for r in rows if r.get("task_id") != task_id]
+    path.write_text(json.dumps(rows, indent=2) + "\n", encoding="utf-8")
+
+
+def _task_file(task_id):
+    return json.loads((kb.kanban_store_dir() / f"{task_id}.json").read_text(encoding="utf-8"))
+
+
+def _events_file(task_id=None):
+    rows = json.loads((kb.kanban_store_dir() / "events.json").read_text(encoding="utf-8"))
+    if task_id is not None:
+        rows = [r for r in rows if r.get("task_id") == task_id]
+    return rows
+
+
+# ---------------------------------------------------------------------------
 # Idempotency key
 # ---------------------------------------------------------------------------
 
@@ -153,11 +299,7 @@ def test_successful_completion_resets_failure_counter(kanban_home, all_assignees
         # Simulate 2 prior failures on the record.
         kb.write_txn_ctx = kb.write_txn
         with kb.write_txn(conn):
-            conn.execute(
-                "UPDATE tasks SET consecutive_failures = 2, "
-                "last_failure_error = 'old failure' WHERE id = ?",
-                (tid,),
-            )
+            _seed_task(conn, tid, consecutive_failures=2, last_failure_error="old failure")
         # Complete the task.
         ok = kb.complete_task(conn, tid, summary="done")
         assert ok
@@ -175,11 +317,7 @@ def test_reassign_resets_failure_counter_for_new_profile(kanban_home, all_assign
     try:
         tid = kb.create_task(conn, title="x", assignee="worker")
         with kb.write_txn(conn):
-            conn.execute(
-                "UPDATE tasks SET consecutive_failures = 1, "
-                "last_failure_error = 'timed out' WHERE id = ?",
-                (tid,),
-            )
+            _seed_task(conn, tid, consecutive_failures=1, last_failure_error="timed out")
         assert kb.assign_task(conn, tid, "reviewer") is True
         task = kb.get_task(conn, tid)
         assert task.assignee == "reviewer"
@@ -333,9 +471,7 @@ def test_workspace_resolution_failure_also_counts(kanban_home, all_assignees_spa
             workspace_kind="dir", workspace_path="/tmp/kanban_e2e_dir",
         )
         with kb.write_txn(conn):
-            conn.execute(
-                "UPDATE tasks SET workspace_path = NULL WHERE id = ?", (tid,),
-            )
+            _seed_task(conn, tid, workspace_path=None)
         res = kb.dispatch_once(conn, failure_limit=3)
         task = kb.get_task(conn, tid)
         assert task.consecutive_failures == 1
@@ -582,10 +718,9 @@ def test_gc_events_keeps_active_task_history(kanban_home):
 
         # Force all existing events to "old" by bumping created_at backwards.
         with kb.write_txn(conn):
-            conn.execute(
-                "UPDATE task_events SET created_at = ?",
-                (int(time.time()) - 60 * 24 * 3600,),
-            )
+            for ev in conn._state["events"]:
+                ev["created_at"] = int(time.time()) - 60 * 24 * 3600
+            conn.mark_dirty()
         removed = kb.gc_events(conn, older_than_seconds=30 * 24 * 3600)
         # At least the done task's "created" + "completed" events gone.
         assert removed >= 2
@@ -839,15 +974,8 @@ def test_max_runtime_terminates_overrun_worker(kanban_home):
             # run timestamp so elapsed > limit under the per-run runtime model.
             old_started = int(time.time()) - 30
             with kb.write_txn(conn):
-                conn.execute(
-                    "UPDATE tasks SET started_at = ? WHERE id = ?",
-                    (old_started, tid),
-                )
-                conn.execute(
-                    "UPDATE task_runs SET started_at = ? "
-                    "WHERE id = (SELECT current_run_id FROM tasks WHERE id = ?)",
-                    (old_started, tid),
-                )
+                _seed_task(conn, tid, started_at=old_started)
+                _seed_run(conn, kb.get_task(conn, tid).current_run_id, started_at=old_started)
 
             timed_out = kb.enforce_max_runtime(conn, signal_fn=_signal_fn)
             assert tid in timed_out
@@ -878,11 +1006,7 @@ def test_repeated_timeouts_auto_block_at_default_limit(kanban_home):
     def _age_active_run(conn, tid):
         old_started = int(time.time()) - 30
         with kb.write_txn(conn):
-            conn.execute(
-                "UPDATE task_runs SET started_at = ? "
-                "WHERE id = (SELECT current_run_id FROM tasks WHERE id = ?)",
-                (old_started, tid),
-            )
+            _seed_run(conn, kb.get_task(conn, tid).current_run_id, started_at=old_started)
 
     try:
         conn = kb.connect()
@@ -921,10 +1045,7 @@ def test_max_runtime_none_means_no_cap(kanban_home):
         kb._set_worker_pid(conn, tid, os.getpid())
         # Backdate aggressively; no cap means we don't care.
         with kb.write_txn(conn):
-            conn.execute(
-                "UPDATE tasks SET started_at = ? WHERE id = ?",
-                (int(time.time()) - 100_000, tid),
-            )
+            _seed_task(conn, tid, started_at=int(time.time()) - 100_000)
         timed_out = kb.enforce_max_runtime(conn)
         assert timed_out == []
         task = kb.get_task(conn, tid)
@@ -970,15 +1091,8 @@ def test_enforce_max_runtime_integrates_with_dispatch(kanban_home, monkeypatch):
         kb._set_worker_pid(conn, tid, os.getpid())
         old_started = int(time.time()) - 30
         with kb.write_txn(conn):
-            conn.execute(
-                "UPDATE tasks SET started_at = ? WHERE id = ?",
-                (old_started, tid),
-            )
-            conn.execute(
-                "UPDATE task_runs SET started_at = ? "
-                "WHERE id = (SELECT current_run_id FROM tasks WHERE id = ?)",
-                (old_started, tid),
-            )
+            _seed_task(conn, tid, started_at=old_started)
+            _seed_run(conn, kb.get_task(conn, tid).current_run_id, started_at=old_started)
         # Use enforce_max_runtime directly with our signal stub — dispatch_once
         # uses the default os.kill, but integration-wise calling
         # enforce_max_runtime directly proves the kernel wiring. For the
@@ -1124,17 +1238,10 @@ def test_migration_renames_legacy_event_kinds(tmp_path, monkeypatch):
         now = int(time.time())
         with kb.write_txn(conn):
             for old in ("ready", "priority", "spawn_auto_blocked"):
-                conn.execute(
-                    "INSERT INTO task_events (task_id, kind, payload, created_at) "
-                    "VALUES (?, ?, NULL, ?)",
-                    (tid, old, now),
-                )
+                _insert_event(conn, tid, old, created_at=now)
         # Re-run init_db — the migration pass should rename them.
         kb.init_db()
-        rows = conn.execute(
-            "SELECT kind FROM task_events WHERE task_id = ? ORDER BY id", (tid,),
-        ).fetchall()
-        kinds = [r["kind"] for r in rows]
+        kinds = [e.kind for e in kb.list_events(conn, tid)]
         assert "ready" not in kinds
         assert "priority" not in kinds
         assert "spawn_auto_blocked" not in kinds
@@ -1358,14 +1465,11 @@ def test_multiple_attempts_preserved_as_runs(kanban_home):
         # claim_expires, then let release_stale_claims reclaim it.
         kb.claim_task(conn, tid)
         with kb.write_txn(conn):
-            conn.execute(
-                "UPDATE tasks SET claim_expires = ? WHERE id = ?",
-                (int(time.time()) - 10, tid),
-            )
-            conn.execute(
-                "UPDATE task_runs SET claim_expires = ? WHERE task_id = ?",
-                (int(time.time()) - 10, tid),
-            )
+            _seed_task(conn, tid, claim_expires=int(time.time()) - 10)
+            for run in conn._state["runs"].values():
+                if run.get("task_id") == tid:
+                    run["claim_expires"] = int(time.time()) - 10
+            conn.mark_dirty()
         kb.release_stale_claims(conn)
 
         # Attempt 2: claim then crash (simulated: pid dead).
@@ -1514,11 +1618,7 @@ def test_event_rows_carry_run_id(kanban_home):
         kb.claim_task(conn, tid)
         kb.complete_task(conn, tid, result="ok")
 
-        rows = conn.execute(
-            "SELECT kind, run_id FROM task_events WHERE task_id = ? ORDER BY id",
-            (tid,),
-        ).fetchall()
-        by_kind = {r["kind"]: r["run_id"] for r in rows}
+        by_kind = {e.kind: e.run_id for e in kb.list_events(conn, tid)}
         assert by_kind["created"] is None
         assert by_kind["claimed"] is not None
         assert by_kind["completed"] is not None
@@ -1590,11 +1690,8 @@ def test_migration_backfills_inflight_run_for_legacy_db(kanban_home):
         # current_run_id NULL and delete the run row the claim created.
         kb.claim_task(conn, tid)
         with kb.write_txn(conn):
-            conn.execute("DELETE FROM task_runs WHERE task_id = ?", (tid,))
-            conn.execute(
-                "UPDATE tasks SET current_run_id = NULL WHERE id = ?",
-                (tid,),
-            )
+            _delete_runs_for(conn, tid)
+            _seed_task(conn, tid, current_run_id=None)
 
         # Sanity: no runs, no pointer.
         assert kb.list_runs(conn, tid) == []
@@ -1631,11 +1728,7 @@ def test_forward_compat_columns_writable(kanban_home):
     try:
         tid = kb.create_task(conn, title="x")
         with kb.write_txn(conn):
-            conn.execute(
-                "UPDATE tasks SET workflow_template_id = ?, current_step_key = ? "
-                "WHERE id = ?",
-                ("code-review-v1", "implement", tid),
-            )
+            _seed_task(conn, tid, workflow_template_id="code-review-v1", current_step_key="implement")
         task = kb.get_task(conn, tid)
         assert task.workflow_template_id == "code-review-v1"
         assert task.current_step_key == "implement"
@@ -1828,8 +1921,7 @@ def test_dashboard_direct_status_change_within_same_state_is_noop_for_runs(kanba
     try:
         tid = kb.create_task(conn, title="x")
         # Force to todo for the sake of the test.
-        conn.execute("UPDATE tasks SET status='todo' WHERE id=?", (tid,))
-        conn.commit()
+        _seed_task(conn, tid, status="todo")
         assert _set_status_direct(conn, tid, "ready") is True
         assert kb.list_runs(conn, tid) == []
     finally:
@@ -2043,12 +2135,7 @@ def test_claim_task_recovers_from_invariant_leak(kanban_home):
         # flip status back to 'ready' without closing the run.
         kb.claim_task(conn, tid)
         leaked_run_id = kb.latest_run(conn, tid).id
-        conn.execute(
-            "UPDATE tasks SET status = 'ready', claim_lock = NULL, "
-            "claim_expires = NULL "
-            "WHERE id = ?", (tid,),
-        )
-        conn.commit()
+        _seed_task(conn, tid, status="ready", claim_lock=None, claim_expires=None)
         # The leaked run is still open.
         assert kb.get_run(conn, leaked_run_id).ended_at is None
 
@@ -2072,7 +2159,7 @@ def test_claim_task_recovers_from_invariant_leak(kanban_home):
 
 def test_cli_create_on_fresh_home_auto_inits(tmp_path, monkeypatch):
     """First CLI action on an empty HERMES_HOME must not error with
-    'no such table: tasks' — init_db auto-runs now."""
+    an uninitialized board — init_db auto-runs now."""
     home = tmp_path / ".hermes"
     home.mkdir()
     monkeypatch.setenv("HERMES_HOME", str(home))
@@ -2092,8 +2179,10 @@ def test_cli_create_on_fresh_home_auto_inits(tmp_path, monkeypatch):
     import json as _json
     out = _json.loads(r.stdout)
     assert out["status"] == "ready"
-    # DB file exists now.
-    assert (home / "kanban.db").exists()
+    # Vault store exists now (task JSON + aggregate files, not kanban.db).
+    store = home / "kanban" / "boards" / "default"
+    assert (store / "links.json").exists()
+    assert any(store.glob("t_*.json"))
 
 
 def test_connect_auto_inits_fresh_db(tmp_path, monkeypatch):
@@ -2164,10 +2253,7 @@ def test_unblock_invariant_recovery(kanban_home):
         kb.claim_task(conn, tid)
         leaked_run_id = kb.latest_run(conn, tid).id
         # Force the bad state.
-        conn.execute(
-            "UPDATE tasks SET status = 'blocked' WHERE id = ?", (tid,),
-        )
-        conn.commit()
+        _seed_task(conn, tid, status="blocked")
         # current_run_id is still set; run is still open.
         assert kb.get_task(conn, tid).current_run_id == leaked_run_id
         assert kb.get_run(conn, leaked_run_id).ended_at is None
@@ -2221,14 +2307,10 @@ def test_migration_backfill_idempotent_under_re_run(tmp_path, monkeypatch):
     try:
         tid = kb.create_task(conn, title="legacy inflight", assignee="worker")
         now = int(time.time())
-        conn.execute(
-            "UPDATE tasks SET status='running', claim_lock='old', "
-            "claim_expires=?, started_at=?, current_run_id=NULL WHERE id=?",
-            (now + 900, now, tid),
-        )
+        _seed_task(conn, tid, status="running", claim_lock="old",
+                   claim_expires=now + 900, started_at=now, current_run_id=None)
         # Drop any synthetic run the normal claim path would have made.
-        conn.execute("DELETE FROM task_runs WHERE task_id=?", (tid,))
-        conn.commit()
+        _delete_runs_for(conn, tid)
 
         # Re-run init_db 3x — each should detect the orphan-inflight and
         # install exactly ONE run row, not three.
@@ -2380,13 +2462,9 @@ def test_cli_show_clamps_negative_elapsed(kanban_home):
     try:
         tid = kb.create_task(conn, title="time-skewed", assignee="worker")
         kb.claim_task(conn, tid)
-        # Force a future started_at via raw SQL — simulates NTP jump.
+        # Force a future started_at via the run record — simulates NTP jump.
         future = int(time.time()) + 3600
-        conn.execute(
-            "UPDATE task_runs SET started_at = ? WHERE task_id = ?",
-            (future, tid),
-        )
-        conn.commit()
+        _seed_run(conn, kb.get_task(conn, tid).current_run_id, started_at=future)
         # Complete normally (ended_at < started_at now)
         kb.complete_task(conn, tid, summary="after skew")
     finally:
@@ -2477,11 +2555,7 @@ def test_build_worker_context_caps_prior_attempts(kanban_home):
             kb.claim_task(conn, tid)
             kb._end_run(conn, tid, outcome="reclaimed",
                         summary=f"attempt {i} summary")
-            conn.execute(
-                "UPDATE tasks SET status='ready', claim_lock=NULL, "
-                "claim_expires=NULL WHERE id=?", (tid,),
-            )
-            conn.commit()
+            _seed_task(conn, tid, status="ready", claim_lock=None, claim_expires=None)
 
         ctx = kb.build_worker_context(conn, tid)
         # Check: only _CTX_MAX_PRIOR_ATTEMPTS attempt headers present
@@ -2538,11 +2612,7 @@ def test_build_worker_context_caps_huge_summary(kanban_home):
         kb.claim_task(conn, tid)
         huge = "X" * (1024 * 1024)  # 1 MB
         kb._end_run(conn, tid, outcome="reclaimed", summary=huge)
-        conn.execute(
-            "UPDATE tasks SET status='ready', claim_lock=NULL, "
-            "claim_expires=NULL WHERE id=?", (tid,),
-        )
-        conn.commit()
+        _seed_task(conn, tid, status="ready", claim_lock=None, claim_expires=None)
 
         ctx = kb.build_worker_context(conn, tid)
         # Much smaller than 1 MB
@@ -2784,263 +2854,124 @@ def test_cli_show_renders_skills(kanban_home):
     assert "translation" in shown
 
 
-def test_legacy_db_without_skills_column_migrates(tmp_path):
-    """_migrate_add_optional_columns is idempotent and adds skills
-    when absent. Run it twice on a pared-down schema to confirm."""
-    import sqlite3
-    db_path = tmp_path / "legacy.db"
-    conn = sqlite3.connect(str(db_path))
-    conn.row_factory = sqlite3.Row
-    # Build a pared-down legacy tasks table that lacks all the
-    # optional columns _migrate_add_optional_columns knows how to
-    # add. We deliberately omit `skills` so we can observe its
-    # introduction.
-    conn.execute("""
-        CREATE TABLE tasks (
-            id TEXT PRIMARY KEY,
-            title TEXT NOT NULL,
-            status TEXT NOT NULL,
-            created_at INTEGER NOT NULL
-        )
-    """)
-    # task_events is also touched by the migrator for run_id backfill.
-    conn.execute("""
-        CREATE TABLE task_events (
-            id INTEGER PRIMARY KEY AUTOINCREMENT,
-            task_id TEXT NOT NULL,
-            kind TEXT NOT NULL,
-            payload TEXT,
-            created_at INTEGER NOT NULL
-        )
-    """)
-    conn.execute(
-        "INSERT INTO tasks (id, title, status, created_at) "
-        "VALUES ('legacy', 'old task', 'ready', 1)"
-    )
-    conn.commit()
+def test_legacy_db_without_skills_column_migrates(kanban_home):
+    """Vault equivalent of the old pared-down-schema test: a task JSON
+    record that lacks the optional ``skills`` key must still load, with
+    ``Task.skills`` defaulting to None, and the migration pass must be
+    idempotent on it."""
+    conn = kb.connect()
+    try:
+        tid = kb.create_task(conn, title="old task")
+        # Drop the optional key from the stored record, as a
+        # pre-skills-era record would lack it.
+        path = kb.kanban_store_dir() / f"{tid}.json"
+        data = json.loads(path.read_text(encoding="utf-8"))
+        data.pop("skills", None)
+        path.write_text(json.dumps(data, indent=2) + "\n", encoding="utf-8")
+    finally:
+        conn.close()
 
-    before = {r[1] for r in conn.execute("PRAGMA table_info(tasks)")}
-    assert "skills" not in before
-
-    # Run the migrator directly — the same function connect() calls.
-    kb._migrate_add_optional_columns(conn)
-    after = {r[1] for r in conn.execute("PRAGMA table_info(tasks)")}
-    assert "skills" in after, f"migration did not add skills column: {after}"
-
-    # Idempotent: running again must not raise.
-    kb._migrate_add_optional_columns(conn)
-
-    # Legacy row has skills=NULL -> Task.skills=None.
-    row = conn.execute("SELECT * FROM tasks WHERE id = 'legacy'").fetchone()
-    # from_row needs additional columns; build a Task manually via the
-    # path from_row takes for a skills NULL/missing.
-    keys = set(row.keys())
-    assert "skills" in keys
-    assert row["skills"] is None
-    conn.close()
+    with kb.connect() as conn2:
+        task = kb.get_task(conn2, tid)
+        assert task.skills is None
+        # Migration pass is idempotent and must not raise.
+        kb._migrate_add_optional_columns(conn2)
+        kb._migrate_add_optional_columns(conn2)
+        assert kb.get_task(conn2, tid).skills is None
 
 
-def test_legacy_spawn_failure_columns_are_copied_not_renamed(tmp_path):
-    """Legacy failure counters survive migration without fragile column renames."""
-    import sqlite3
-    db_path = tmp_path / "legacy-failures.db"
-    conn = sqlite3.connect(str(db_path))
-    conn.row_factory = sqlite3.Row
-    conn.execute("""
-        CREATE TABLE tasks (
-            id TEXT PRIMARY KEY,
-            title TEXT NOT NULL,
-            body TEXT,
-            assignee TEXT,
-            status TEXT NOT NULL,
-            priority INTEGER DEFAULT 0,
-            created_by TEXT,
-            created_at INTEGER NOT NULL,
-            started_at INTEGER,
-            completed_at INTEGER,
-            workspace_kind TEXT NOT NULL DEFAULT 'scratch',
-            workspace_path TEXT,
-            claim_lock TEXT,
-            claim_expires INTEGER,
-            tenant TEXT,
-            result TEXT,
-            idempotency_key TEXT,
-            spawn_failures INTEGER NOT NULL DEFAULT 0,
-            worker_pid INTEGER,
-            last_spawn_error TEXT
-        )
-    """)
-    conn.execute("""
-        CREATE TABLE task_events (
-            id INTEGER PRIMARY KEY AUTOINCREMENT,
-            task_id TEXT NOT NULL,
-            kind TEXT NOT NULL,
-            payload TEXT,
-            created_at INTEGER NOT NULL
-        )
-    """)
-    # task_events is required: _migrate_add_optional_columns also runs a
-    # PRAGMA on it to back-fill the run_id column and raises
-    # OperationalError if the table is absent.
-    conn.execute(
-        "INSERT INTO tasks "
-        "(id, title, body, assignee, status, priority, created_by, created_at, "
-        "started_at, completed_at, workspace_kind, workspace_path, claim_lock, "
-        "claim_expires, tenant, result, idempotency_key, spawn_failures, "
-        "worker_pid, last_spawn_error) "
-        "VALUES ('legacy', 'old task', NULL, 'default', 'ready', 0, NULL, 1, "
-        "NULL, NULL, 'scratch', NULL, NULL, NULL, NULL, NULL, NULL, 4, NULL, "
-        "'missing profile')"
-    )
-    conn.commit()
+def test_legacy_spawn_failure_columns_are_copied_not_renamed(kanban_home):
+    """Legacy failure counters survive migration without fragile renames:
+    a record carrying only the old ``spawn_failures`` /
+    ``last_spawn_error`` keys must read back through the new
+    ``consecutive_failures`` / ``last_failure_error`` fields."""
+    conn = kb.connect()
+    try:
+        tid = kb.create_task(conn, title="old task", assignee="default")
+        path = kb.kanban_store_dir() / f"{tid}.json"
+        data = json.loads(path.read_text(encoding="utf-8"))
+        data.pop("consecutive_failures", None)
+        data.pop("last_failure_error", None)
+        data["spawn_failures"] = 4
+        data["last_spawn_error"] = "missing profile"
+        path.write_text(json.dumps(data, indent=2) + "\n", encoding="utf-8")
+    finally:
+        conn.close()
 
-    kb._migrate_add_optional_columns(conn)
-    cols = {r[1] for r in conn.execute("PRAGMA table_info(tasks)")}
-    assert "spawn_failures" in cols
-    assert "consecutive_failures" in cols
-    assert "last_spawn_error" in cols
-    assert "last_failure_error" in cols
-
-    row = conn.execute("SELECT * FROM tasks WHERE id = 'legacy'").fetchone()
-    assert row["consecutive_failures"] == 4
-    assert row["last_failure_error"] == "missing profile"
-    task = kb.Task.from_row(row)
-    assert task.consecutive_failures == 4
-    assert task.last_failure_error == "missing profile"
-
-    kb._migrate_add_optional_columns(conn)
-    row_again = conn.execute("SELECT * FROM tasks WHERE id = 'legacy'").fetchone()
-    assert row_again["consecutive_failures"] == 4
-    assert row_again["last_failure_error"] == "missing profile"
-    conn.close()
+    with kb.connect() as conn2:
+        # Raw-record fallback mapping (the from_dict contract).
+        raw = _task_file(tid)
+        task = kb.Task.from_dict(raw)
+        assert task.consecutive_failures == 4
+        assert task.last_failure_error == "missing profile"
+        assert kb.get_task(conn2, tid).consecutive_failures == 4
+        assert kb.get_task(conn2, tid).last_failure_error == "missing profile"
+        kb._migrate_add_optional_columns(conn2)
+        kb._migrate_add_optional_columns(conn2)
+        assert kb.get_task(conn2, tid).consecutive_failures == 4
+        assert kb.get_task(conn2, tid).last_failure_error == "missing profile"
 
 
-def test_legacy_migration_no_legacy_columns_at_all(tmp_path):
-    """Scenario A: DB has neither spawn_failures nor consecutive_failures.
+def test_legacy_migration_no_legacy_columns_at_all(kanban_home):
+    """Scenario A: record has neither legacy nor new counter keys.
+    This is the Vault analogue of the old issue #20842 crash scenario
+    (a very old record predating the counter fields entirely). The
+    migration must not raise and must default the counters to 0/None
+    without synthesising legacy keys."""
+    conn = kb.connect()
+    try:
+        tid = kb.create_task(conn, title="ancient task")
+        path = kb.kanban_store_dir() / f"{tid}.json"
+        data = json.loads(path.read_text(encoding="utf-8"))
+        for key in ("spawn_failures", "consecutive_failures",
+                    "last_spawn_error", "last_failure_error"):
+            data.pop(key, None)
+        path.write_text(json.dumps(data, indent=2) + "\n", encoding="utf-8")
+    finally:
+        conn.close()
 
-    This is the exact crash scenario from issue #20842 — a very old DB that
-    predates the spawn_failures column entirely.  The old RENAME COLUMN path
-    raised ``sqlite3.OperationalError: no such column: spawn_failures``.
-    The ADD-first approach adds consecutive_failures with default 0.
-    """
-    import sqlite3
-
-    db_path = tmp_path / "ancient.db"
-    conn = sqlite3.connect(str(db_path))
-    conn.row_factory = sqlite3.Row
-    conn.execute("""
-        CREATE TABLE tasks (
-            id TEXT PRIMARY KEY,
-            title TEXT NOT NULL,
-            status TEXT NOT NULL,
-            created_at INTEGER NOT NULL
-        )
-    """)
-    # task_events is required: _migrate_add_optional_columns also runs a
-    # PRAGMA on it to back-fill the run_id column and raises
-    # OperationalError if the table is absent.
-    conn.execute("""
-        CREATE TABLE task_events (
-            id INTEGER PRIMARY KEY AUTOINCREMENT,
-            task_id TEXT NOT NULL,
-            kind TEXT NOT NULL,
-            payload TEXT,
-            created_at INTEGER NOT NULL
-        )
-    """)
-    conn.execute(
-        "INSERT INTO tasks (id, title, status, created_at) "
-        "VALUES ('t1', 'ancient task', 'ready', 1)"
-    )
-    conn.commit()
-
-    # Must not raise (this was the crash before this fix).
-    kb._migrate_add_optional_columns(conn)
-
-    cols = {r[1] for r in conn.execute("PRAGMA table_info(tasks)")}
-    assert "consecutive_failures" in cols, "migration must add consecutive_failures"
-    assert "last_failure_error" in cols, "migration must add last_failure_error"
-    assert "spawn_failures" not in cols, "no legacy column should be synthesised"
-
-    row = conn.execute("SELECT * FROM tasks WHERE id = 't1'").fetchone()
-    assert row["consecutive_failures"] == 0
-    assert row["last_failure_error"] is None
-
-    # Idempotent second run must not raise either.
-    kb._migrate_add_optional_columns(conn)
-    row_again = conn.execute("SELECT * FROM tasks WHERE id = 't1'").fetchone()
-    assert row_again["consecutive_failures"] == 0
-    assert row_again["last_failure_error"] is None
-    conn.close()
+    with kb.connect() as conn2:
+        # Must not raise (this was the crash before the old fix).
+        kb._migrate_add_optional_columns(conn2)
+        task = kb.get_task(conn2, tid)
+        assert task.consecutive_failures == 0
+        assert task.last_failure_error is None
+        # Idempotent second run must not raise either.
+        kb._migrate_add_optional_columns(conn2)
+        task = kb.get_task(conn2, tid)
+        assert task.consecutive_failures == 0
+        assert task.last_failure_error is None
 
 
-def test_legacy_migration_both_columns_already_present(tmp_path):
-    """Scenario D: DB already has both spawn_failures AND consecutive_failures.
+def test_legacy_migration_both_columns_already_present(kanban_home):
+    """Scenario D: record already has both legacy and new counter keys
+    (a partially-migrated record). The migration must be a complete
+    no-op and must not zero-out the existing counter."""
+    conn = kb.connect()
+    try:
+        tid = kb.create_task(conn, title="partial task")
+        path = kb.kanban_store_dir() / f"{tid}.json"
+        data = json.loads(path.read_text(encoding="utf-8"))
+        data["spawn_failures"] = 2
+        data["consecutive_failures"] = 3
+        data["last_spawn_error"] = "old error"
+        data["last_failure_error"] = "new error"
+        path.write_text(json.dumps(data, indent=2) + "\n", encoding="utf-8")
+    finally:
+        conn.close()
 
-    Represents a partially-migrated DB (e.g. user recovered manually after the
-    #20842 crash).  The migration must be a complete no-op and must not
-    zero-out the existing counter.
-    """
-    import sqlite3
+    with kb.connect() as conn2:
+        kb._migrate_add_optional_columns(conn2)
+        task = kb.get_task(conn2, tid)
+        # New counter must not be reset by the migration.
+        assert task.consecutive_failures == 3, "migration must not overwrite existing counter"
+        assert task.last_failure_error == "new error", "migration must not overwrite existing error"
+        # Idempotent second run must not modify values or raise.
+        kb._migrate_add_optional_columns(conn2)
+        task = kb.get_task(conn2, tid)
+        assert task.consecutive_failures == 3
+        assert task.last_failure_error == "new error"
 
-    db_path = tmp_path / "partial.db"
-    conn = sqlite3.connect(str(db_path))
-    conn.row_factory = sqlite3.Row
-    conn.execute("""
-        CREATE TABLE tasks (
-            id TEXT PRIMARY KEY,
-            title TEXT NOT NULL,
-            status TEXT NOT NULL,
-            created_at INTEGER NOT NULL,
-            spawn_failures INTEGER NOT NULL DEFAULT 0,
-            consecutive_failures INTEGER NOT NULL DEFAULT 0,
-            last_spawn_error TEXT,
-            last_failure_error TEXT
-        )
-    """)
-    # task_events required for the run_id back-fill PRAGMA inside the migrator.
-    conn.execute("""
-        CREATE TABLE task_events (
-            id INTEGER PRIMARY KEY AUTOINCREMENT,
-            task_id TEXT NOT NULL,
-            kind TEXT NOT NULL,
-            payload TEXT,
-            created_at INTEGER NOT NULL
-        )
-    """)
-    conn.execute(
-        "INSERT INTO tasks (id, title, status, created_at, spawn_failures, "
-        "consecutive_failures, last_spawn_error, last_failure_error) "
-        "VALUES ('t2', 'partial task', 'ready', 1, 2, 3, 'old error', 'new error')"
-    )
-    conn.commit()
-
-    kb._migrate_add_optional_columns(conn)
-
-    row = conn.execute("SELECT * FROM tasks WHERE id = 't2'").fetchone()
-    # consecutive_failures must not be reset by the migration.
-    assert row["consecutive_failures"] == 3, "migration must not overwrite existing counter"
-    assert row["last_failure_error"] == "new error", "migration must not overwrite existing error"
-    # Legacy column is preserved harmlessly.
-    assert row["spawn_failures"] == 2
-
-    # Schema must be unchanged — no spurious ADD or DROP.
-    cols_after = {r[1] for r in conn.execute("PRAGMA table_info(tasks)")}
-    assert "consecutive_failures" in cols_after
-    assert "last_failure_error" in cols_after
-    assert "spawn_failures" in cols_after  # legacy preserved
-
-    # Idempotent second run must not modify values or raise.
-    kb._migrate_add_optional_columns(conn)
-    row_again = conn.execute("SELECT * FROM tasks WHERE id = 't2'").fetchone()
-    assert row_again["consecutive_failures"] == 3
-    assert row_again["last_failure_error"] == "new error"
-    conn.close()
-
-
-# ---------------------------------------------------------------------------
-# Gateway-embedded dispatcher: config, CLI warnings, daemon deprecation stub
-# ---------------------------------------------------------------------------
 
 def test_config_default_dispatch_in_gateway_is_true():
     """Default config must enable gateway-embedded dispatch out of the box.
@@ -3311,14 +3242,10 @@ def test_complete_with_created_cards_all_verified_records_manifest(kanban_home):
             created_cards=[c1, c2],
         )
         assert ok is True
-        evs = list(conn.execute(
-            "SELECT kind, payload FROM task_events WHERE task_id=? ORDER BY id",
-            (parent,),
-        ))
-        completed = [e for e in evs if e["kind"] == "completed"]
+        evs = kb.list_events(conn, parent)
+        completed = [e for e in evs if e.kind == "completed"]
         assert len(completed) == 1
-        import json as _json
-        payload = _json.loads(completed[0]["payload"])
+        payload = completed[0].payload
         assert payload.get("verified_cards") == [c1, c2]
     finally:
         conn.close()
@@ -3343,18 +3270,10 @@ def test_complete_with_phantom_created_cards_raises_and_audits(kanban_home):
         assert excinfo.value.phantom == [phantom_id]
 
         # Task still in prior state (ready, not done).
-        row = conn.execute(
-            "SELECT status FROM tasks WHERE id=?", (parent,),
-        ).fetchone()
-        assert row["status"] == "ready"
+        assert kb.get_task(conn, parent).status == "ready"
 
         # Audit event landed.
-        kinds = [
-            r["kind"] for r in conn.execute(
-                "SELECT kind FROM task_events WHERE task_id=? ORDER BY id",
-                (parent,),
-            )
-        ]
+        kinds = [e.kind for e in kb.list_events(conn, parent)]
         assert "completion_blocked_hallucination" in kinds
         assert "completed" not in kinds
     finally:
@@ -3408,13 +3327,8 @@ def test_complete_accepts_cross_worker_card_when_linked_as_child(kanban_home):
         )
         assert ok is True
         # The card should appear in the completed event's verified_cards list.
-        import json as _json
-        row = conn.execute(
-            "SELECT payload FROM task_events "
-            "WHERE task_id=? AND kind='completed' ORDER BY id DESC LIMIT 1",
-            (parent,),
-        ).fetchone()
-        payload = _json.loads(row["payload"])
+        completed = [e for e in kb.list_events(conn, parent) if e.kind == "completed"]
+        payload = completed[-1].payload
         assert other in payload.get("verified_cards", [])
     finally:
         conn.close()
@@ -3432,17 +3346,13 @@ def test_complete_prose_scan_flags_nonexistent_ids(kanban_home):
             summary="also saw t_abcd1234ffff failing in CI",
         )
         assert ok is True
-        kinds_and_payloads = list(conn.execute(
-            "SELECT kind, payload FROM task_events WHERE task_id=? ORDER BY id",
-            (parent,),
-        ))
-        kinds = [r["kind"] for r in kinds_and_payloads]
+        evs = kb.list_events(conn, parent)
+        kinds = [e.kind for e in evs]
         assert "suspected_hallucinated_references" in kinds
-        import json as _json
         susp = [
-            _json.loads(r["payload"])
-            for r in kinds_and_payloads
-            if r["kind"] == "suspected_hallucinated_references"
+            e.payload
+            for e in evs
+            if e.kind == "suspected_hallucinated_references"
         ][0]
         assert "t_abcd1234ffff" in susp["phantom_refs"]
     finally:
@@ -3460,12 +3370,7 @@ def test_complete_prose_scan_ignores_existing_ids(kanban_home):
             summary=f"depended on {other}, now done",
         )
         assert ok is True
-        kinds = [
-            r["kind"] for r in conn.execute(
-                "SELECT kind FROM task_events WHERE task_id=? ORDER BY id",
-                (parent,),
-            )
-        ]
+        kinds = [e.kind for e in kb.list_events(conn, parent)]
         assert "suspected_hallucinated_references" not in kinds
     finally:
         conn.close()
@@ -3497,19 +3402,10 @@ def test_reclaim_task_resets_running_to_ready(kanban_home, monkeypatch):
                 state["alive"] = False
 
         monkeypatch.setattr(_kb, "_pid_alive", lambda _pid: state["alive"])
-        conn.execute(
-            "UPDATE tasks SET status='running', claim_lock=?, claim_expires=?, "
-            "worker_pid=? WHERE id=?",
-            (lock, future, 12345, t),
-        )
-        conn.execute(
-            "INSERT INTO task_runs (task_id, status, claim_lock, claim_expires, "
-            "worker_pid, started_at) VALUES (?, 'running', ?, ?, ?, ?)",
-            (t, lock, future, 12345, int(time.time())),
-        )
-        run_id = conn.execute("SELECT last_insert_rowid()").fetchone()[0]
-        conn.execute("UPDATE tasks SET current_run_id=? WHERE id=?", (run_id, t))
-        conn.commit()
+        kb.claim_task(conn, t, claimer=lock)
+        run_id = kb.get_task(conn, t).current_run_id
+        _seed_task(conn, t, claim_expires=future, worker_pid=12345)
+        _seed_run(conn, run_id, claim_expires=future, worker_pid=12345)
 
         # release_stale_claims should NOT reclaim (not expired).
         assert kb.release_stale_claims(conn) == 0
@@ -3517,21 +3413,15 @@ def test_reclaim_task_resets_running_to_ready(kanban_home, monkeypatch):
         # reclaim_task should work immediately.
         assert kb.reclaim_task(conn, t, reason="test reason", signal_fn=_signal) is True
 
-        row = conn.execute(
-            "SELECT status, claim_lock, worker_pid FROM tasks WHERE id=?",
-            (t,),
-        ).fetchone()
-        assert row["status"] == "ready"
-        assert row["claim_lock"] is None
-        assert row["worker_pid"] is None
+        task = kb.get_task(conn, t)
+        assert task.status == "ready"
+        assert task.claim_lock is None
+        assert task.worker_pid is None
 
-        import json as _json
         reclaim_evs = [
-            _json.loads(r["payload"])
-            for r in conn.execute(
-                "SELECT payload FROM task_events WHERE task_id=? AND kind='reclaimed'",
-                (t,),
-            )
+            e.payload
+            for e in kb.list_events(conn, t)
+            if e.kind == "reclaimed"
         ]
         assert len(reclaim_evs) == 1
         assert reclaim_evs[0].get("manual") is True
@@ -3560,17 +3450,10 @@ def test_reassign_task_refuses_running_without_reclaim_first(kanban_home):
     conn = kb.connect()
     try:
         t = kb.create_task(conn, title="running", assignee="orig")
-        conn.execute(
-            "UPDATE tasks SET status='running', claim_lock=? WHERE id=?",
-            ("live", t),
-        )
-        conn.commit()
+        _seed_task(conn, t, status="running", claim_lock="live")
         assert kb.reassign_task(conn, t, "new") is False
         # Assignee unchanged.
-        row = conn.execute(
-            "SELECT assignee FROM tasks WHERE id=?", (t,),
-        ).fetchone()
-        assert row["assignee"] == "orig"
+        assert kb.get_task(conn, t).assignee == "orig"
     finally:
         conn.close()
 
@@ -3585,30 +3468,19 @@ def test_reassign_task_with_reclaim_first_switches_profile(kanban_home):
         t = kb.create_task(conn, title="switch me", assignee="orig")
         lock = secrets.token_hex(8)
         future = int(time.time()) + 3600
-        conn.execute(
-            "UPDATE tasks SET status='running', claim_lock=?, claim_expires=?, "
-            "worker_pid=? WHERE id=?",
-            (lock, future, 99999, t),
-        )
-        conn.execute(
-            "INSERT INTO task_runs (task_id, status, claim_lock, claim_expires, "
-            "worker_pid, started_at) VALUES (?, 'running', ?, ?, ?, ?)",
-            (t, lock, future, 99999, int(time.time())),
-        )
-        run_id = conn.execute("SELECT last_insert_rowid()").fetchone()[0]
-        conn.execute("UPDATE tasks SET current_run_id=? WHERE id=?", (run_id, t))
-        conn.commit()
+        kb.claim_task(conn, t, claimer=lock)
+        _seed_task(conn, t, claim_expires=future, worker_pid=99999)
+        _seed_run(conn, kb.get_task(conn, t).current_run_id,
+                  claim_expires=future, worker_pid=99999)
 
         assert kb.reassign_task(
             conn, t, "new-profile",
             reclaim_first=True, reason="switch model",
         ) is True
 
-        row = conn.execute(
-            "SELECT assignee, status FROM tasks WHERE id=?", (t,),
-        ).fetchone()
-        assert row["assignee"] == "new-profile"
-        assert row["status"] == "ready"
+        task = kb.get_task(conn, t)
+        assert task.assignee == "new-profile"
+        assert task.status == "ready"
     finally:
         conn.close()
 
@@ -3647,15 +3519,8 @@ def test_enforce_max_runtime_increments_consecutive_failures(kanban_home, monkey
         # query pulls from.
         with kb.write_txn(conn):
             long_ago = int(time.time()) - 30
-            conn.execute(
-                "UPDATE tasks SET started_at = ? WHERE id = ?",
-                (long_ago, tid),
-            )
-            conn.execute(
-                "UPDATE task_runs SET started_at = ? "
-                "WHERE id = (SELECT current_run_id FROM tasks WHERE id = ?)",
-                (long_ago, tid),
-            )
+            _seed_task(conn, tid, started_at=long_ago)
+            _seed_run(conn, kb.get_task(conn, tid).current_run_id, started_at=long_ago)
         before = kb.get_task(conn, tid)
         assert before.consecutive_failures == 0
 
@@ -3697,35 +3562,13 @@ def test_repeated_timeouts_trip_the_circuit_breaker(kanban_home, monkeypatch):
         for _ in range(3):
             # Fresh claim + "started long ago" each iteration.
             with kb.write_txn(conn):
-                conn.execute(
-                    "UPDATE tasks SET status='running', claim_lock=?, "
-                    "claim_expires=?, worker_pid=?, started_at=? "
-                    "WHERE id=?",
-                    (
-                        f"{_kb._claimer_id().split(':', 1)[0]}:lock",
-                        int(time.time()) + 3600,
-                        os.getpid(),
-                        int(time.time()) - 30,
-                        tid,
-                    ),
-                )
-                conn.execute(
-                    "INSERT INTO task_runs (task_id, status, claim_lock, "
-                    "claim_expires, worker_pid, started_at) "
-                    "VALUES (?, 'running', ?, ?, ?, ?)",
-                    (
-                        tid,
-                        f"{_kb._claimer_id().split(':', 1)[0]}:lock",
-                        int(time.time()) + 3600,
-                        os.getpid(),
-                        int(time.time()) - 30,
-                    ),
-                )
-                rid = conn.execute("SELECT last_insert_rowid()").fetchone()[0]
-                conn.execute(
-                    "UPDATE tasks SET current_run_id=? WHERE id=?",
-                    (rid, tid),
-                )
+                lock = f"{_kb._claimer_id().split(':', 1)[0]}:lock"
+                kb.claim_task(conn, tid, claimer=lock)
+                _seed_task(conn, tid, claim_expires=int(time.time()) + 3600,
+                           worker_pid=os.getpid(), started_at=int(time.time()) - 30)
+                _seed_run(conn, kb.get_task(conn, tid).current_run_id,
+                          claim_expires=int(time.time()) + 3600,
+                          worker_pid=os.getpid(), started_at=int(time.time()) - 30)
             state["sent_term"] = False
             # Lower the threshold by monkeypatching the default.
             monkeypatch.setattr(_kb, "DEFAULT_FAILURE_LIMIT", 3)
@@ -3738,12 +3581,7 @@ def test_repeated_timeouts_trip_the_circuit_breaker(kanban_home, monkeypatch):
             f"expected blocked after 3 timeouts, got {final.status}"
         assert final.consecutive_failures >= 3
         # ``gave_up`` event emitted (plus 3 ``timed_out`` events).
-        kinds = [
-            r["kind"] for r in conn.execute(
-                "SELECT kind FROM task_events WHERE task_id=? ORDER BY id",
-                (tid,),
-            )
-        ]
+        kinds = [e.kind for e in kb.list_events(conn, tid)]
         assert kinds.count("timed_out") >= 3
         assert "gave_up" in kinds
     finally:
@@ -3870,23 +3708,12 @@ def test_reclaim_task_clears_failure_counter(kanban_home):
         tid = kb.create_task(conn, title="stuck", assignee="worker")
         lock = secrets.token_hex(4)
         with kb.write_txn(conn):
-            conn.execute(
-                "UPDATE tasks SET status='running', claim_lock=?, "
-                "claim_expires=?, worker_pid=?, consecutive_failures=4, "
-                "last_failure_error='prior issue' WHERE id=?",
-                (lock, int(time.time()) + 3600, 12345, tid),
-            )
-            conn.execute(
-                "INSERT INTO task_runs (task_id, status, claim_lock, "
-                "claim_expires, worker_pid, started_at) "
-                "VALUES (?, 'running', ?, ?, ?, ?)",
-                (tid, lock, int(time.time()) + 3600, 12345, int(time.time())),
-            )
-            rid = conn.execute("SELECT last_insert_rowid()").fetchone()[0]
-            conn.execute(
-                "UPDATE tasks SET current_run_id=? WHERE id=?",
-                (rid, tid),
-            )
+            kb.claim_task(conn, tid, claimer=lock)
+            _seed_task(conn, tid, claim_expires=int(time.time()) + 3600,
+                       worker_pid=12345, consecutive_failures=4,
+                       last_failure_error="prior issue")
+            _seed_run(conn, kb.get_task(conn, tid).current_run_id,
+                      claim_expires=int(time.time()) + 3600, worker_pid=12345)
 
         ok = kb.reclaim_task(conn, tid, reason="operator fixed config")
         assert ok
