@@ -94,7 +94,7 @@ INSTRUCTIONS = (
     "lists personal muse.ai sessions; muse_list_sessions lists only Bridge "
     "work orders. "
     "muse_get_status and muse_get_result show progress and replies. "
-    "Muse replies alone are not proof of completed code changes."
+    "Muse replies do not prove completed code changes."
 )
 
 
