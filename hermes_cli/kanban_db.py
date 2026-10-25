@@ -237,20 +237,34 @@ def kanban_store_dir(
     board: Optional[str] = None,
     db_path: Optional[Path] = None,
 ) -> Path:
-    """Return the Vault JSON store directory for a board.
+    """Resolve a Kanban store; never let legacy DB pins bypass a configured Vault.
 
-    Resolution: explicit ``db_path`` → pin-derived dir; Vault env →
-    ``<vault>/06_Automation/Hermes/Kanban/<slug>/``; board slug from
-    arg / ``HERMES_KANBAN_BOARD`` / current board → ``board_dir()``;
-    legacy pin only (no board slug source) → pin-derived dir.
+    A configured Vault is authoritative, even when callers still pass a
+    legacy ``db_path`` or set ``HERMES_KANBAN_DB``. Explicit legacy
+    paths are rejected rather than silently creating a second store.
+    Until the remaining legacy callers/tests are migrated, the historical
+    non-Vault resolution is retained below and must not be used in the
+    Discord RP production runtime.
     """
+    vault = os.environ.get("HERMES_OBSIDIAN_VAULT", "").strip()
+    if vault:
+        if db_path is not None:
+            raise ValueError(
+                "explicit Kanban db_path is forbidden with HERMES_OBSIDIAN_VAULT"
+            )
+        root = Path(vault).expanduser()
+        if not root.is_dir():
+            raise ValueError("HERMES_OBSIDIAN_VAULT must be an existing directory")
+        slug = _normalize_board_slug(board) or get_current_board()
+        target = root / "06_Automation" / "Hermes" / "Kanban" / slug
+        # resolve() follows any existing intermediate symlinks, including
+        # ones that would redirect the Kanban subtree outside the Vault.
+        if not target.resolve().is_relative_to(root.resolve()):
+            raise ValueError("Kanban store path escapes HERMES_OBSIDIAN_VAULT")
+        return target
     if db_path is not None:
         return _pin_store_dir(Path(db_path).expanduser())
     slug_arg = _normalize_board_slug(board)
-    vault = os.environ.get("HERMES_OBSIDIAN_VAULT", "").strip()
-    if vault:
-        slug = slug_arg or get_current_board()
-        return Path(vault).expanduser() / "06_Automation" / "Hermes" / "Kanban" / slug
     if slug_arg is not None:
         return board_dir(slug_arg)
     board_env = os.environ.get("HERMES_KANBAN_BOARD", "").strip()
