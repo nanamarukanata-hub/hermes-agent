@@ -262,23 +262,7 @@ def kanban_store_dir(
         if not target.resolve().is_relative_to(root.resolve()):
             raise ValueError("Kanban store path escapes HERMES_OBSIDIAN_VAULT")
         return target
-    if db_path is not None:
-        return _pin_store_dir(Path(db_path).expanduser())
-    slug_arg = _normalize_board_slug(board)
-    if slug_arg is not None:
-        return board_dir(slug_arg)
-    board_env = os.environ.get("HERMES_KANBAN_BOARD", "").strip()
-    if board_env:
-        try:
-            normed = _normalize_board_slug(board_env)
-        except ValueError:
-            normed = None
-        if normed:
-            return board_dir(normed)
-    pin = os.environ.get("HERMES_KANBAN_DB", "").strip()
-    if pin:
-        return _pin_store_dir(Path(pin).expanduser())
-    return board_dir(get_current_board())
+    raise ValueError("HERMES_OBSIDIAN_VAULT is required for Kanban persistence")
 
 
 # Back-compat alias: the store directory is the board's data directory.
