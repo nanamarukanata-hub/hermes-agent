@@ -76,6 +76,22 @@ class ObsidianStateTests(unittest.TestCase):
         self.assertTrue(old_db.exists())
         self.assertFalse(list(Path(self.temp.name).rglob("*.db")))
 
+        # A byte-for-byte-equivalent retry is idempotent.
+        retry = migrate(old_db, commit=True)
+        self.assertEqual(retry["already_migrated"], 1)
+        self.assertEqual(retry["written"], 0)
+
+        # Matching messages and source do NOT prove the full session matches.
+        # Preserve changes made after import instead of silently claiming
+        # that a stale legacy record is already migrated.
+        self.db._edit("legacy1", lambda item: item.update(model="newer-model"))
+        with self.assertRaisesRegex(RuntimeError, "Conflicting Vault session"):
+            migrate(old_db)
+        with self.assertRaisesRegex(RuntimeError, "Conflicting Vault session"):
+            migrate(old_db, commit=True)
+        self.assertEqual(self.db.get_session("legacy1")["model"], "newer-model")
+        self.assertTrue(old_db.exists())
+
     def test_gateway_session_routing_is_inside_vault(self):
         from gateway.config import GatewayConfig
         from gateway.session import SessionStore
