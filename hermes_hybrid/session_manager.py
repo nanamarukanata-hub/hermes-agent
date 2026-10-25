@@ -75,7 +75,9 @@ class SessionManager:
     def restore(self, user_id: str, session_id: str) -> Session | None:
         # Unified layout: Sessions/<id>/metadata.json, user_id inside it.
         data = self.store.load_session(validate_id(session_id))
-        if not data:
+        if not data or data.get("user_id") != validate_id(user_id):
+            # Never restore another Discord user's session, including
+            # legacy records without an explicit owner.
             return None
         # RP character state survives a session reset: it is keyed by
         # (user, character), not by session id.
