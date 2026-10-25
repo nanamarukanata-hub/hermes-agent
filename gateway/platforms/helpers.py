@@ -241,10 +241,19 @@ class ThreadParticipationTracker:
         path = Path(vault).expanduser().resolve()
         if not path.is_dir():
             raise RuntimeError("Obsidian Vault directory does not exist")
-        target = path / "06_Automation" / "Hermes" / "GatewayRouting"
-        target.mkdir(parents=True, exist_ok=True)
-        if not target.resolve().is_relative_to(path):
-            raise RuntimeError("Thread state path escaped Obsidian Vault")
+        # Validate each component *before* creating it.  Checking only after
+        # mkdir(parents=True) can create directories outside the Vault through
+        # an existing symlinked parent, even if the call ultimately raises.
+        target = path
+        for component in ("06_Automation", "Hermes", "GatewayRouting"):
+            target = target / component
+            if target.is_symlink() or not target.resolve().is_relative_to(path):
+                raise RuntimeError("Thread state path escaped Obsidian Vault")
+            if target.exists() and not target.is_dir():
+                raise RuntimeError("Thread state path component is not a directory")
+            target.mkdir(exist_ok=True)
+            if target.is_symlink() or not target.resolve().is_relative_to(path):
+                raise RuntimeError("Thread state path escaped Obsidian Vault")
         state_file = target / f"{self._platform}_threads.json"
         # The directory check alone does not protect a symlinked JSON file.
         # Reject even dangling links before any read or write.
