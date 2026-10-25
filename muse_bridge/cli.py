@@ -3,8 +3,11 @@
 Usage:
     python3 -m muse_bridge.cli serve [--host 127.0.0.1] [--port 8765]
         [--state DIR] [--repos repos.yaml] [--token-file FILE] [--allow-no-auth]
+        [--public-url URL] [--oauth-approval-file FILE]
     python3 -m muse_bridge.cli create-token [--state DIR]
         # prints a token to stdout; store it outside the repo, never commit it
+    python3 -m muse_bridge.cli create-approval-key [--state DIR]
+        # prints an OAuth approval key to stdout; store it outside the repo
     python3 -m muse_bridge.cli status --state DIR --task TASK_ID
     python3 -m muse_bridge.cli complete --state DIR --task TASK_ID --result TEXT
         [--diff TEXT] [--test-results TEXT] [--failed]
@@ -55,8 +58,12 @@ def main(argv: list[str] | None = None) -> int:
     serve_p.add_argument("--repos", default=None)
     serve_p.add_argument("--token-file", default=None)
     serve_p.add_argument("--allow-no-auth", action="store_true")
+    serve_p.add_argument("--public-url", default=None)
+    serve_p.add_argument("--oauth-approval-file", default=None)
     token_p = sub.add_parser("create-token")
     token_p.add_argument("--state", default=None)
+    approval_p = sub.add_parser("create-approval-key")
+    approval_p.add_argument("--state", default=None)
     status_p = sub.add_parser("status")
     status_p.add_argument("--state", default=None)
     status_p.add_argument("--task", required=True)
@@ -69,14 +76,14 @@ def main(argv: list[str] | None = None) -> int:
     complete_p.add_argument("--failed", action="store_true")
     args = parser.parse_args(argv)
 
-    if args.command == "create-token":
-        token = secrets.token_urlsafe(32)
+    if args.command in ("create-token", "create-approval-key"):
+        value = secrets.token_urlsafe(32)
         state = _state_dir(args)
         state.mkdir(parents=True, exist_ok=True)
-        path = state / "token"
-        path.write_text(token + "\n", encoding="utf-8")
+        path = state / ("oauth_approval" if args.command == "create-approval-key" else "token")
+        path.write_text(value + "\n", encoding="utf-8")
         os.chmod(path, 0o600)
-        print(token)
+        print(value)
         print(f"(also saved to {path} with mode 0600; do not commit it)", file=sys.stderr)
         return 0
 
@@ -99,18 +106,30 @@ def main(argv: list[str] | None = None) -> int:
         return 0
 
     # serve
+    from .oauth import OAuthServer
     from .policy import load_repos
 
     token = _token(args)
-    if token is None and not args.allow_no_auth:
+    approval_key = os.environ.get("MUSE_BRIDGE_OAUTH_APPROVAL_KEY")
+    if approval_key is None and getattr(args, "oauth_approval_file", None):
+        path = Path(args.oauth_approval_file).expanduser()
+        if path.exists():
+            approval_key = path.read_text(encoding="utf-8").strip()
+    oauth = None
+    if getattr(args, "public_url", None):
+        if not approval_key:
+            print("error: --public-url requires an OAuth approval key: set MUSE_BRIDGE_OAUTH_APPROVAL_KEY or pass --oauth-approval-file.", file=sys.stderr)
+            return 2
+        oauth = OAuthServer(args.public_url, approval_key, _state_dir(args))
+    if token is None and oauth is None and not args.allow_no_auth:
         print("error: no token configured. Set MUSE_BRIDGE_TOKEN, pass --token-file, or pass --allow-no-auth (loopback only).", file=sys.stderr)
         return 2
-    if args.host not in ("127.0.0.1", "localhost", "::1") and token is None:
-        print("error: refusing to bind a non-loopback address without a token.", file=sys.stderr)
+    if args.host not in ("127.0.0.1", "localhost", "::1") and token is None and oauth is None:
+        print("error: refusing to bind a non-loopback address without a token or OAuth.", file=sys.stderr)
         return 2
     repos = load_repos(args.repos)
-    server = serve(args.host, args.port, store, repos, default_checkout=Path.cwd(), token=token)
-    print(f"muse-bridge {VERSION} listening on http://{args.host}:{args.port}/mcp (health: /health)", file=sys.stderr)
+    server = serve(args.host, args.port, store, repos, default_checkout=Path.cwd(), token=token, oauth=oauth)
+    print(f"muse-bridge {VERSION} listening on http://{args.host}:{args.port}/mcp (health: /health, oauth: {'on' if oauth else 'off'})", file=sys.stderr)
     try:
         server.serve_forever()
     except KeyboardInterrupt:

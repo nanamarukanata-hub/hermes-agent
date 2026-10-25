@@ -26,6 +26,8 @@ Security posture (standing boundary preserved):
 - Bearer token auth when configured; the token lives outside the
   repo (env ``MUSE_BRIDGE_TOKEN`` or a 0600 token file), never in
   code, logs, or commits,
+- OAuth 2.1 (``muse_bridge/oauth.py``) when a public URL and an
+  approval key are configured; tokens are stored only as hashes,
 - commits, pushes, deploys and deletions are never auto-executed;
   they require an explicit ``muse_approve`` call and Muse review,
 - only the repos listed in ``repos.yaml`` (default: hermes-agent,
