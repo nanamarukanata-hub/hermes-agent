@@ -8,7 +8,7 @@ Original plugin by dusterbloom (PR #2351), adapted to the MemoryProvider ABC.
 Config in $HERMES_HOME/config.yaml (profile-scoped):
   plugins:
     hermes-memory-store:
-      db_path: $HERMES_HOME/memory_store.db   # omit to use the default
+      db_path: <vault>/06_Automation/Hermes/HolographicMemory   # omit to use the default
       auto_extract: false
       default_trust: 0.5
       min_trust_threshold: 0.3
@@ -184,9 +184,7 @@ class HolographicMemoryProvider(MemoryProvider):
         if not self._store:
             return ""
         try:
-            total = self._store._conn.execute(
-                "SELECT COUNT(*) FROM facts"
-            ).fetchone()[0]
+            total = len(self._store.list_facts(limit=100000))
         except Exception:
             total = 0
         if total == 0:

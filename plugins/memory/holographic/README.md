@@ -1,6 +1,6 @@
 # Holographic Memory Provider
 
-Local SQLite fact store with FTS5 search, trust scoring, entity resolution, and HRR-based compositional retrieval.
+Local Vault fact store with keyword search, trust scoring, entity resolution, and HRR-based compositional retrieval.
 
 ## Requirements
 
