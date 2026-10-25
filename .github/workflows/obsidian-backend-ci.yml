@@ -11,6 +11,8 @@ on:
       - 'tests/test_obsidian_session_state.py'
       - 'scripts/migrate_kanban_to_vault.py'
       - 'tests/test_kanban_migration_guards.py'
+      - 'hermes_cli/kanban_db.py'
+      - 'tests/test_kanban_vault_metadata.py'
   pull_request:
     branches: [main]
     paths:
@@ -22,6 +24,8 @@ on:
       - 'tests/test_obsidian_session_state.py'
       - 'scripts/migrate_kanban_to_vault.py'
       - 'tests/test_kanban_migration_guards.py'
+      - 'hermes_cli/kanban_db.py'
+      - 'tests/test_kanban_vault_metadata.py'
   workflow_dispatch:
 jobs:
   obsidian-storage:
@@ -38,5 +42,7 @@ jobs:
         run: python -m unittest discover -s tests -t . -p 'test_obsidian_session_state.py' -v
       - name: Kanban read-only migration safety regression
         run: python -m unittest discover -s tests -t . -p 'test_kanban_migration_guards.py' -v
+      - name: Kanban Vault metadata regression
+        run: python -m unittest discover -s tests -t . -p 'test_kanban_vault_metadata.py' -v
       - name: Syntax verification
         run: python -m py_compile hermes_state.py hermes_obsidian_state.py scripts/migrate_sessions_to_obsidian.py scripts/migrate_kanban_to_vault.py gateway/session.py gateway/platforms/helpers.py
