@@ -186,7 +186,30 @@ class RPConversation:
         world_hits = state.world_book.search(message_text, limit=5)
         # Session history is already loaded by the gateway; this hook
         # only adds RP-relevant memory, it does not re-load history.
-        return build_rp_prompt(state, world_hits=world_hits, memory_hits=memory_hits)
+        prompt = build_rp_prompt(state, world_hits=world_hits, memory_hits=memory_hits)
+        # Deep memory (layered, episodic, graph-aware) is a no-op when
+        # no DeepMemory records exist, so existing RP behaviour is
+        # unchanged for users who have not stored any.
+        import os as _os
+
+        if _os.environ.get("HERMES_DEEP_MEMORY_ENABLED", "1").lower() not in ("0", "false", "no"):
+            try:
+                from .deep_memory import DeepMemory
+
+                deep = DeepMemory(self.store.root)
+                result = deep.retrieve(message_text, budget_tokens=500, viewer=user_id)
+                if result["items"]:
+                    prompt += "\n\n## Deep Memory (layered, token-budgeted)\n" + result["section"] + "\n"
+                # Scene continuity: the most recent sealed scene's
+                # compact state is injected as well.
+                recent = deep.recent_scenes(limit=1)
+                if recent:
+                    ctx = deep.scene_context(recent[0]["id"])
+                    if ctx:
+                        prompt += "\n## Scene continuity\n" + ctx + "\n"
+            except Exception:
+                pass
+        return prompt
 
     def after_agent(self, user_id: str, session_id: str, user_message: str,
                     assistant_response: str) -> RPCharacterState | None:
