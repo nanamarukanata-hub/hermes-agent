@@ -1,0 +1,91 @@
+#!/usr/bin/env python3
+"""Read-only export of a legacy Kanban SQLite board to Obsidian Vault JSON.
+
+Usage:
+    python3 scripts/migrate_kanban_to_vault.py <kanban.db> <vault-root> [--board slug]
+
+Reads the legacy ``kanban.db`` with a read-only SQLite connection and
+writes one JSON file per task under
+``<vault>/06_Automation/Hermes/Kanban/<board>/<task_id>.json``,
+plus ``links.json``, ``comments.json``, ``events.json`` and
+``runs.json`` in the same board directory.  The legacy ``.db`` file
+is never modified or deleted; a ``.migrated`` marker records the
+source path and export time so a second run refuses to overwrite
+already-exported Vault files unless ``--force`` is given.
+
+This script is a migration tool, not runtime persistence: the Kanban
+runtime still uses SQLite (see docs/HERMES-HYBRID.md), and this export
+is the first step toward a Vault-backed Kanban store.
+"""
+
+from __future__ import annotations
+
+import argparse
+import json
+import os
+import sqlite3
+import sys
+from pathlib import Path
+
+
+def _dump_table(conn: sqlite3.Connection, name: str) -> list[dict]:
+    try:
+        cur = conn.execute(f"SELECT * FROM {name}")
+    except sqlite3.Error:
+        return []
+    cols = [d[0] for d in cur.description]
+    return [dict(zip(cols, row)) for row in cur.fetchall()]
+
+
+def main() -> int:
+    ap = argparse.ArgumentParser(description="Export legacy Kanban DB to Vault JSON (read-only).")
+    ap.add_argument("db", help="Legacy kanban.db path")
+    ap.add_argument("vault", help="Obsidian Vault root")
+    ap.add_argument("--board", default="default", help="Board slug (default: default)")
+    ap.add_argument("--force", action="store_true", help="Overwrite existing Vault files")
+    args = ap.parse_args()
+
+    db_path = Path(args.db).expanduser()
+    if not db_path.exists():
+        print(f"error: legacy DB not found: {db_path}", file=sys.stderr)
+        return 2
+    out = Path(args.vault).expanduser() / "06_Automation" / "Hermes" / "Kanban" / args.board
+    marker = out / ".migrated"
+    if marker.exists() and not args.force:
+        print(f"error: already migrated (marker {marker} exists; use --force to re-export)", file=sys.stderr)
+        return 2
+    out.mkdir(parents=True, exist_ok=True)
+
+    conn = sqlite3.connect(f"file:{db_path}?mode=ro", uri=True)
+    conn.row_factory = sqlite3.Row
+    try:
+        tasks = _dump_table(conn, "tasks")
+        links = _dump_table(conn, "task_links")
+        comments = _dump_table(conn, "task_comments")
+        events = _dump_table(conn, "task_events")
+        runs = _dump_table(conn, "task_runs")
+    finally:
+        conn.close()
+
+    for task in tasks:
+        task_id = str(task.get("id", ""))
+        if not task_id or task_id in (".", "..") or "/" in task_id or "\\" in task_id:
+            continue
+        dest = out / f"{task_id}.json"
+        if dest.exists() and not args.force:
+            continue
+        tmp = dest.with_name(f".{dest.name}.tmp-{os.getpid()}")
+        tmp.write_text(json.dumps(task, indent=2, ensure_ascii=False, default=str) + "\n", encoding="utf-8")
+        os.replace(tmp, dest)
+    for name, rows in (("links", links), ("comments", comments), ("events", events), ("runs", runs)):
+        dest = out / f"{name}.json"
+        tmp = dest.with_name(f".{dest.name}.tmp-{os.getpid()}")
+        tmp.write_text(json.dumps(rows, indent=2, ensure_ascii=False, default=str) + "\n", encoding="utf-8")
+        os.replace(tmp, dest)
+    marker.write_text(json.dumps({"source": str(db_path), "board": args.board, "tasks": len(tasks)}) + "\n", encoding="utf-8")
+    print(f"exported {len(tasks)} tasks, {len(links)} links, {len(comments)} comments, {len(events)} events, {len(runs)} runs to {out}")
+    return 0
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())
