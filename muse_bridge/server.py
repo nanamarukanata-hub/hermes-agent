@@ -90,17 +90,12 @@ for _tool in TOOLS:
 # Shown to the client in `initialize` (kept under 512 chars so the
 # whole text is self-contained for ChatGPT's plugin instructions).
 INSTRUCTIONS = (
-    "Muse bridge: muse_send_instruction creates a task for hermes-agent or "
-    "apex-6-private. muse_approve authorizes queued changes; "
-    "muse_dispatch_approved sends approved work to the personal muse.ai "
-    "agent via authenticated muse-cli (not Muse Code). "
-    "muse_remote_status verifies CLI connectivity. muse_remote_threads "
-    "lists personal muse.ai sessions; muse_list_sessions lists only Bridge "
-    "work orders. "
-    "muse_get_status and muse_get_result show progress and replies. "
-    "muse_pair_begin pairs a cookie-free resident Muse VM ONCE; "
-    "muse_agent_status checks its actual authenticated contact. "
-    "Muse replies do not prove completed code changes."
+    "Muse Bridge: send_instruction queues work; approve authorizes changes. "
+    "pair_begin pairs the personal Muse VM once for resident HTTPS; "
+    "agent_status checks last contact; gpt_status checks GPT API readiness. "
+    "get_status and get_result read task outputs. remote_status and "
+    "remote_threads use optional muse-cli cookie auth; they are not local "
+    "work-order sessions. Muse replies do not prove code changes."
 )
 
 
