@@ -24,8 +24,12 @@ _VALID_ID = re.compile(r"^[\w.-]{1,180}$", flags=re.ASCII)
 class SessionDB:
     """Hermes SessionDB-compatible file backend for the Discord/CLI core."""
 
-    def __init__(self, db_path=None):
-        base = os.environ.get("HERMES_OBSIDIAN_VAULT")
+    def __init__(self, db_path=None, vault_path=None):
+        # vault_path is an explicit override for tests and embedders;
+        # otherwise HERMES_OBSIDIAN_VAULT is required.  db_path is a
+        # legacy compatibility argument and is ignored (it used to
+        # point at a .db file; the Vault is now the only backend).
+        base = vault_path or os.environ.get("HERMES_OBSIDIAN_VAULT")
         if not base:
             raise RuntimeError("HERMES_OBSIDIAN_VAULT is required: SQLite is disabled")
         self.vault = Path(base).expanduser().resolve()
