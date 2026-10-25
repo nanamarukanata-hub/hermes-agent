@@ -46,7 +46,7 @@ def configure_cookie_from_environment() -> bool:
     return True
 
 
-def _execute(args: list[str], *, binary: str = "muse-cli", timeout: int = 30) -> dict:
+def _execute(args: list[str], *, binary: str = "muse-cli", timeout: int = 30, allow_list: bool = False) -> dict:
     """Run an argv-only CLI command; never return stderr or raw credentials."""
     if not _available(binary):
         return {"ok": False, "error": "MUSE_CLI_NOT_INSTALLED"}
@@ -67,7 +67,7 @@ def _execute(args: list[str], *, binary: str = "muse-cli", timeout: int = 30) ->
         data = json.loads(p.stdout)
     except (TypeError, ValueError):
         return {"ok": False, "error": "MUSE_CLI_INVALID_JSON"}
-    if not isinstance(data, dict):
+    if not isinstance(data, dict) and not (allow_list and isinstance(data, list)):
         return {"ok": False, "error": "MUSE_CLI_INVALID_JSON"}
     return {"ok": True, "data": data}
 
@@ -107,3 +107,30 @@ def send(instruction: str, *, repo: str, task_id: str, wait_seconds: int = 15) -
             "reply_received": isinstance(reply_text, str) and bool(reply_text),
             "reply": reply_text[:MAX_REPLY] if isinstance(reply_text, str) else None,
             "note": "Muse's reply alone does not prove code was modified."}
+
+
+
+def threads(include_archived: bool = False) -> dict:
+    """Read *personal Muse* main/side chats via authenticated muse-cli.
+
+    Not to be confused with Bridge work-order sessions on Render.
+    muse-cli 0.3.2's `threads` command prints a top-level JSON list.
+    """
+    if type(include_archived) is not bool:
+        return {"ok": False, "error": "INVALID_INCLUDE_ARCHIVED"}
+    argv = ["threads", "--all"] if include_archived else ["threads"]
+    out = _execute(argv, timeout=35, allow_list=True)
+    if not out["ok"]:
+        return out
+    rows = out["data"]
+    if not isinstance(rows, list):
+        return {"ok": False, "error": "MUSE_THREADS_UNEXPECTED_SCHEMA"}
+    safe = []
+    fields = ("session_id", "title", "thread", "pinned", "archived", "updated")
+    for row in rows[:100]:
+        if not isinstance(row, dict):
+            return {"ok": False, "error": "MUSE_THREADS_UNEXPECTED_SCHEMA"}
+        safe.append({k: (v[:256] if isinstance(v, str) else v)
+                     for k, v in row.items() if k in fields and type(v) in (str, bool, int)})
+    return {"ok": True, "source": "personal_muse_ai", "sessions": safe,
+            "returned": len(safe), "truncated": len(rows) > len(safe)}
