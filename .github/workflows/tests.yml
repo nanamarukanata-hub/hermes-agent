@@ -45,9 +45,12 @@ jobs:
 
       - name: Run tests
         run: |
+          mkdir -p "$HERMES_OBSIDIAN_VAULT"
           source .venv/bin/activate
           python -m pytest tests/ -q --ignore=tests/integration --ignore=tests/e2e --tb=short -n auto
         env:
+          # Isolated CI-only Vault: production data and SQLite are never used.
+          HERMES_OBSIDIAN_VAULT: ${{ runner.temp }}/hermes-unit-vault
           # Ensure tests don't accidentally call real APIs
           OPENROUTER_API_KEY: ""
           OPENAI_API_KEY: ""
