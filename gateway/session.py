@@ -668,9 +668,12 @@ class SessionStore:
     """
     
     def __init__(self, sessions_dir: Path, config: GatewayConfig,
-                 has_active_processes_fn=None):
+                 has_active_processes_fn=None, vault_path=None):
         # Obsidian Vault is the sole persistent session destination.
-        vault = os.environ.get("HERMES_OBSIDIAN_VAULT")
+        # vault_path is an explicit override (tests/embedders); otherwise
+        # HERMES_OBSIDIAN_VAULT is required.  sessions_dir is kept for
+        # compatibility but is no longer the storage location.
+        vault = vault_path or os.environ.get("HERMES_OBSIDIAN_VAULT")
         if not vault:
             raise RuntimeError("HERMES_OBSIDIAN_VAULT is required; legacy session storage is disabled")
         self.sessions_dir = Path(vault).expanduser().resolve() / "06_Automation" / "Hermes" / "GatewayRouting"
@@ -679,10 +682,10 @@ class SessionStore:
         self._loaded = False
         self._lock = threading.Lock()
         self._has_active_processes_fn = has_active_processes_fn
-        
+
         # Never silently fall back to JSONL outside the Vault.
         from hermes_state import SessionDB
-        self._db = SessionDB()
+        self._db = SessionDB(vault_path=vault)
     
     def _ensure_loaded(self) -> None:
         """Load sessions index from disk if not already loaded."""
@@ -1277,6 +1280,7 @@ class SessionStore:
         # Also write legacy JSONL (keeps existing tooling working during transition)
         transcript_path = self.get_transcript_path(session_id)
         with self._lock:
+            transcript_path.parent.mkdir(parents=True, exist_ok=True)
             with open(transcript_path, "a", encoding="utf-8") as f:
                 f.write(json.dumps(message, ensure_ascii=False) + "\n")
     
@@ -1296,6 +1300,7 @@ class SessionStore:
         
         # JSONL: overwrite the file
         transcript_path = self.get_transcript_path(session_id)
+        transcript_path.parent.mkdir(parents=True, exist_ok=True)
         with open(transcript_path, "w", encoding="utf-8") as f:
             for msg in messages:
                 f.write(json.dumps(msg, ensure_ascii=False) + "\n")
