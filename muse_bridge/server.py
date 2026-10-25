@@ -54,6 +54,7 @@ from typing import Any
 from urllib.parse import parse_qs, urlparse
 
 from .policy import checkout_for, classify, load_repos
+from .agent_channel import ResidentChannel
 from . import muse_cli_adapter
 import threading
 from .store import TaskStore
@@ -72,6 +73,8 @@ TOOLS = [
     {"name": "muse_remote_status", "description": "Check actual personal Muse agent authentication and VM reachability through installed muse-cli; returns no credentials.", "inputSchema": {"type": "object", "properties": {}}},
     {"name": "muse_remote_threads", "description": "List actual personal muse.ai conversations via authenticated muse-cli threads; does NOT read local bridge work-order sessions.", "inputSchema": {"type": "object", "properties": {"include_archived": {"type": "boolean"}}}},
     {"name": "muse_dispatch_approved", "description": "Send one previously approved bridge task directly to the personal muse.ai agent through muse-cli. Never means code completion; CLI must be authenticated.", "inputSchema": {"type": "object", "properties": {"task_id": {"type": "string"}}, "required": ["task_id"]}},
+    {"name": "muse_pair_begin", "description": "ONE-TIME pairing for permanent outbound resident Muse VM channel, without personal Muse cookies. Authenticated ChatGPT creates a short-lived pairing code; enter it once in Muse. Existing tasks remain approval-gated.", "inputSchema": {"type": "object", "properties": {"label": {"type": "string"}}}},
+    {"name": "muse_agent_status", "description": "Read-only status for the cookie-free resident Muse courier connection. Connection presence is estimated from actual authenticated courier requests, not a guarantee of VM availability.", "inputSchema": {"type": "object", "properties": {}}},
     {"name": "muse_complete_task", "description": "Muse-side completion: attach a result, diff and test results to a task and mark it done (or failed). Used by Muse after executing an awaiting_muse instruction.", "inputSchema": {"type": "object", "properties": {"task_id": {"type": "string"}, "result": {"type": "string"}, "diff": {"type": "string"}, "test_results": {"type": "string"}, "failed": {"type": "boolean"}}, "required": ["task_id", "result"]}},
 ]
 
@@ -79,7 +82,7 @@ TOOLS = [
 # required); read-only tools are marked so they can run without it.
 _READ_ONLY_TOOLS = {"muse_get_status", "muse_get_result", "muse_list_sessions",
                     "muse_get_session", "muse_get_diff", "muse_remote_status",
-                    "muse_remote_threads"}
+                    "muse_remote_threads", "muse_agent_status"}
 for _tool in TOOLS:
     _tool["annotations"] = {"readOnlyHint": _tool["name"] in _READ_ONLY_TOOLS}
 
@@ -94,6 +97,8 @@ INSTRUCTIONS = (
     "lists personal muse.ai sessions; muse_list_sessions lists only Bridge "
     "work orders. "
     "muse_get_status and muse_get_result show progress and replies. "
+    "muse_pair_begin pairs a cookie-free resident Muse VM ONCE; "
+    "muse_agent_status checks its actual authenticated contact. "
     "Muse replies do not prove completed code changes."
 )
 
@@ -114,11 +119,18 @@ class Bridge:
         self.repos = repos
         self.default_checkout = default_checkout
         self._dispatch_lock = threading.Lock()
+        self.channel: ResidentChannel | None = None
 
     def _checkout(self, repo: str) -> str | None:
         return checkout_for(repo, self.repos, self.default_checkout)
 
     def call_tool(self, name: str, args: dict) -> dict:
+        if name == "muse_pair_begin":
+            if self.channel is None:
+                return {"error": "resident channel requires configured OAuth"}
+            return self.channel.begin_pair(args.get("label", "muse-vm"))
+        if name == "muse_agent_status":
+            return self.channel.status() if self.channel else {"error": "resident channel disabled"}
         if name == "muse_remote_status":
             return muse_cli_adapter.status()
         if name == "muse_remote_threads":
@@ -292,7 +304,7 @@ def _authorize_form(params: dict) -> str:
         '<button type="submit">Allow access</button></form></body></html>')
 
 
-def make_handler(bridge: Bridge, token: str | None, oauth=None):
+def make_handler(bridge: Bridge, token: str | None, oauth=None, channel: ResidentChannel | None = None):
     class Handler(BaseHTTPRequestHandler):
         protocol_version = "HTTP/1.1"
 
@@ -336,6 +348,25 @@ def make_handler(bridge: Bridge, token: str | None, oauth=None):
             length = int(self.headers.get("Content-Length") or 0)
             return self.rfile.read(length) if length else b""
 
+        def _read_limited_json(self) -> dict | None:
+            try:
+                count = int(self.headers.get("Content-Length") or "0")
+            except ValueError:
+                return None
+            if not 2 <= count <= 50000:
+                return None
+            try:
+                payload = json.loads(self.rfile.read(count))
+            except (json.JSONDecodeError, UnicodeDecodeError, ValueError):
+                return None
+            return payload if isinstance(payload, dict) else None
+
+        def _resident_authorized(self) -> bool:
+            auth = self.headers.get("Authorization", "")
+            if channel is None or not auth.startswith("Bearer "):
+                return False
+            return channel.authorize(auth[7:])
+
         def _read_form(self) -> dict:
             raw = self._read_body().decode("utf-8", "replace")
             return {k: v[0] for k, v in parse_qs(raw).items()}
@@ -343,6 +374,24 @@ def make_handler(bridge: Bridge, token: str | None, oauth=None):
         def do_GET(self):
             parsed = urlparse(self.path)
             path = parsed.path
+            if path == "/agent/next":
+                if not self._resident_authorized():
+                    self._send_json(401, {"error": "unauthorized"})
+                    return
+                try:
+                    wait = int((parse_qs(parsed.query).get("wait") or ["0"])[0])
+                    item = channel.next_task(wait)
+                except ValueError:
+                    self._send_json(400, {"error": "invalid wait"})
+                    return
+                if item is None:
+                    self.send_response(204)
+                    self.send_header("Content-Length", "0")
+                    self.send_header("Cache-Control", "no-store")
+                    self.end_headers()
+                else:
+                    self._send_json(200, item, {"Cache-Control": "no-store"})
+                return
             if path in ("/health", "/health/"):
                 self._send_json(200, {"status": "ok", "version": VERSION, "tools": [t["name"] for t in TOOLS],
                                      "oauth": oauth is not None,
@@ -366,6 +415,32 @@ def make_handler(bridge: Bridge, token: str | None, oauth=None):
             path = parsed.path.rstrip("/")
             if path == "/mcp":
                 self._handle_mcp()
+                return
+            if path == "/agent/pair":
+                if channel is None:
+                    self._send_json(404, {"error": "resident channel disabled"})
+                    return
+                body = self._read_limited_json()
+                if body is None:
+                    self._send_json(400, {"error": "invalid JSON"})
+                    return
+                paired = channel.exchange_pair(body.get("pair_code"), body.get("label", "muse-vm"))
+                self._send_json(400 if "error" in paired else 200, paired,
+                                {"Cache-Control": "no-store"})
+                return
+            if path == "/agent/complete":
+                if not self._resident_authorized():
+                    self._send_json(401, {"error": "unauthorized"})
+                    return
+                body = self._read_limited_json()
+                if body is None:
+                    self._send_json(400, {"error": "invalid JSON"})
+                    return
+                completed = channel.complete(body.get("task_id"), body.get("result"),
+                                             body.get("failed", False), body.get("diff"),
+                                             body.get("test_results"))
+                self._send_json(400 if "error" in completed else 200, completed,
+                                {"Cache-Control": "no-store"})
                 return
             if oauth is None:
                 self._send_json(404, {"error": "not found"})
@@ -442,5 +517,7 @@ def make_handler(bridge: Bridge, token: str | None, oauth=None):
 def serve(host: str, port: int, store: TaskStore, repos: dict, default_checkout: str | None,
           token: str | None, oauth=None) -> ThreadingHTTPServer:
     bridge = Bridge(store, repos, default_checkout)
-    server = ThreadingHTTPServer((host, port), make_handler(bridge, token, oauth))
+    channel = ResidentChannel(store, oauth.approval_key, oauth.public_url) if oauth else None
+    bridge.channel = channel
+    server = ThreadingHTTPServer((host, port), make_handler(bridge, token, oauth, channel))
     return server
