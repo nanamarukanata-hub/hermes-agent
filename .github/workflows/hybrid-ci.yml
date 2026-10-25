@@ -1,0 +1,17 @@
+name: hermes-hybrid-ci
+on:
+  push:
+    branches: [feat/obsidian-session-backend-20261025, feat/obsidian-only-storage-20261025]
+  pull_request:
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - run: pip install pytest
+      - run: python3 -m py_compile hermes_hybrid/*.py tests/*.py
+      - run: python3 -m pytest tests/ -q
+      - run: python3 -c "from hermes_hybrid import audit; r=audit('hermes_hybrid'); assert not r['sqlite_imports'] and not r['db_files'], r"
