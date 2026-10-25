@@ -55,7 +55,7 @@ from urllib.parse import parse_qs, urlparse
 
 from .policy import checkout_for, classify, load_repos
 from .agent_channel import ResidentChannel
-from . import muse_cli_adapter
+from . import gpt_connector, muse_cli_adapter
 import threading
 from .store import TaskStore
 
@@ -75,6 +75,7 @@ TOOLS = [
     {"name": "muse_dispatch_approved", "description": "Send one previously approved bridge task directly to the personal muse.ai agent through muse-cli. Never means code completion; CLI must be authenticated.", "inputSchema": {"type": "object", "properties": {"task_id": {"type": "string"}}, "required": ["task_id"]}},
     {"name": "muse_pair_begin", "description": "ONE-TIME pairing for permanent outbound resident Muse VM channel, without personal Muse cookies. Authenticated ChatGPT creates a short-lived pairing code; enter it once in Muse. Existing tasks remain approval-gated.", "inputSchema": {"type": "object", "properties": {"label": {"type": "string"}}}},
     {"name": "muse_agent_status", "description": "Read-only status for the cookie-free resident Muse courier connection. Connection presence is estimated from actual authenticated courier requests, not a guarantee of VM availability.", "inputSchema": {"type": "object", "properties": {}}},
+    {"name": "muse_gpt_status", "description": "Read-only readiness of Muse-to-GPT OpenAI Responses API connector; does not reveal keys or prove API billing.", "inputSchema": {"type": "object", "properties": {}}},
     {"name": "muse_complete_task", "description": "Muse-side completion: attach a result, diff and test results to a task and mark it done (or failed). Used by Muse after executing an awaiting_muse instruction.", "inputSchema": {"type": "object", "properties": {"task_id": {"type": "string"}, "result": {"type": "string"}, "diff": {"type": "string"}, "test_results": {"type": "string"}, "failed": {"type": "boolean"}}, "required": ["task_id", "result"]}},
 ]
 
@@ -82,7 +83,7 @@ TOOLS = [
 # required); read-only tools are marked so they can run without it.
 _READ_ONLY_TOOLS = {"muse_get_status", "muse_get_result", "muse_list_sessions",
                     "muse_get_session", "muse_get_diff", "muse_remote_status",
-                    "muse_remote_threads", "muse_agent_status"}
+                    "muse_remote_threads", "muse_agent_status", "muse_gpt_status"}
 for _tool in TOOLS:
     _tool["annotations"] = {"readOnlyHint": _tool["name"] in _READ_ONLY_TOOLS}
 
@@ -131,6 +132,10 @@ class Bridge:
             return self.channel.begin_pair(args.get("label", "muse-vm"))
         if name == "muse_agent_status":
             return self.channel.status() if self.channel else {"error": "resident channel disabled"}
+        if name == "muse_gpt_status":
+            return {"mode": "openai_responses_api", "configured": gpt_connector.ready(),
+                    "paired_agent_required": True, "model": os.environ.get("MUSE_GPT_MODEL") or gpt_connector.DEFAULT_MODEL,
+                    "note": "Separate from ChatGPT Plus; configured does not prove upstream access."}
         if name == "muse_remote_status":
             return muse_cli_adapter.status()
         if name == "muse_remote_threads":
@@ -427,6 +432,23 @@ def make_handler(bridge: Bridge, token: str | None, oauth=None, channel: Residen
                 paired = channel.exchange_pair(body.get("pair_code"), body.get("label", "muse-vm"))
                 self._send_json(400 if "error" in paired else 200, paired,
                                 {"Cache-Control": "no-store"})
+                return
+            if path == "/agent/gpt":
+                # Never expose the billable GPT adapter to an anonymous client
+                # or an ordinary OAuth browser token. Only a paired Muse VM.
+                if not self._resident_authorized():
+                    self._send_json(401, {"error": "unauthorized"})
+                    return
+                body = self._read_limited_json()
+                if body is None:
+                    self._send_json(400, {"error": "invalid JSON"})
+                    return
+                reply = gpt_connector.ask(body.get("prompt"))
+                error = reply.get("error")
+                code = (200 if not error else 400 if error == "INVALID_PROMPT" else
+                        503 if error == "OPENAI_API_KEY_NOT_CONFIGURED" else
+                        429 if error == "OPENAI_LIMITED" else 502)
+                self._send_json(code, reply, {"Cache-Control": "no-store"})
                 return
             if path == "/agent/complete":
                 if not self._resident_authorized():
