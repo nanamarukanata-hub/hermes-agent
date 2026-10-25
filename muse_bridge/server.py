@@ -64,12 +64,13 @@ TOOLS = [
     {"name": "muse_send_instruction", "description": "Send a development instruction to Muse for a repo. Returns task_id and session_id. Auto actions (tests, git status/diff) run immediately; other instructions are queued as awaiting_muse for Muse to execute and complete.", "inputSchema": {"type": "object", "properties": {"repo": {"type": "string"}, "instruction": {"type": "string"}, "session_id": {"type": "string"}}, "required": ["repo", "instruction"]}},
     {"name": "muse_get_status", "description": "Get a task's status and recent log lines.", "inputSchema": {"type": "object", "properties": {"task_id": {"type": "string"}}, "required": ["task_id"]}},
     {"name": "muse_get_result", "description": "Get a completed task's result, diff and test results.", "inputSchema": {"type": "object", "properties": {"task_id": {"type": "string"}}, "required": ["task_id"]}},
-    {"name": "muse_list_sessions", "description": "List Muse sessions, most recently active first.", "inputSchema": {"type": "object", "properties": {}}},
+    {"name": "muse_list_sessions", "description": "List Render Bridge work-order sessions ONLY (not your personal muse.ai conversations). For actual Muse sessions use muse_remote_threads.", "inputSchema": {"type": "object", "properties": {}}},
     {"name": "muse_get_session", "description": "Get one session with its task history, so work can continue from the previous turn.", "inputSchema": {"type": "object", "properties": {"session_id": {"type": "string"}}, "required": ["session_id"]}},
     {"name": "muse_run_tests", "description": "Run pytest for a repo checkout (bounded, read-only apart from test artifacts in tmp).", "inputSchema": {"type": "object", "properties": {"repo": {"type": "string"}, "test_path": {"type": "string"}}, "required": ["repo"]}},
     {"name": "muse_get_diff", "description": "Get git status and diff for a repo checkout (read-only).", "inputSchema": {"type": "object", "properties": {"repo": {"type": "string"}}, "required": ["repo"]}},
     {"name": "muse_approve", "description": "Approve or reject a needs_approval task. Approval alone does not execute it; Muse review is still required before execution.", "inputSchema": {"type": "object", "properties": {"task_id": {"type": "string"}, "decision": {"type": "string", "enum": ["approve", "reject"]}}, "required": ["task_id", "decision"]}},
     {"name": "muse_remote_status", "description": "Check actual personal Muse agent authentication and VM reachability through installed muse-cli; returns no credentials.", "inputSchema": {"type": "object", "properties": {}}},
+    {"name": "muse_remote_threads", "description": "List actual personal muse.ai conversations via authenticated muse-cli threads; does NOT read local bridge work-order sessions.", "inputSchema": {"type": "object", "properties": {"include_archived": {"type": "boolean"}}}},
     {"name": "muse_dispatch_approved", "description": "Send one previously approved bridge task directly to the personal muse.ai agent through muse-cli. Never means code completion; CLI must be authenticated.", "inputSchema": {"type": "object", "properties": {"task_id": {"type": "string"}}, "required": ["task_id"]}},
     {"name": "muse_complete_task", "description": "Muse-side completion: attach a result, diff and test results to a task and mark it done (or failed). Used by Muse after executing an awaiting_muse instruction.", "inputSchema": {"type": "object", "properties": {"task_id": {"type": "string"}, "result": {"type": "string"}, "diff": {"type": "string"}, "test_results": {"type": "string"}, "failed": {"type": "boolean"}}, "required": ["task_id", "result"]}},
 ]
@@ -77,7 +78,8 @@ TOOLS = [
 # ChatGPT treats tools without readOnlyHint as writes (confirmation
 # required); read-only tools are marked so they can run without it.
 _READ_ONLY_TOOLS = {"muse_get_status", "muse_get_result", "muse_list_sessions",
-                    "muse_get_session", "muse_get_diff", "muse_remote_status"}
+                    "muse_get_session", "muse_get_diff", "muse_remote_status",
+                    "muse_remote_threads"}
 for _tool in TOOLS:
     _tool["annotations"] = {"readOnlyHint": _tool["name"] in _READ_ONLY_TOOLS}
 
@@ -88,9 +90,11 @@ INSTRUCTIONS = (
     "apex-6-private. muse_approve authorizes queued changes; "
     "muse_dispatch_approved sends approved work to the personal muse.ai "
     "agent via authenticated muse-cli (not Muse Code). "
-    "muse_remote_status verifies CLI connectivity. "
+    "muse_remote_status verifies CLI connectivity. muse_remote_threads "
+    "lists personal muse.ai sessions; muse_list_sessions lists only Bridge "
+    "work orders. "
     "muse_get_status and muse_get_result show progress and replies. "
-    "Muse replies alone are not proof of completed code changes."
+    "Muse replies do not prove completed code changes."
 )
 
 
@@ -117,6 +121,8 @@ class Bridge:
     def call_tool(self, name: str, args: dict) -> dict:
         if name == "muse_remote_status":
             return muse_cli_adapter.status()
+        if name == "muse_remote_threads":
+            return muse_cli_adapter.threads(args.get("include_archived", False))
         if name == "muse_dispatch_approved":
             return self._dispatch_approved(args)
         if name == "muse_send_instruction":
@@ -134,7 +140,7 @@ class Bridge:
             return {"task_id": task["task_id"], "session_id": task["session_id"], "status": task["status"],
                     "result": task.get("result"), "diff": task.get("diff"), "test_results": task.get("test_results")}
         if name == "muse_list_sessions":
-            return {"sessions": [{"session_id": s["session_id"], "repo": s.get("repo"), "task_ids": s.get("task_ids", []),
+            return {"source": "render_bridge_work_orders_only", "sessions": [{"session_id": s["session_id"], "repo": s.get("repo"), "task_ids": s.get("task_ids", []),
                                   "updated_at": s.get("updated_at"), "context": s.get("context", "")}
                                  for s in self.store.list_sessions()]}
         if name == "muse_get_session":

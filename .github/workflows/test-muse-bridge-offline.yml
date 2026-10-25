@@ -1,0 +1,33 @@
+name: Muse Bridge offline tests
+
+on:
+  push:
+    branches:
+      - feat/muse-chatgpt-bridge-20261025
+      - fix/muse-real-threads-20261025
+    paths:
+      - muse_bridge/**
+      - tests/test_muse*.py
+      - .github/workflows/test-muse-bridge-offline.yml
+  pull_request:
+    branches:
+      - feat/muse-chatgpt-bridge-20261025
+
+permissions:
+  contents: read
+
+jobs:
+  unittest:
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+      - name: Compile and run offline bridge tests
+        run: |
+          python -m compileall -q muse_bridge tests/test_muse_remote_threads.py
+          python -m unittest -v tests.test_muse_cli_adapter tests.test_muse_cli_dispatch tests.test_muse_remote_threads
