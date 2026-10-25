@@ -60,3 +60,40 @@ def test_restore_and_compression_reject_other_users(tmp_path):
     assert store.get_messages(session.session_id) == []
     with pytest.raises(PermissionError, match="not owned"):
         store.compress_conversation("bob", session.session_id, keep_last=1)
+
+
+def test_flat_memory_ids_cannot_be_overwritten_by_another_user(tmp_path):
+    store = VaultStore(tmp_path / "vault")
+    store.save_memory("alice", "shared-id", {"text": "alice private"})
+    with pytest.raises(PermissionError, match="not owned"):
+        store.save_memory("bob", "shared-id", {"text": "bob takeover"})
+    assert store.load_document("Memory", "alice", "shared-id")["text"] == "alice private"
+    assert store.load_document("Memory", "bob", "shared-id") is None
+
+    # The rightful owner can still edit the same note.
+    store.save_memory("alice", "shared-id", {"text": "alice update"})
+    assert store.load_document("Memory", "alice", "shared-id")["text"] == "alice update"
+
+    # Ownerless legacy records cannot be silently claimed by a Discord user.
+    ownerless = store.memory_path("legacy")
+    ownerless.write_text('---\nid: "legacy"\n---\n\nlegacy note\n', encoding="utf-8")
+    with pytest.raises(PermissionError, match="not owned"):
+        store.save_memory("alice", "legacy", {"text": "takeover"})
+
+
+def test_session_save_cannot_reassign_or_erase_existing_owner(tmp_path):
+    store = VaultStore(tmp_path / "vault")
+    store.save_document("Conversations", "alice", "shared-session",
+                        {"turns": [{"role": "user", "content": "alice secret"}]})
+
+    with pytest.raises(PermissionError, match="not owned"):
+        store.save_document("Sessions", "bob", "shared-session",
+                            {"turns": [{"role": "user", "content": "bob takeover"}]})
+    with pytest.raises(PermissionError, match="not owned"):
+        store.save_session_data("shared-session", {"messages": []})
+    assert store.load_document("Conversations", "alice", "shared-session")["turns"][0]["content"] == "alice secret"
+
+    # Explicit user_id argument is authoritative, not an untrusted data field.
+    store.save_session("alice", "shared-session",
+                       {"user_id": "bob", "messages": [{"role": "user", "content": "alice update"}]})
+    assert store.load_session("shared-session")["user_id"] == "alice"
