@@ -7,9 +7,11 @@ from .session_manager import SessionManager, Session
 from .gateway_adapter import GatewayConfig, is_allowed, should_respond, session_key
 from .mcp_bridge import Adapter, AdapterRegistry
 from .sqlite_audit import audit
+from .gateway_integration import RPConversation, build_rp_prompt, discord_session_key
 
 __all__ = ["CharacterCard", "EmotionalState", "PsychologicalProfile",
            "RPCharacterState", "SceneState", "WorldBook", "VaultStore",
            "VaultSync", "SessionManager", "Session", "GatewayConfig",
            "is_allowed", "should_respond", "session_key", "Adapter",
-           "AdapterRegistry", "audit"]
+           "AdapterRegistry", "audit", "RPConversation", "build_rp_prompt",
+           "discord_session_key"]
