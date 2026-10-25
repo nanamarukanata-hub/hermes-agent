@@ -1,12 +1,11 @@
 """Tests for the RetainDB memory plugin.
 
-Covers: _Client HTTP client, _WriteQueue SQLite queue, _build_overlay formatter,
+Covers: _Client HTTP client, _WriteQueue Vault queue, _build_overlay formatter,
 RetainDBMemoryProvider lifecycle/tools/prefetch, thread management, connection pooling.
 """
 
 import json
 import os
-import sqlite3
 import tempfile
 import threading
 import time
@@ -26,6 +25,9 @@ def _isolate_env(tmp_path, monkeypatch):
     hermes_home = tmp_path / ".hermes"
     hermes_home.mkdir()
     monkeypatch.setenv("HERMES_HOME", str(hermes_home))
+    vault = tmp_path / "obsidian-vault"
+    vault.mkdir()
+    monkeypatch.setenv("HERMES_OBSIDIAN_VAULT", str(vault))
     monkeypatch.delenv("RETAINDB_API_KEY", raising=False)
     monkeypatch.delenv("RETAINDB_BASE_URL", raising=False)
     monkeypatch.delenv("RETAINDB_PROJECT", raising=False)
@@ -363,6 +365,22 @@ class TestRetainDBMemoryProvider:
         assert p._queue is not None
         assert p._session_id == "test-session"
         p.shutdown()
+
+    def test_initialize_uses_obsidian_vault_not_sqlite(self, tmp_path, monkeypatch):
+        p = self._make_provider(tmp_path, monkeypatch)
+        p.initialize("test-session", hermes_home=str(tmp_path / ".hermes"))
+        expected = tmp_path / "obsidian-vault" / "06_Automation" / "Hermes" / "RetainQueue"
+        assert p._queue._queue_dir == expected
+        assert expected.is_dir()
+        assert not list(tmp_path.rglob("*.db"))
+        p.shutdown()
+
+    def test_initialize_requires_vault(self, tmp_path, monkeypatch):
+        p = self._make_provider(tmp_path, monkeypatch)
+        monkeypatch.delenv("HERMES_OBSIDIAN_VAULT", raising=False)
+        with pytest.raises(RuntimeError, match="HERMES_OBSIDIAN_VAULT"):
+            p.initialize("test-session", hermes_home=str(tmp_path / ".hermes"))
+        assert not list(tmp_path.rglob("*.db"))
 
     def test_initialize_default_project(self, tmp_path, monkeypatch):
         p = self._make_provider(tmp_path, monkeypatch)
