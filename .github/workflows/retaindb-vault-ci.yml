@@ -1,0 +1,48 @@
+name: RetainDB Vault queue regression
+
+on:
+  push:
+    branches:
+      - feat/obsidian-session-backend-20261025
+    paths:
+      - "plugins/memory/retaindb/**"
+      - "scripts/migrate_retaindb_queue.py"
+      - "tests/plugins/test_retaindb_plugin.py"
+      - "tests/plugins/test_retaindb_queue_migration.py"
+      - ".github/workflows/retaindb-vault-ci.yml"
+  pull_request:
+    paths:
+      - "plugins/memory/retaindb/**"
+      - "scripts/migrate_retaindb_queue.py"
+      - "tests/plugins/test_retaindb_plugin.py"
+      - "tests/plugins/test_retaindb_queue_migration.py"
+      - ".github/workflows/retaindb-vault-ci.yml"
+
+permissions:
+  contents: read
+
+jobs:
+  queue-regression:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    env:
+      HERMES_OBSIDIAN_VAULT: ${{ runner.temp }}/retaindb-test-vault
+      OPENROUTER_API_KEY: ""
+      OPENAI_API_KEY: ""
+      NOUS_API_KEY: ""
+    steps:
+      - uses: actions/checkout@v4
+      - uses: astral-sh/setup-uv@v5
+      - name: Set up Python
+        run: uv python install 3.11
+      - name: Install test dependencies
+        run: |
+          uv venv .venv --python 3.11
+          uv pip install --python .venv/bin/python -e ".[all,dev]"
+      - name: Test Vault-backed queue and read-only legacy migration
+        run: |
+          mkdir -p "$HERMES_OBSIDIAN_VAULT"
+          .venv/bin/python -m pytest \
+            tests/plugins/test_retaindb_plugin.py \
+            tests/plugins/test_retaindb_queue_migration.py \
+            -q --tb=short -o addopts=""
