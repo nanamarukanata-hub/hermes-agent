@@ -97,3 +97,25 @@ class TestDiscordThreadPersistence:
             from gateway.platforms.helpers import ThreadParticipationTracker
             with pytest.raises(RuntimeError, match="HERMES_OBSIDIAN_VAULT"):
                 ThreadParticipationTracker("discord")
+
+    def test_symlinked_vault_parent_rejected_before_mkdir(self, tmp_path):
+        """Never create routing state through a parent symlink outside the Vault."""
+        from gateway.platforms.helpers import ThreadParticipationTracker
+
+        vault = tmp_path / "vault"
+        outside = tmp_path / "outside"
+        vault.mkdir()
+        outside.mkdir()
+        (vault / "06_Automation").symlink_to(outside, target_is_directory=True)
+        with patch.dict(os.environ, {"HERMES_OBSIDIAN_VAULT": str(vault)}):
+            with pytest.raises(RuntimeError, match="escaped Obsidian Vault"):
+                ThreadParticipationTracker("discord")
+        assert list(outside.iterdir()) == []
+
+    def test_regular_file_blocks_vault_thread_directory(self, tmp_path):
+        from gateway.platforms.helpers import ThreadParticipationTracker
+
+        (tmp_path / "06_Automation").write_text("not a directory")
+        with patch.dict(os.environ, {"HERMES_OBSIDIAN_VAULT": str(tmp_path)}):
+            with pytest.raises(RuntimeError, match="not a directory"):
+                ThreadParticipationTracker("discord")
