@@ -6,11 +6,19 @@ reading or echoing secrets. A failed install is non-fatal to OAuth/MCP health.
 """
 from __future__ import annotations
 
+import os
 import shutil
 import subprocess
 import sys
 
 PACKAGE = "muse-cli==0.3.2"
+
+# Never expose Render OAuth or Muse secrets to pip and its subprocesses.
+_PIP_ENV_ALLOWLIST = frozenset({
+    "PATH", "HOME", "TMPDIR", "TMP", "TEMP", "LANG", "LC_ALL",
+    "VIRTUAL_ENV", "SSL_CERT_FILE", "REQUESTS_CA_BUNDLE",
+    "HTTP_PROXY", "HTTPS_PROXY", "NO_PROXY",
+})
 
 
 def ensure_muse_cli_installed() -> bool:
@@ -31,6 +39,7 @@ def ensure_muse_cli_installed() -> bool:
             stderr=subprocess.PIPE,
             timeout=180,
             check=False,
+            env={k: v for k, v in os.environ.items() if k in _PIP_ENV_ALLOWLIST},
         )
     except (OSError, subprocess.TimeoutExpired):
         return False
