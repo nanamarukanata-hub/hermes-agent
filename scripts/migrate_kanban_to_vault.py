@@ -7,15 +7,14 @@ Usage:
 Reads the legacy ``kanban.db`` with a read-only SQLite connection and
 writes one JSON file per task under
 ``<vault>/06_Automation/Hermes/Kanban/<board>/<task_id>.json``,
-plus ``links.json``, ``comments.json``, ``events.json`` and
-``runs.json`` in the same board directory.  The legacy ``.db`` file
-is never modified or deleted; a ``.migrated`` marker records the
-source path and export time so a second run refuses to overwrite
-already-exported Vault files unless ``--force`` is given.
+plus ``links.json``, ``comments.json``, ``events.json``, ``runs.json``,
+``notify_subs.json`` and ``counters.json`` in the same board directory.
+The legacy ``.db`` file is never modified or deleted; a ``.migrated``
+marker records the source path and export time so a second run refuses
+to overwrite already-exported Vault files unless ``--force`` is given.
 
-This script is a migration tool, not runtime persistence: the Kanban
-runtime still uses SQLite (see docs/HERMES-HYBRID.md), and this export
-is the first step toward a Vault-backed Kanban store.
+This script is a migration tool, not runtime persistence. The Kanban
+runtime uses the Vault JSON store rather than opening the legacy DB.
 """
 
 from __future__ import annotations
@@ -31,7 +30,12 @@ from pathlib import Path
 # Match kanban_db's board slug rules and vault_kv's record-id rules.
 _BOARD_SLUG_RE = re.compile(r"^[a-z0-9][a-z0-9_-]{0,63}$")
 _RECORD_ID_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9_.-]*$")
-_RESERVED_NAMES = frozenset({"links", "comments", "events", "runs"})
+_RESERVED_NAMES = frozenset({"links", "comments", "events", "runs", "notify_subs", "counters"})
+_SEQUENCE_KEYS = {
+    "task_comments": "comment",
+    "task_events": "event",
+    "task_runs": "run",
+}
 
 
 def _dump_table(conn: sqlite3.Connection, name: str, *, optional: bool = False) -> list[dict]:
@@ -48,6 +52,18 @@ def _dump_table(conn: sqlite3.Connection, name: str, *, optional: bool = False) 
         raise
     cols = [d[0] for d in cur.description]
     return [dict(zip(cols, row)) for row in cur.fetchall()]
+
+
+def _sequence_counters(rows: dict[str, list[dict]], sequences: list[dict]) -> dict[str, int]:
+    """Keep SQLite AUTOINCREMENT high-water marks, including deleted rows."""
+    counters = {key: 0 for key in _SEQUENCE_KEYS.values()}
+    for table, key in _SEQUENCE_KEYS.items():
+        counters[key] = max((int(row["id"]) for row in rows[table]), default=0)
+    for row in sequences:
+        key = _SEQUENCE_KEYS.get(row.get("name"))
+        if key is not None:
+            counters[key] = max(counters[key], int(row["seq"]))
+    return counters
 
 
 def main() -> int:
@@ -89,9 +105,15 @@ def main() -> int:
             comments = _dump_table(conn, "task_comments", optional=True)
             events = _dump_table(conn, "task_events", optional=True)
             runs = _dump_table(conn, "task_runs", optional=True)
+            notify_subs = _dump_table(conn, "kanban_notify_subs", optional=True)
+            sequences = _dump_table(conn, "sqlite_sequence", optional=True)
+            counters = _sequence_counters(
+                {"task_comments": comments, "task_events": events, "task_runs": runs},
+                sequences,
+            )
         finally:
             conn.close()
-    except sqlite3.Error as exc:
+    except (sqlite3.Error, ValueError, TypeError, KeyError) as exc:
         print(f"error: cannot read legacy Kanban database: {exc}", file=sys.stderr)
         return 2
 
@@ -106,7 +128,8 @@ def main() -> int:
         print("error: unsafe, duplicate or reserved task id; no files exported", file=sys.stderr)
         return 2
     destinations = [out / f"{task_id}.json" for task_id in task_ids]
-    destinations.extend(out / f"{name}.json" for name in ("links", "comments", "events", "runs"))
+    destinations.extend(out / f"{name}.json" for name in
+                        ("links", "comments", "events", "runs", "notify_subs", "counters"))
     if not args.force and any(dest.exists() or dest.is_symlink() for dest in destinations):
         print("error: Vault export destination already exists; use --force to re-export", file=sys.stderr)
         return 2
@@ -116,13 +139,14 @@ def main() -> int:
         tmp = dest.with_name(f".{dest.name}.tmp-{os.getpid()}")
         tmp.write_text(json.dumps(task, indent=2, ensure_ascii=False, default=str) + "\n", encoding="utf-8")
         os.replace(tmp, dest)
-    for name, rows in (("links", links), ("comments", comments), ("events", events), ("runs", runs)):
+    for name, rows in (("links", links), ("comments", comments), ("events", events),
+                       ("runs", runs), ("notify_subs", notify_subs), ("counters", counters)):
         dest = out / f"{name}.json"
         tmp = dest.with_name(f".{dest.name}.tmp-{os.getpid()}")
         tmp.write_text(json.dumps(rows, indent=2, ensure_ascii=False, default=str) + "\n", encoding="utf-8")
         os.replace(tmp, dest)
     marker.write_text(json.dumps({"source": str(db_path), "board": args.board, "tasks": len(tasks)}) + "\n", encoding="utf-8")
-    print(f"exported {len(tasks)} tasks, {len(links)} links, {len(comments)} comments, {len(events)} events, {len(runs)} runs to {out}")
+    print(f"exported {len(tasks)} tasks, {len(links)} links, {len(comments)} comments, {len(events)} events, {len(runs)} runs, {len(notify_subs)} subscriptions to {out}")
     return 0
 
 
