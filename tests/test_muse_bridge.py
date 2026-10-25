@@ -123,3 +123,132 @@ def test_run_tests_and_diff_in_tmp_checkout(tmp_path):
     # No checkout for apex-6-private on this machine: honest error, not a crash.
     assert "error" in bridge.call_tool("muse_run_tests", {"repo": "apex-6-private"})
     assert "error" in bridge.call_tool("muse_get_diff", {"repo": "apex-6-private"})
+
+
+def test_tool_annotations_and_instructions(tmp_path):
+    server, _ = _server(tmp_path)
+    try:
+        port = server.server_address[1]
+        import threading
+        threading.Thread(target=server.serve_forever, daemon=True).start()
+        _, body = _http(port, {"jsonrpc": "2.0", "id": 1, "method": "tools/list", "params": {}}, token="test-token")
+        by_name = {t["name"]: t for t in body["result"]["tools"]}
+        assert by_name["muse_get_result"]["annotations"]["readOnlyHint"] is True
+        assert by_name["muse_get_diff"]["annotations"]["readOnlyHint"] is True
+        assert by_name["muse_send_instruction"]["annotations"]["readOnlyHint"] is False
+        assert by_name["muse_approve"]["annotations"]["readOnlyHint"] is False
+        _, body = _http(port, {"jsonrpc": "2.0", "id": 2, "method": "initialize", "params": {}}, token="test-token")
+        instructions = body["result"]["instructions"]
+        assert len(instructions) <= 512
+        assert "muse_send_instruction" in instructions and "muse_get_result" in instructions
+    finally:
+        server.shutdown()
+        server.server_close()
+
+
+def test_oauth_flow(tmp_path):
+    import base64
+    import hashlib
+    import http.client
+    import threading
+    import urllib.parse
+
+    from muse_bridge.oauth import OAuthServer
+
+    store = TaskStore(tmp_path / "state")
+    oauth = OAuthServer("http://127.0.0.1:0", "approval-key", tmp_path / "state")
+    server = serve("127.0.0.1", 0, store, {}, None, None, oauth=oauth)
+    try:
+        port = server.server_address[1]
+        oauth.public_url = f"http://127.0.0.1:{port}"
+        threading.Thread(target=server.serve_forever, daemon=True).start()
+        base = f"http://127.0.0.1:{port}"
+
+        def get(path):
+            with urllib.request.urlopen(base + path, timeout=10) as resp:
+                return resp.status, json.loads(resp.read())
+
+        def post_json(path, payload):
+            req = urllib.request.Request(base + path, data=json.dumps(payload).encode(),
+                                         headers={"Content-Type": "application/json"}, method="POST")
+            try:
+                with urllib.request.urlopen(req, timeout=10) as resp:
+                    return resp.status, json.loads(resp.read())
+            except urllib.error.HTTPError as exc:
+                return exc.code, json.loads(exc.read() or b"{}")
+
+        def post_form(path, fields):
+            body = urllib.parse.urlencode(fields).encode()
+            conn = http.client.HTTPConnection("127.0.0.1", port, timeout=10)
+            conn.request("POST", path, body=body, headers={"Content-Type": "application/x-www-form-urlencoded"})
+            resp = conn.getresponse()
+            raw = resp.read()
+            headers = dict(resp.getheaders())
+            conn.close()
+            return resp.status, headers, raw
+
+        _, meta = get("/.well-known/oauth-protected-resource/mcp")
+        assert meta["resource"] == f"{base}/mcp" and meta["scopes_supported"] == ["mcp:tools"]
+        _, as_meta = get("/.well-known/oauth-authorization-server")
+        assert as_meta["registration_endpoint"] == f"{base}/register"
+        assert "S256" in as_meta["code_challenge_methods_supported"]
+
+        # Unauthenticated /mcp must challenge with protected-resource metadata.
+        status, _ = _http(port, {"jsonrpc": "2.0", "id": 1, "method": "tools/list", "params": {}})
+        assert status == 401
+
+        status, reg = post_json("/register", {"redirect_uris": ["https://client.example/callback"]})
+        assert status == 201 and reg["client_id"]
+        client_id = reg["client_id"]
+
+        verifier = "test-verifier-0123456789abcdef"
+        challenge = base64.urlsafe_b64encode(hashlib.sha256(verifier.encode()).digest()).decode().rstrip("=")
+        auth_params = {"response_type": "code", "client_id": client_id,
+                       "redirect_uri": "https://client.example/callback",
+                       "code_challenge": challenge, "code_challenge_method": "S256",
+                       "scope": "mcp:tools", "state": "s1"}
+        # Wrong approval key must not issue a code.
+        status, _, _ = post_form("/authorize", {**auth_params, "approval_key": "wrong"})
+        assert status == 400
+        status, headers, _ = post_form("/authorize", {**auth_params, "approval_key": "approval-key"})
+        assert status == 302
+        location = headers["Location"]
+        assert location.startswith("https://client.example/callback?code=")
+        code = urllib.parse.parse_qs(urllib.parse.urlparse(location).query)["code"][0]
+
+        # Wrong PKCE verifier must not exchange.
+        status, _, _ = post_form("/token", {"grant_type": "authorization_code", "code": code,
+                                            "redirect_uri": "https://client.example/callback",
+                                            "code_verifier": "wrong-verifier", "client_id": client_id})
+        assert status == 400
+        status, _, raw = post_form("/token", {"grant_type": "authorization_code", "code": code,
+                                              "redirect_uri": "https://client.example/callback",
+                                              "code_verifier": verifier, "client_id": client_id})
+        assert status == 200
+        pair = json.loads(raw)
+        assert pair["scope"] == "mcp:tools" and pair["refresh_token"]
+
+        status, _ = _http(port, {"jsonrpc": "2.0", "id": 1, "method": "tools/list", "params": {}}, token=pair["access_token"])
+        assert status == 200
+
+        # Refresh rotates: the new pair works, the old refresh and access die.
+        status, _, raw = post_form("/token", {"grant_type": "refresh_token",
+                                              "refresh_token": pair["refresh_token"], "client_id": client_id})
+        assert status == 200
+        pair2 = json.loads(raw)
+        status, _, _ = post_form("/token", {"grant_type": "refresh_token",
+                                            "refresh_token": pair["refresh_token"], "client_id": client_id})
+        assert status == 400
+        status, _ = _http(port, {"jsonrpc": "2.0", "id": 1, "method": "tools/list", "params": {}}, token=pair["access_token"])
+        assert status == 401
+        status, _ = _http(port, {"jsonrpc": "2.0", "id": 1, "method": "tools/list", "params": {}}, token=pair2["access_token"])
+        assert status == 200
+
+        # Revocation ends the rotated access token.
+        status, _, _ = post_form("/revoke", {"token": pair2["access_token"]})
+        assert status == 200
+        status, _ = _http(port, {"jsonrpc": "2.0", "id": 1, "method": "tools/list", "params": {}}, token=pair2["access_token"])
+        assert status == 401
+    finally:
+        server.shutdown()
+        server.server_close()
