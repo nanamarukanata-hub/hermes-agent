@@ -53,7 +53,7 @@ class MuseCLIAdapterTests(unittest.TestCase):
                     self.assertTrue(muse.configure_cookie_from_environment())
                     self.assertNotIn("MUSE_BRIDGE_MUSE_COOKIES", os.environ)
                 p = Path(tmp) / ".config" / "muse-cli" / "cookies.txt"
-                self.assertEqual(p.read_text(encoding="utf-8"), "hatch_sess=test-example\\n")
+                self.assertEqual(p.read_text(encoding="utf-8"), "hatch_sess=test-example\n")
                 self.assertEqual(p.stat().st_mode & 0o777, 0o600)
 
     def test_errors_hide_stderr(self):
