@@ -28,6 +28,24 @@ def _cookie_ready(home: str | None = None) -> bool:
         return False
 
 
+def configure_cookie_from_environment() -> bool:
+    """Provision personal Muse cookies on an ephemeral host at boot.
+
+    MUSE_BRIDGE_MUSE_COOKIES is a Render secret, never a Git file or
+    ChatGPT message. This is separate from the Bridge OAuth approval key.
+    """
+    raw = os.environ.pop("MUSE_BRIDGE_MUSE_COOKIES", "")
+    if not raw:
+        return False
+    if "hatch_sess" not in raw or len(raw) > 65536:
+        return False
+    path = Path.home() / ".config" / "muse-cli" / "cookies.txt"
+    path.parent.mkdir(mode=0o700, parents=True, exist_ok=True)
+    path.write_text(raw.strip() + "\n", encoding="utf-8")
+    path.chmod(0o600)
+    return True
+
+
 def _execute(args: list[str], *, binary: str = "muse-cli", timeout: int = 30) -> dict:
     """Run an argv-only CLI command; never return stderr or raw credentials."""
     if not _available(binary):
