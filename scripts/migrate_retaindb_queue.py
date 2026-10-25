@@ -5,7 +5,7 @@ SQLite database is opened read-only and never changed or removed. Run once
 with --apply after reviewing the default dry-run counts.
 
 Example:
-  python scripts/migrate_retaindb_queue.py \
+  python -m scripts.migrate_retaindb_queue \
       --sqlite-db ~/.hermes/retaindb_queue.db \
       --vault /path/to/ObsidianVault --apply
 """
