@@ -9,6 +9,8 @@ on:
       - 'gateway/session.py'
       - 'gateway/platforms/helpers.py'
       - 'tests/test_obsidian_session_state.py'
+      - 'scripts/migrate_kanban_to_vault.py'
+      - 'tests/test_kanban_migration_guards.py'
   pull_request:
     branches: [main]
     paths:
@@ -18,6 +20,8 @@ on:
       - 'gateway/session.py'
       - 'gateway/platforms/helpers.py'
       - 'tests/test_obsidian_session_state.py'
+      - 'scripts/migrate_kanban_to_vault.py'
+      - 'tests/test_kanban_migration_guards.py'
   workflow_dispatch:
 jobs:
   obsidian-storage:
@@ -32,5 +36,7 @@ jobs:
       - name: SQLite-free backend regression
         # -t . keeps tests/gateway from shadowing the real gateway package.
         run: python -m unittest discover -s tests -t . -p 'test_obsidian_session_state.py' -v
+      - name: Kanban read-only migration safety regression
+        run: python -m unittest discover -s tests -t . -p 'test_kanban_migration_guards.py' -v
       - name: Syntax verification
-        run: python -m py_compile hermes_state.py hermes_obsidian_state.py scripts/migrate_sessions_to_obsidian.py gateway/session.py gateway/platforms/helpers.py
+        run: python -m py_compile hermes_state.py hermes_obsidian_state.py scripts/migrate_sessions_to_obsidian.py scripts/migrate_kanban_to_vault.py gateway/session.py gateway/platforms/helpers.py
