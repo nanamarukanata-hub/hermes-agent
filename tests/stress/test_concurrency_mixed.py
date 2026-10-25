@@ -11,14 +11,13 @@ and detect_crashed_workers every 200ms, racing against the workers to
 surface TTL + crash detection races.
 
 Pass criteria: runs invariant holds, no double-completions, no orphan
-runs, no SQLite errors escape the retry layer.
+runs, no store errors escape the retry layer.
 """
 
 import json
 import multiprocessing as mp
 import os
 import random
-import sqlite3
 import sys
 import tempfile
 import time
@@ -47,41 +46,35 @@ def worker_loop(worker_id: int, hermes_home: str, result_file: str) -> None:
 
             if op < 0.10:
                 # Try to unblock a blocked task.
-                row = conn.execute(
-                    "SELECT id FROM tasks WHERE status='blocked' "
-                    "ORDER BY RANDOM() LIMIT 1"
-                ).fetchone()
+                blocked = kb.list_tasks(conn, status="blocked")
+                row = random.choice(blocked) if blocked else None
                 if row:
                     try:
-                        ok = kb.unblock_task(conn, row["id"])
+                        ok = kb.unblock_task(conn, row.id)
                         events.append({"kind": "unblocked" if ok else "unblock_noop",
-                                       "task": row["id"], "worker": worker_id})
-                    except sqlite3.OperationalError as e:
-                        events.append({"kind": "sqlite_err", "op": "unblock",
-                                       "task": row["id"], "err": str(e)[:100]})
+                                       "task": row.id, "worker": worker_id})
+                    except Exception as e:
+                        events.append({"kind": "store_err", "op": "unblock",
+                                       "task": row.id, "err": str(e)[:100]})
                 continue
 
             if op < 0.15:
                 # Try to archive a done task.
-                row = conn.execute(
-                    "SELECT id FROM tasks WHERE status='done' "
-                    "ORDER BY RANDOM() LIMIT 1"
-                ).fetchone()
+                done = kb.list_tasks(conn, status="done")
+                row = random.choice(done) if done else None
                 if row:
                     try:
-                        kb.archive_task(conn, row["id"])
-                        events.append({"kind": "archived", "task": row["id"],
+                        kb.archive_task(conn, row.id)
+                        events.append({"kind": "archived", "task": row.id,
                                        "worker": worker_id})
-                    except sqlite3.OperationalError as e:
-                        events.append({"kind": "sqlite_err", "op": "archive",
-                                       "task": row["id"], "err": str(e)[:100]})
+                    except Exception as e:
+                        events.append({"kind": "store_err", "op": "archive",
+                                       "task": row.id, "err": str(e)[:100]})
                 continue
 
             # Default: claim + complete-or-block.
-            row = conn.execute(
-                "SELECT id FROM tasks WHERE status='ready' "
-                "AND claim_lock IS NULL LIMIT 1"
-            ).fetchone()
+            ready = [t for t in kb.list_tasks(conn, status="ready") if t.claim_lock is None]
+            row = ready[0] if ready else None
             if row is None:
                 idle_rounds += 1
                 if idle_rounds > 50:
@@ -90,14 +83,14 @@ def worker_loop(worker_id: int, hermes_home: str, result_file: str) -> None:
                 continue
             idle_rounds = 0
 
-            tid = row["id"]
+            tid = row.id
             try:
                 claimed = kb.claim_task(
                     conn, tid, claimer=f"worker-{worker_id}",
                     ttl_seconds=5,  # short TTL so reclaim races in
                 )
-            except sqlite3.OperationalError as e:
-                events.append({"kind": "sqlite_err", "op": "claim",
+            except Exception as e:
+                events.append({"kind": "store_err", "op": "claim",
                                "task": tid, "err": str(e)[:100]})
                 continue
             if claimed is None:
@@ -117,8 +110,8 @@ def worker_loop(worker_id: int, hermes_home: str, result_file: str) -> None:
                                   reason=f"blocked by worker-{worker_id}")
                     events.append({"kind": "blocked", "task": tid,
                                    "worker": worker_id, "run_id": run.id})
-                except sqlite3.OperationalError as e:
-                    events.append({"kind": "sqlite_err", "op": "block",
+                except Exception as e:
+                    events.append({"kind": "store_err", "op": "block",
                                    "task": tid, "err": str(e)[:100]})
             else:
                 try:
@@ -131,8 +124,8 @@ def worker_loop(worker_id: int, hermes_home: str, result_file: str) -> None:
                     events.append({"kind": "completed", "task": tid,
                                    "worker": worker_id, "run_id": run.id,
                                    "t": time.monotonic() - start})
-                except sqlite3.OperationalError as e:
-                    events.append({"kind": "sqlite_err", "op": "complete",
+                except Exception as e:
+                    events.append({"kind": "store_err", "op": "complete",
                                    "task": tid, "err": str(e)[:100]})
         finally:
             conn.close()
@@ -158,8 +151,8 @@ def reclaimer_loop(hermes_home: str, result_file: str) -> None:
                 if reclaimed:
                     events.append({"kind": "reclaimed", "count": reclaimed,
                                    "t": time.monotonic() - start})
-            except sqlite3.OperationalError as e:
-                events.append({"kind": "sqlite_err", "op": "reclaim",
+            except Exception as e:
+                events.append({"kind": "store_err", "op": "reclaim",
                                "err": str(e)[:100]})
         finally:
             conn.close()
@@ -255,56 +248,42 @@ def main():
                 f"worker {claim['worker']} but completed by worker {comp['worker']}"
             )
 
-    # SQLite errors that escaped the retry layer
-    sqlite_errs = [e for e in all_events if e["kind"] == "sqlite_err"]
-    if sqlite_errs:
-        for e in sqlite_errs[:5]:
-            failures.append(f"SQLITE ERROR: op={e.get('op')} err={e.get('err')}")
-        if len(sqlite_errs) > 5:
-            failures.append(f"  ... and {len(sqlite_errs) - 5} more sqlite errs")
+    # Store errors that escaped the retry layer
+    store_errs = [e for e in all_events if e["kind"] == "store_err"]
+    if store_errs:
+        for e in store_errs[:5]:
+            failures.append(f"STORE ERROR: op={e.get('op')} err={e.get('err')}")
+        if len(store_errs) > 5:
+            failures.append(f"  ... and {len(store_errs) - 5} more store errs")
 
-    # DB final state — every task should be in a clean terminal state.
+    # Vault final state — every task should be in a clean terminal state.
     conn = kb.connect()
     try:
         # Invariant: current_run_id NULL iff latest run is terminal
-        inconsistent = conn.execute("""
-            SELECT t.id, t.status, t.current_run_id
-            FROM tasks t
-            WHERE t.current_run_id IS NOT NULL
-              AND EXISTS (SELECT 1 FROM task_runs r
-                          WHERE r.id = t.current_run_id AND r.ended_at IS NOT NULL)
-        """).fetchall()
-        for row in inconsistent:
-            failures.append(
-                f"INVARIANT VIOLATION: task {row['id']} status={row['status']} "
-                f"has current_run_id={row['current_run_id']} but run is ended"
-            )
-
-        # Invariant: no orphan open runs
-        orphans = conn.execute("""
-            SELECT r.id, r.task_id, r.status
-            FROM task_runs r
-            LEFT JOIN tasks t ON t.current_run_id = r.id
-            WHERE r.ended_at IS NULL AND t.id IS NULL
-        """).fetchall()
-        for row in orphans:
-            failures.append(
-                f"ORPHAN OPEN RUN: run {row['id']} on task {row['task_id']}"
-            )
-
-        # Counts — should roughly balance.
-        status_counts = dict(
-            conn.execute("SELECT status, COUNT(*) FROM tasks GROUP BY status").fetchall()
-        )
-        run_outcome_counts = dict(
-            conn.execute(
-                "SELECT outcome, COUNT(*) FROM task_runs "
-                "WHERE ended_at IS NOT NULL GROUP BY outcome"
-            ).fetchall()
-        )
-        active_runs = conn.execute(
-            "SELECT COUNT(*) FROM task_runs WHERE ended_at IS NULL"
-        ).fetchone()[0]
+        all_tasks = kb.list_tasks(conn, include_archived=True)
+        pointed = set()
+        status_counts = {}
+        run_outcome_counts = {}
+        active_runs = 0
+        for task in all_tasks:
+            status_counts[task.status] = status_counts.get(task.status, 0) + 1
+            if task.current_run_id is not None:
+                pointed.add(task.current_run_id)
+                run = kb.get_run(conn, task.current_run_id)
+                if run is not None and run.ended_at is not None:
+                    failures.append(
+                        f"INVARIANT VIOLATION: task {task.id} status={task.status} "
+                        f"has current_run_id={task.current_run_id} but run is ended"
+                    )
+            for run in kb.list_runs(conn, task.id):
+                if run.ended_at is None:
+                    active_runs += 1
+                    if run.id not in pointed:
+                        failures.append(
+                            f"ORPHAN OPEN RUN: run {run.id} on task {task.id}"
+                        )
+                else:
+                    run_outcome_counts[run.outcome] = run_outcome_counts.get(run.outcome, 0) + 1
 
     finally:
         conn.close()

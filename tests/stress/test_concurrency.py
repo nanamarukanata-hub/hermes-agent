@@ -1,26 +1,25 @@
 """Multi-process concurrency stress test for the Kanban kernel.
 
-5 worker processes race for claims on a shared DB with 100 tasks. Each
-worker loops: claim -> simulate work -> complete. Asserts the invariants
-that make the system worth building:
+5 worker processes race for claims on a shared Vault store with 100
+tasks. Each worker loops: claim -> simulate work -> complete. Asserts
+the invariants that make the system worth building:
 
   - No task claimed by two workers simultaneously
   - No task completed twice
   - Every claim produces exactly one run row
   - Every completion closes exactly one run row
-  - Zero SQLite locking errors that escape the retry layer
+  - Zero store errors that escape the retry layer
   - Total run count == total claim events == total completed events
 
-This test is the primary justification for WAL + CAS-based claim. If it
-passes, the architecture holds. If it fails, we have a real bug to fix
-before anyone runs this in anger.
+This test is the primary justification for flock + CAS-based claim. If
+it passes, the architecture holds. If it fails, we have a real bug to
+fix before anyone runs this in anger.
 """
 
 import json
 import multiprocessing as mp
 import os
 import random
-import sqlite3
 import subprocess
 import sys
 import tempfile
@@ -56,11 +55,9 @@ def worker_loop(worker_id: int, hermes_home: str, result_file: str) -> None:
         try:
             # Find any ready task (non-deterministic order intentional — we
             # want workers to race on popular assignees).
-            row = conn.execute(
-                "SELECT id FROM tasks WHERE status = 'ready' "
-                "AND claim_lock IS NULL LIMIT 1"
-            ).fetchone()
-            if row is None:
+            ready = kb.list_tasks(conn, status="ready")
+            ready = [t for t in ready if t.claim_lock is None]
+            if not ready:
                 empty_polls += 1
                 if empty_polls > 20:
                     break  # queue empty long enough, stop
@@ -68,13 +65,13 @@ def worker_loop(worker_id: int, hermes_home: str, result_file: str) -> None:
                 continue
             empty_polls = 0
 
-            tid = row["id"]
+            tid = ready[0].id
             try:
                 claimed = kb.claim_task(
                     conn, tid, claimer=f"worker-{worker_id}",
                 )
-            except sqlite3.OperationalError as e:
-                events.append({"kind": "sqlite_err_on_claim", "task": tid, "err": str(e)})
+            except Exception as e:
+                events.append({"kind": "store_err_on_claim", "task": tid, "err": str(e)})
                 continue
             if claimed is None:
                 # Someone else beat us — expected contention, not an error.
@@ -100,8 +97,8 @@ def worker_loop(worker_id: int, hermes_home: str, result_file: str) -> None:
                     summary=f"worker-{worker_id} finished task {tid}",
                     metadata={"worker_id": worker_id, "run_id": run.id},
                 )
-            except sqlite3.OperationalError as e:
-                events.append({"kind": "sqlite_err_on_complete", "task": tid, "err": str(e)})
+            except Exception as e:
+                events.append({"kind": "store_err_on_complete", "task": tid, "err": str(e)})
                 continue
             events.append({
                 "kind": "completed",
@@ -204,60 +201,46 @@ def main():
     # Check 3: DB state — every task should be in 'done', no dangling claims
     conn = kb.connect()
     try:
-        bad_status = conn.execute(
-            "SELECT id, status, claim_lock, current_run_id FROM tasks "
-            "WHERE status != 'done' OR claim_lock IS NOT NULL "
-            "OR current_run_id IS NOT NULL"
-        ).fetchall()
-        if bad_status:
-            for row in bad_status:
+        for task in kb.list_tasks(conn):
+            if (task.status != "done" or task.claim_lock is not None
+                    or task.current_run_id is not None):
                 failures.append(
-                    f"BAD FINAL STATE: task {row['id']} status={row['status']} "
-                    f"claim_lock={row['claim_lock']} current_run_id={row['current_run_id']}"
+                    f"BAD FINAL STATE: task {task.id} status={task.status} "
+                    f"claim_lock={task.claim_lock} current_run_id={task.current_run_id}"
                 )
 
         # Check 4: exactly one run per task, all closed as completed
-        bad_runs = conn.execute(
-            "SELECT task_id, COUNT(*) as n FROM task_runs "
-            "GROUP BY task_id HAVING n != 1"
-        ).fetchall()
-        if bad_runs:
-            for row in bad_runs:
+        completed_events = 0
+        for tid in tids:
+            runs = kb.list_runs(conn, tid)
+            if len(runs) != 1:
                 failures.append(
-                    f"WRONG RUN COUNT: task {row['task_id']} has {row['n']} runs (expected 1)"
+                    f"WRONG RUN COUNT: task {tid} has {len(runs)} runs (expected 1)"
                 )
-
-        open_runs = conn.execute(
-            "SELECT id, task_id FROM task_runs WHERE ended_at IS NULL"
-        ).fetchall()
-        for row in open_runs:
-            failures.append(f"OPEN RUN: run {row['id']} on task {row['task_id']}")
-
-        wrong_outcomes = conn.execute(
-            "SELECT task_id, outcome FROM task_runs "
-            "WHERE outcome IS NULL OR outcome != 'completed'"
-        ).fetchall()
-        for row in wrong_outcomes:
-            failures.append(
-                f"WRONG OUTCOME: task {row['task_id']} run outcome={row['outcome']}"
+            for run in runs:
+                if run.ended_at is None:
+                    failures.append(f"OPEN RUN: run {run.id} on task {tid}")
+                if run.outcome != "completed":
+                    failures.append(
+                        f"WRONG OUTCOME: task {tid} run outcome={run.outcome}"
+                    )
+            completed_events += sum(
+                1 for e in kb.list_events(conn, tid) if e.kind == "completed"
             )
 
         # Check 5: event counts — exactly NUM_TASKS completed events
-        completed_events = conn.execute(
-            "SELECT COUNT(*) as n FROM task_events WHERE kind='completed'"
-        ).fetchone()["n"]
         if completed_events != NUM_TASKS:
             failures.append(
                 f"EVENT COUNT MISMATCH: {completed_events} completed events "
                 f"expected {NUM_TASKS}"
             )
 
-        # Check 6: count SQLite errors that escaped retry
-        sqlite_errs = sum(
-            1 for e in all_events if e["kind"].startswith("sqlite_err")
+        # Check 6: count store errors that escaped retry
+        store_errs = sum(
+            1 for e in all_events if e["kind"].startswith("store_err")
         )
-        if sqlite_errs > 0:
-            failures.append(f"UNRETRIED SQLITE ERRORS: {sqlite_errs}")
+        if store_errs > 0:
+            failures.append(f"UNRETRIED STORE ERRORS: {store_errs}")
 
     finally:
         conn.close()
