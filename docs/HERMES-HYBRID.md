@@ -52,10 +52,71 @@ Discord
   APEX-6本体は有限CLIであり、本パッケージは常駐APEX-6サーバーを
   発明しない。
 
+## 統合（2026-10-25 第2段階）
+
+新規パッケージ追加ではなく、既存の実行経路へ接続した。
+
+### 統一した保存形式・Vaultレイアウト・セッションキー
+
+- セッション: `06_Automation/Hermes/Sessions/<session_id>/metadata.json`
+  ＋ `Transcript.md`（PR #11 `SessionDB` と同一形式・同一パス。
+  `hermes_hybrid` の `VaultStore` で PR #11 が書いたセッションを
+  読み返せることを実コードで確認済み）。
+- 記憶: `06_Automation/Hermes/Memory/<memory_id>.md`
+  （PR #16 式の frontmatter＋本文。DBを使わない直接走査で検索）。
+- キャラクター状態: `06_Automation/Hermes/CharacterState/<user_id>/<character_id>.json`
+  （PR #11 に相当物がないため hybrid 層で新規定義。RP状態は
+  (user, character) キーで、セッションIDには依存しないため、
+  セッションリセット・再起動後も復元される）。
+- セッションキー: ゲートウェイの `build_session_key` と同一規則
+  （`hermes_hybrid.gateway_integration.discord_session_key`）。
+  キー（コロン形式）は `GatewayRouting/sessions.json` で
+  ゲートウェイの timestamp-hex セッションIDへ対応付けられる。
+  キー自体を SessionDB のフォルダ名には使わない（コロンは
+  PR #11 の ID 正規表現に含まれないため）。
+
+### Discord Gatewayへの接続点
+
+- `gateway/run.py` の `_handle_message_with_agent`:
+  `_run_agent` 呼び出し直前に `RPConversation.before_agent` で
+  カード・心理・感情・シーン・World Book一致・Vault記憶を
+  `context_prompt` へ追加し、応答確定後に `after_agent` で
+  RPターン状態を Vault へ保存する。カードが未設定の場合は
+  空文字を返し、ゲートウェイ動作は変わらない。例外は
+  ログのみでメッセージを落とさない。会話ターン自体は
+  従来通り PR #11 SessionDB が保存する（重複書き込みなし）。
+- `gateway/session.py` に `load_transcript_unified` を追加:
+  PR #11 SessionDB のみを読む正本経路。既存の
+  `load_transcript`（JSONLとの長い方優先・移行用）は
+  互換のため変更していない。JSONLは移行用ミラーであり、
+  正本は SessionDB である。
+- 有効化: `HERMES_OBSIDIAN_VAULT` が必須。
+  `HERMES_RP_ENABLED=0/false/no` で RPフックのみ無効化できる。
+  カードはユーザーが Vault へ置いたものだけが使われ、
+  本パッケージは具体的なキャラクター・世界観設定を作らない。
+  RP独自のコンテンツフィルターは追加していない。
+
+### SQLite監査（2026-10-25）
+
+- セッション／ゲートウェイ／Discord の実行経路:
+  `hermes_state.py`、`hermes_obsidian_state.py`、`gateway/session.py`、
+  `gateway/run.py`、`gateway/platforms/discord.py`、`hermes_hybrid/` に
+  sqlite import は 0 件。
+- 残存するランタイム sqlite（セッション経路外のため本段階では
+  統一していない）: `hermes_cli/kanban_db.py`・`backup.py`・`doctor.py`、
+  `plugins/memory/retaindb`・`holographic`、`gateway/platforms/api_server.py`。
+  これらを Vault 化すると Kanban・メモリプラグインの機能変更に
+  なるため、別途設計判断が必要。テスト・移行ツール・テンプレートの
+  sqlite はランタイム永続ではない。
+
 ## テスト
 
 ```sh
-python3 -m pytest tests/ -q
+python3 -m pytest tests/test_hybrid.py tests/test_gateway_rp_integration.py -q -o addopts=""
 ```
 
 テストは Discord トークン、ネットワーク、モデルを必要としない。
+なお本ブランチの既存テスト `tests/gateway/test_session.py` 等は、
+変更前から 8 failed / 15 errors（`HERMES_OBSIDIAN_VAULT` 未設定時の
+SessionDB 起動拒否に起因する旧 SQLite 前提テスト）であり、
+本統合による新規失敗は 0 件であることを変更前後で比較確認済み。
