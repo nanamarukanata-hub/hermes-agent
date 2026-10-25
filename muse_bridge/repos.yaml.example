@@ -1,0 +1,5 @@
+# Copy to repos.yaml and point each repo at a local checkout.
+# Lines are "name: /absolute/path". Repos not listed here are unmapped
+# and their tools return "no local checkout" instead of running.
+# hermes-agent: /home/hatch/workspace/hermes-work/hermes-verify
+# apex-6-private: /path/to/apex-6-private-checkout
