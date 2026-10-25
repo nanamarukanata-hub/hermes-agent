@@ -178,13 +178,21 @@ class VaultStore:
         item = self.load_session(session_id)
         return list(item.get("messages", [])) if item else []
 
-    def append_session_message(self, session_id: str, role: str, content: str) -> Path:
-        # Read-modify-write under one lock (save_session_data locks again
-        # only via _locked, so this path writes directly instead).
+    def append_session_message(self, session_id: str, role: str, content: str,
+                               *, user_id: str | None = None) -> Path:
+        # Owner checks must happen under the same lock as the append.
+        # The low-level gateway path may omit user_id; user-scoped callers
+        # must supply it and may never adopt an ownerless legacy session.
+        if user_id is not None:
+            user_id = validate_id(user_id)
+
         def _locked_do():
-            item = self.load_session(session_id) or {
+            existing = self.load_session(session_id)
+            if existing is not None and user_id is not None and existing.get("user_id") != user_id:
+                raise PermissionError("session is not owned by this user")
+            item = existing or {
                 "id": session_id, "source": "gateway", "started_at": time.time(),
-                "ended_at": None, "messages": []}
+                "ended_at": None, "user_id": user_id, "messages": []}
             item.setdefault("messages", []).append({
                 "id": len(item["messages"]) + 1, "session_id": session_id,
                 "role": role, "content": content, "timestamp": time.time()})
@@ -297,7 +305,8 @@ class VaultStore:
     # -- typed helpers ------------------------------------------------
     def save_conversation_turn(self, user_id: str, session_id: str, turn: dict[str, Any]) -> Path:
         return self.append_session_message(
-            session_id, turn.get("role", "user"), turn.get("content", ""))
+            session_id, turn.get("role", "user"), turn.get("content", ""),
+            user_id=validate_id(user_id))
 
     def save_memory(self, user_id: str, memory_id: str, data: dict[str, Any]) -> Path:
         body = str(data.get("content") or data.get("text") or "")
