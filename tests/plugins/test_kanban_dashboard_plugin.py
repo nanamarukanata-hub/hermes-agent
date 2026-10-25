@@ -529,8 +529,37 @@ def test_board_progress_rollup(client):
 # ---------------------------------------------------------------------------
 
 
+def _edit_task(task_id, **fields):
+    """Vault equivalent of a direct UPDATE on the tasks table: edit the
+    stored task JSON record in place."""
+    import json as _json
+    path = kb.kanban_store_dir() / f"{task_id}.json"
+    data = _json.loads(path.read_text(encoding="utf-8"))
+    data.update(fields)
+    path.write_text(_json.dumps(data, indent=2) + "\n", encoding="utf-8")
+
+
+def _add_run(task_id, **fields):
+    """Vault equivalent of a direct INSERT into task_runs: append a run
+    record to runs.json with a monotonic id and return it."""
+    import json as _json
+    store = kb.kanban_store_dir()
+    runs_path = store / "runs.json"
+    rows = _json.loads(runs_path.read_text(encoding="utf-8")) if runs_path.exists() else []
+    counters_path = store / "counters.json"
+    counters = _json.loads(counters_path.read_text(encoding="utf-8")) if counters_path.exists() else {}
+    new_id = max([r.get("id", 0) for r in rows] + [counters.get("run", 0)]) + 1
+    row = {"id": new_id, "task_id": task_id, "status": "running"}
+    row.update(fields)
+    rows.append(row)
+    runs_path.write_text(_json.dumps(rows, indent=2) + "\n", encoding="utf-8")
+    counters["run"] = new_id
+    counters_path.write_text(_json.dumps(counters, indent=2) + "\n", encoding="utf-8")
+    return new_id
+
+
 def test_board_auto_initializes_missing_db(tmp_path, monkeypatch):
-    """If kanban.db doesn't exist yet, GET /board must create it, not 500."""
+    """If the board store doesn't exist yet, GET /board must create it, not 500."""
     home = tmp_path / ".hermes"
     home.mkdir()
     monkeypatch.setenv("HERMES_HOME", str(home))
@@ -542,7 +571,7 @@ def test_board_auto_initializes_missing_db(tmp_path, monkeypatch):
     c = TestClient(app)
     r = c.get("/api/plugins/kanban/board")
     assert r.status_code == 200
-    assert (home / "kanban.db").exists(), "init_db wasn't invoked by /board"
+    assert (home / "kanban" / "boards" / "default" / "links.json").exists(), "init_db wasn't invoked by /board"
 
 
 # ---------------------------------------------------------------------------
@@ -1348,19 +1377,17 @@ def test_reclaim_endpoint_releases_running_claim(client):
         t = kb.create_task(conn, title="running", assignee="x")
         lock = secrets.token_hex(8)
         future = int(time.time()) + 3600
-        conn.execute(
-            "UPDATE tasks SET status='running', claim_lock=?, claim_expires=?, "
-            "worker_pid=? WHERE id=?",
-            (lock, future, 99999, t),
-        )
-        conn.execute(
-            "INSERT INTO task_runs (task_id, status, claim_lock, claim_expires, "
-            "worker_pid, started_at) VALUES (?, 'running', ?, ?, ?, ?)",
-            (t, lock, future, 99999, int(time.time())),
-        )
-        run_id = conn.execute("SELECT last_insert_rowid()").fetchone()[0]
-        conn.execute("UPDATE tasks SET current_run_id=? WHERE id=?", (run_id, t))
-        conn.commit()
+        kb.claim_task(conn, t, claimer=lock)
+        run_id = kb.get_task(conn, t).current_run_id
+        _edit_task(t, claim_expires=future, worker_pid=99999)
+        import json as _json2
+        _store = kb.kanban_store_dir()
+        _runs = _json2.loads((_store / "runs.json").read_text(encoding="utf-8"))
+        for _r in _runs:
+            if _r.get("id") == run_id:
+                _r["claim_expires"] = future
+                _r["worker_pid"] = 99999
+        (_store / "runs.json").write_text(_json2.dumps(_runs, indent=2) + "\n", encoding="utf-8")
     finally:
         conn.close()
 
@@ -1376,11 +1403,9 @@ def test_reclaim_endpoint_releases_running_claim(client):
     # Confirm the task is back to ready.
     conn2 = kb.connect()
     try:
-        row = conn2.execute(
-            "SELECT status, claim_lock FROM tasks WHERE id=?", (t,),
-        ).fetchone()
-        assert row["status"] == "ready"
-        assert row["claim_lock"] is None
+        task = kb.get_task(conn2, t)
+        assert task.status == "ready"
+        assert task.claim_lock is None
     finally:
         conn2.close()
 
@@ -1417,10 +1442,7 @@ def test_reassign_endpoint_switches_profile(client):
 
     conn2 = kb.connect()
     try:
-        row = conn2.execute(
-            "SELECT assignee FROM tasks WHERE id=?", (t,),
-        ).fetchone()
-        assert row["assignee"] == "newbie"
+        assert kb.get_task(conn2, t).assignee == "newbie"
     finally:
         conn2.close()
 
@@ -1431,11 +1453,7 @@ def test_reassign_endpoint_409_on_running_without_reclaim(client):
     conn = kb.connect()
     try:
         t = kb.create_task(conn, title="running", assignee="orig")
-        conn.execute(
-            "UPDATE tasks SET status='running', claim_lock=? WHERE id=?",
-            (secrets.token_hex(4), t),
-        )
-        conn.commit()
+        _edit_task(t, status="running", claim_lock=secrets.token_hex(4))
     finally:
         conn.close()
 
@@ -1454,19 +1472,8 @@ def test_reassign_endpoint_with_reclaim_first_succeeds_on_running(client):
     try:
         t = kb.create_task(conn, title="running", assignee="orig")
         lock = secrets.token_hex(4)
-        conn.execute(
-            "UPDATE tasks SET status='running', claim_lock=?, claim_expires=?, "
-            "worker_pid=? WHERE id=?",
-            (lock, int(time.time()) + 3600, 1234, t),
-        )
-        conn.execute(
-            "INSERT INTO task_runs (task_id, status, claim_lock, claim_expires, "
-            "worker_pid, started_at) VALUES (?, 'running', ?, ?, ?, ?)",
-            (t, lock, int(time.time()) + 3600, 1234, int(time.time())),
-        )
-        rid = conn.execute("SELECT last_insert_rowid()").fetchone()[0]
-        conn.execute("UPDATE tasks SET current_run_id=? WHERE id=?", (rid, t))
-        conn.commit()
+        kb.claim_task(conn, t, claimer=lock)
+        _edit_task(t, claim_expires=int(time.time()) + 3600, worker_pid=1234)
     finally:
         conn.close()
 
@@ -1479,11 +1486,9 @@ def test_reassign_endpoint_with_reclaim_first_succeeds_on_running(client):
 
     conn2 = kb.connect()
     try:
-        row = conn2.execute(
-            "SELECT status, assignee FROM tasks WHERE id=?", (t,),
-        ).fetchone()
-        assert row["status"] == "ready"
-        assert row["assignee"] == "new"
+        task = kb.get_task(conn2, t)
+        assert task.status == "ready"
+        assert task.assignee == "new"
     finally:
         conn2.close()
 
@@ -1536,11 +1541,7 @@ def test_diagnostics_endpoint_severity_filter(client):
         kb.complete_task(conn, p1, summary="mentioned t_deadbeef1234")
         # An error-severity diagnostic (spawn failures) on another
         p2 = kb.create_task(conn, title="spawn", assignee="b")
-        conn.execute(
-            "UPDATE tasks SET consecutive_failures=5, last_failure_error='x' WHERE id=?",
-            (p2,),
-        )
-        conn.commit()
+        _edit_task(p2, consecutive_failures=5, last_failure_error="x")
     finally:
         conn.close()
 
@@ -1566,12 +1567,9 @@ def test_board_exposes_diagnostics_list_and_summary(client):
         t = kb.create_task(conn, title="crashy", assignee="worker")
         # Simulate 2 consecutive crashes -> repeated_crashes error diag
         for i in range(2):
-            conn.execute(
-                "INSERT INTO task_runs (task_id, status, outcome, started_at, "
-                "ended_at, error) VALUES (?, 'crashed', 'crashed', ?, ?, ?)",
-                (t, int(time.time()) - 100, int(time.time()) - 50, "OOM"),
-            )
-        conn.commit()
+            _add_run(t, status="crashed", outcome="crashed",
+                     started_at=int(time.time()) - 100,
+                     ended_at=int(time.time()) - 50, error="OOM")
     finally:
         conn.close()
 
