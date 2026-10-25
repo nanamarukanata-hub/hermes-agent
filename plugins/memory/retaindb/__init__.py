@@ -4,7 +4,7 @@ Cross-session memory via RetainDB cloud API.
 
 Features:
 - Correct API routes for all operations
-- Durable SQLite write-behind queue (crash-safe, async ingest)
+- Durable Obsidian Vault JSON write-behind queue (crash-safe, async ingest)
 - Semantic search + user profile retrieval
 - Context query with deduplication overlay
 - Dialectic synthesis (LLM-powered user understanding, prefetched each turn)
@@ -25,7 +25,7 @@ import logging
 import os
 import queue
 import re
-import sqlite3
+import uuid
 import threading
 import time
 from datetime import datetime, timezone
@@ -34,6 +34,7 @@ from typing import Any, Dict, List
 from urllib.parse import quote
 
 from agent.memory_provider import MemoryProvider
+from hermes_hybrid.vault_kv import VaultDir, resolve_vault_root
 from tools.registry import tool_error
 
 logger = logging.getLogger(__name__)
@@ -328,66 +329,54 @@ class _Client:
 # ---------------------------------------------------------------------------
 
 class _WriteQueue:
-    """SQLite-backed async write queue. Survives crashes — pending rows replay on startup."""
+    """Vault-backed durable async queue; pending JSON records replay on startup."""
 
-    def __init__(self, client: _Client, db_path: Path):
+    def __init__(self, client: _Client, queue_dir: Path):
         self._client = client
-        self._db_path = db_path
+        self._queue_dir = Path(queue_dir)
+        self._store = VaultDir(self._queue_dir)
         self._q: queue.Queue = queue.Queue()
-        self._thread = threading.Thread(target=self._loop, name="retaindb-writer", daemon=True)
-        self._db_path.parent.mkdir(parents=True, exist_ok=True)
-        # Thread-local connection cache — one connection per thread, reused.
-        self._local = threading.local()
-        self._init_db()
+        # Reconstruct pending work before starting the worker. Invalid records
+        # remain untouched for manual inspection rather than being deleted.
+        for row in self._store.list_records():
+            row_id = row.get("id")
+            user_id = row.get("user_id")
+            session_id = row.get("session_id")
+            messages = row.get("messages")
+            if (isinstance(row_id, str) and isinstance(user_id, str)
+                    and isinstance(session_id, str) and isinstance(messages, list)):
+                self._q.put((row_id, user_id, session_id, messages))
+        self._thread = threading.Thread(
+            target=self._loop, name="retaindb-writer", daemon=True
+        )
         self._thread.start()
-        # Replay any rows left from a previous crash
-        for row_id, user_id, session_id, msgs_json in self._pending_rows():
-            self._q.put((row_id, user_id, session_id, json.loads(msgs_json)))
-
-    def _get_conn(self) -> sqlite3.Connection:
-        """Return a cached connection for the current thread."""
-        conn = getattr(self._local, "conn", None)
-        if conn is None:
-            conn = sqlite3.connect(str(self._db_path), timeout=30)
-            conn.row_factory = sqlite3.Row
-            self._local.conn = conn
-        return conn
-
-    def _init_db(self) -> None:
-        conn = self._get_conn()
-        conn.execute("""CREATE TABLE IF NOT EXISTS pending (
-            id INTEGER PRIMARY KEY AUTOINCREMENT,
-            user_id TEXT, session_id TEXT, messages_json TEXT,
-            created_at TEXT, last_error TEXT
-        )""")
-        conn.commit()
-
-    def _pending_rows(self) -> list:
-        conn = self._get_conn()
-        return conn.execute("SELECT id, user_id, session_id, messages_json FROM pending ORDER BY id ASC LIMIT 200").fetchall()
 
     def enqueue(self, user_id: str, session_id: str, messages: list) -> None:
-        now = datetime.now(timezone.utc).isoformat()
-        conn = self._get_conn()
-        cur = conn.execute(
-            "INSERT INTO pending (user_id, session_id, messages_json, created_at) VALUES (?,?,?,?)",
-            (user_id, session_id, json.dumps(messages, ensure_ascii=False), now),
-        )
-        row_id = cur.lastrowid
-        conn.commit()
+        row_id = uuid.uuid4().hex
+        self._store.write(row_id, {
+            "id": row_id,
+            "user_id": user_id,
+            "session_id": session_id,
+            "messages": messages,
+            "created_at": datetime.now(timezone.utc).isoformat(),
+            "last_error": None,
+        })
         self._q.put((row_id, user_id, session_id, messages))
 
-    def _flush_row(self, row_id: int, user_id: str, session_id: str, messages: list) -> None:
+    def pending_count(self) -> int:
+        return len(self._store.list_ids())
+
+    def _flush_row(self, row_id: str, user_id: str,
+                   session_id: str, messages: list) -> None:
         try:
             self._client.ingest_session(user_id, session_id, messages)
-            conn = self._get_conn()
-            conn.execute("DELETE FROM pending WHERE id = ?", (row_id,))
-            conn.commit()
+            self._store.delete(row_id)
         except Exception as exc:
-            logger.warning("RetainDB ingest failed (will retry): %s", exc)
-            conn = self._get_conn()
-            conn.execute("UPDATE pending SET last_error = ? WHERE id = ?", (str(exc), row_id))
-            conn.commit()
+            logger.warning("RetainDB ingest failed (will retry after restart): %s", exc)
+            row = self._store.read(row_id)
+            if row is not None:
+                row["last_error"] = str(exc)
+                self._store.write(row_id, row)
             time.sleep(2)
 
     def _loop(self) -> None:
@@ -407,6 +396,7 @@ class _WriteQueue:
         self._thread.join(timeout=10)
 
 
+# ---------------------------------------------------------------------------
 # ---------------------------------------------------------------------------
 # Overlay formatter
 # ---------------------------------------------------------------------------
@@ -507,8 +497,11 @@ class RetainDBMemoryProvider(MemoryProvider):
 
         from hermes_constants import get_hermes_home
         hermes_home_path = get_hermes_home()
-        db_path = hermes_home_path / "retaindb_queue.db"
-        self._queue = _WriteQueue(self._client, db_path)
+        vault_root = resolve_vault_root()
+        if vault_root is None:
+            raise RuntimeError("HERMES_OBSIDIAN_VAULT is required for RetainDB's durable queue")
+        queue_dir = vault_root / "06_Automation" / "Hermes" / "RetainQueue"
+        self._queue = _WriteQueue(self._client, queue_dir)
 
         # Seed agent identity from SOUL.md in background
         soul_path = hermes_home_path / "SOUL.md"
