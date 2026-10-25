@@ -143,3 +143,8 @@ SessionDB 起動拒否に起因する旧 SQLite 前提テスト）であり、
 - 対応（無効化ではない）：テスト全体に per-test Vault を設定する autouse fixture を追加し、`SessionDB(db_path=...)` を `SessionDB()`（Vault経由）に変更。原子性テストは、存在しない旧 `_encode_content` フックではなく Vault の `_write` 失敗で置換し、意図（置換の原子性）を維持。さらに `append_to_transcript` / `rewrite_transcript` が GatewayRouting ディレクトリ未作成時に失敗する本番バグを修正（親ディレクトリを作成）。
 - 結果：`tests/gateway/test_session.py`＋`tests/test_obsidian_session_state.py` は **94 passed, 8 subtests passed, 0 failed**。`tests/plugins/test_retaindb_plugin.py` は Vaultキュー仕様に合わせて更新し **67 passed**。`tests/gateway/test_api_server.py` は **138 passed**（pytest-asyncio等を備えたvenvで実行）。`tests/hermes_cli/test_backup.py` は **97 passed**（同venv）。
 - 環境注記：システムpython（依存パッケージ不足）では `test_backup.py` の `TestRunPreUpdateBackup` 6件が `dotenv`/`yaml` 不足で失敗するが、変更前（stash）でも同一に失敗することを確認済みで、本変更によるものではない。
+
+## 第4段階：KanbanランタイムのVault完全移行（2026-10-25）
+
+- `hermes_cli/kanban_db.py` を Vault JSON ストア（`BoardStore`）に全面書き換え。ランタイムの `import sqlite3` は 0 件。呼び出し元（`kanban.py` / `kanban_diagnostics.py` / `kanban_specify.py` / `tools/kanban_tools.py` / `plugins/kanban/dashboard/plugin_api.py` / `gateway/run.py` / `main.py`）の直接SQLを全てストアAPIに置換。旧 `kanban.db` はランタイムから開かない（読み取り専用移行は `scripts/migrate_kanban_to_vault.py` のみ）。
+- 互換記録：`HERMES_KANBAN_DB` が `.db` ファイルを指す場合、その親ディレクトリの `<stem>.store` をボードJSONディレクトリとして扱う（例：`/tmp/pinned/board.db` → `/tmp/pinned/board.store`）。なお `kanban_db_path()` は従来通り旧 `.db` ファイルパスを返す。
