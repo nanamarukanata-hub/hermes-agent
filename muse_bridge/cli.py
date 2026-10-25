@@ -140,10 +140,30 @@ def main(argv: list[str] | None = None) -> int:
     server = serve(args.host, args.port, store, repos, default_checkout=Path.cwd(), token=token, oauth=oauth)
 
     def _install_optional_muse_cli():
-        if ensure_muse_cli_installed():
-            print("muse-cli dependency: installed", file=sys.stderr)
-        else:
+        if not ensure_muse_cli_installed():
             print("warning: muse-cli unavailable; remote dispatch tools report an error", file=sys.stderr)
+            return
+        print("muse-cli dependency: installed", file=sys.stderr)
+        # Run only a read-only status probe. Record a fixed, non-secret
+        # classification in logs; never print CLI stdout/stderr/cookies.
+        from .muse_cli_adapter import status as remote_status
+        try:
+            result = remote_status()
+        except Exception:
+            print("muse agent status probe: unexpected_error", file=sys.stderr)
+            return
+        if result.get("ok") is True:
+            print("muse agent status probe: authenticated", file=sys.stderr)
+        else:
+            error = result.get("error")
+            permitted = {
+                "MUSE_AUTH_NOT_CONFIGURED", "MUSE_CLI_NOT_INSTALLED",
+                "MUSE_CLI_COMMAND_FAILED", "MUSE_CLI_INVALID_JSON",
+                "MUSE_CLI_EXECUTION_FAILED",
+                "MUSE_COMMAND_TIMEOUT_DELIVERY_UNKNOWN",
+            }
+            print("muse agent status probe: " + (error if error in permitted else "UNKNOWN_ERROR"),
+                  file=sys.stderr)
 
     import threading
     threading.Thread(target=_install_optional_muse_cli, name="muse-cli-bootstrap", daemon=True).start()
