@@ -115,18 +115,15 @@ class Diagnostic:
 def _task_field(task, name, default=None):
     """Read a field from a task regardless of representation.
 
-    Callers pass sqlite3.Row (dict-like with [] but no attribute
-    access), kanban_db.Task dataclasses (attribute access), or plain
+    Callers pass kanban_db.Task dataclasses (attribute access) or plain
     dicts (both). This normalises them so rule functions don't have
     to branch on type each time.
     """
     if task is None:
         return default
-    # sqlite Row + plain dicts both support mapping access; Row also
-    # supports .keys().
+    # Plain dicts support mapping access and .keys().
     try:
-        # Row raises IndexError if the key isn't a column in the query;
-        # dicts return default via .get. Handle both.
+        # Dicts return default via .get.
         if hasattr(task, "keys") and name in task.keys():
             return task[name]
     except Exception:
