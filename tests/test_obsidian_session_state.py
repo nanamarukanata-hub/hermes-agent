@@ -224,6 +224,18 @@ class ObsidianStateTests(unittest.TestCase):
             with self.assertRaises(RuntimeError):
                 self.db.set_meta("new", "value")
 
+    def test_symlinked_vault_parent_does_not_create_outside_directories(self):
+        # Validate before mkdir(parents=True): an attacker-controlled Vault
+        # parent link must not cause even temporary writes outside the Vault.
+        with tempfile.TemporaryDirectory() as vault, tempfile.TemporaryDirectory() as outside:
+            (Path(vault) / "06_Automation").symlink_to(
+                Path(outside), target_is_directory=True
+            )
+            with patch.dict(os.environ, {"HERMES_OBSIDIAN_VAULT": vault}):
+                with self.assertRaises(RuntimeError):
+                    SessionDB()
+            self.assertFalse((Path(outside) / "Hermes").exists())
+
     def test_symlinked_writer_lockfile_is_rejected(self):
         with tempfile.TemporaryDirectory() as outside:
             external = Path(outside) / "lock"
