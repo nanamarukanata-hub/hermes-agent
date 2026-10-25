@@ -234,7 +234,8 @@ class VaultStore:
         doc_id = validate_id(doc_id)
         if kind in ("Sessions", "Conversations"):
             item = self.load_session(doc_id)
-            if item is None:
+            if item is None or item.get("user_id") != user_id:
+                # A missing owner is not a public session.
                 return None
             if kind == "Conversations":
                 return {**item, "session_id": item.get("id"),
@@ -246,7 +247,9 @@ class VaultStore:
             if not path.exists():
                 return None
             meta, body = _parse_frontmatter(path.read_text(encoding="utf-8"))
-            if meta.get("user_id") not in (None, user_id):
+            if meta.get("user_id") != user_id:
+                # APEX-6 legacy notes may be ownerless; do not expose them
+                # through a Discord user-scoped RP memory lookup.
                 return None
             body = body.strip("\n")
             return {**meta, "content": body, "text": body}
@@ -267,15 +270,19 @@ class VaultStore:
                 return []
             return sorted(p.name for p in self.sessions_root.iterdir()
                           if p.is_dir() and not p.is_symlink()
-                          and (p / "metadata.json").exists())
+                          and _ID_RE.fullmatch(p.name)
+                          and (p / "metadata.json").exists()
+                          and (self.load_session(p.name) or {}).get("user_id") == user_id)
         if kind == "Memory":
             if not self.memory_root.exists():
                 return []
             # Memory files are not per-user on disk (PR #16); filter by frontmatter.
             out = []
             for p in sorted(self.memory_root.glob("*.md")):
+                if p.is_symlink():
+                    raise ValueError("symlinked memory file is rejected")
                 meta, _ = _parse_frontmatter(p.read_text(encoding="utf-8"))
-                if meta.get("user_id") in (None, user_id):
+                if meta.get("user_id") == user_id:
                     out.append(p.stem)
             return out
         if kind == "CharacterState":
@@ -349,7 +356,7 @@ class VaultStore:
                     continue
                 seen.add(key)
                 data = self.load_document(kind, user_id, doc_id)
-                if kind in ("Sessions", "Conversations") and data and data.get("user_id") not in (None, user_id):
+                if kind in ("Sessions", "Conversations") and data and data.get("user_id") != user_id:
                     continue
                 if data and needle in json.dumps(data, ensure_ascii=False).lower():
                     hits.append({"kind": kind, "id": doc_id, "data": data})
@@ -363,6 +370,8 @@ class VaultStore:
         session = self.load_session(session_id)
         if not session:
             raise KeyError(f"session not found: {session_id}")
+        if session.get("user_id") != validate_id(user_id):
+            raise PermissionError("session is not owned by this user")
         messages = list(session.get("messages") or [])
         if len(messages) <= keep_last:
             return session
