@@ -54,6 +54,8 @@ from typing import Any
 from urllib.parse import parse_qs, urlparse
 
 from .policy import checkout_for, classify, load_repos
+from . import muse_cli_adapter
+import threading
 from .store import TaskStore
 
 VERSION = "0.1.0"
@@ -67,25 +69,28 @@ TOOLS = [
     {"name": "muse_run_tests", "description": "Run pytest for a repo checkout (bounded, read-only apart from test artifacts in tmp).", "inputSchema": {"type": "object", "properties": {"repo": {"type": "string"}, "test_path": {"type": "string"}}, "required": ["repo"]}},
     {"name": "muse_get_diff", "description": "Get git status and diff for a repo checkout (read-only).", "inputSchema": {"type": "object", "properties": {"repo": {"type": "string"}}, "required": ["repo"]}},
     {"name": "muse_approve", "description": "Approve or reject a needs_approval task. Approval alone does not execute it; Muse review is still required before execution.", "inputSchema": {"type": "object", "properties": {"task_id": {"type": "string"}, "decision": {"type": "string", "enum": ["approve", "reject"]}}, "required": ["task_id", "decision"]}},
+    {"name": "muse_remote_status", "description": "Check actual personal Muse agent authentication and VM reachability through installed muse-cli; returns no credentials.", "inputSchema": {"type": "object", "properties": {}}},
+    {"name": "muse_dispatch_approved", "description": "Send one previously approved bridge task directly to the personal muse.ai agent through muse-cli. Never means code completion; CLI must be authenticated.", "inputSchema": {"type": "object", "properties": {"task_id": {"type": "string"}}, "required": ["task_id"]}},
     {"name": "muse_complete_task", "description": "Muse-side completion: attach a result, diff and test results to a task and mark it done (or failed). Used by Muse after executing an awaiting_muse instruction.", "inputSchema": {"type": "object", "properties": {"task_id": {"type": "string"}, "result": {"type": "string"}, "diff": {"type": "string"}, "test_results": {"type": "string"}, "failed": {"type": "boolean"}}, "required": ["task_id", "result"]}},
 ]
 
 # ChatGPT treats tools without readOnlyHint as writes (confirmation
 # required); read-only tools are marked so they can run without it.
 _READ_ONLY_TOOLS = {"muse_get_status", "muse_get_result", "muse_list_sessions",
-                    "muse_get_session", "muse_get_diff"}
+                    "muse_get_session", "muse_get_diff", "muse_remote_status"}
 for _tool in TOOLS:
     _tool["annotations"] = {"readOnlyHint": _tool["name"] in _READ_ONLY_TOOLS}
 
 # Shown to the client in `initialize` (kept under 512 chars so the
 # whole text is self-contained for ChatGPT's plugin instructions).
 INSTRUCTIONS = (
-    "Muse bridge: send a development instruction for hermes-agent or "
-    "apex-6-private with muse_send_instruction, check progress with "
-    "muse_get_status, fetch the result with muse_get_result, and continue "
-    "a session with muse_get_session. Use muse_get_diff and muse_run_tests "
-    "for read-only checks. Approval alone never executes code; Muse reviews "
-    "queued work before execution."
+    "Muse bridge: muse_send_instruction creates a task for hermes-agent or "
+    "apex-6-private. muse_approve authorizes queued changes; "
+    "muse_dispatch_approved sends approved work to the personal muse.ai "
+    "agent via authenticated muse-cli (not Muse Code). "
+    "muse_remote_status verifies CLI connectivity. "
+    "muse_get_status and muse_get_result show progress and replies. "
+    "Muse replies alone are not proof of completed code changes."
 )
 
 
@@ -104,11 +109,16 @@ class Bridge:
         self.store = store
         self.repos = repos
         self.default_checkout = default_checkout
+        self._dispatch_lock = threading.Lock()
 
     def _checkout(self, repo: str) -> str | None:
         return checkout_for(repo, self.repos, self.default_checkout)
 
     def call_tool(self, name: str, args: dict) -> dict:
+        if name == "muse_remote_status":
+            return muse_cli_adapter.status()
+        if name == "muse_dispatch_approved":
+            return self._dispatch_approved(args)
         if name == "muse_send_instruction":
             return self._send(args)
         if name == "muse_get_status":
@@ -218,6 +228,33 @@ class Bridge:
             self.store.update_task(task["task_id"], status="rejected", approval="rejected")
             return {"task_id": task["task_id"], "status": "rejected"}
         return {"error": "decision must be approve or reject"}
+
+    def _dispatch_approved(self, args: dict) -> dict:
+        task_id = args.get("task_id", "")
+        if not isinstance(task_id, str) or not task_id:
+            return {"error": "task_id is required"}
+        with self._dispatch_lock:
+            task = self.store.get_task(task_id)
+            if task is None:
+                return {"error": "task not found"}
+            if task.get("status") != "approved" or task.get("approval") != "approved":
+                return {"error": "task is not approved for Muse dispatch"}
+            self.store.update_task(task_id, status="dispatching")
+        result = muse_cli_adapter.send(task["instruction"], repo=task["repo"], task_id=task_id)
+        if not result.get("ok"):
+            error = result.get("error", "MUSE_SEND_FAILED")
+            # Preflight failures do not send anything; other failures may
+            # have reached Muse, so never retry them automatically.
+            preflight = error in ("MUSE_CLI_NOT_INSTALLED", "MUSE_AUTH_NOT_CONFIGURED",
+                                   "INVALID_INSTRUCTION", "INVALID_REPO", "INVALID_WAIT")
+            new_status = "approved" if preflight else "delivery_unknown"
+            self.store.update_task(task_id, status=new_status, muse_delivery=error)
+            return {"task_id": task_id, "status": new_status, "error": error}
+        self.store.update_task(task_id, status="awaiting_muse", muse_delivery="sent",
+                               muse_reply=result.get("reply"))
+        return {"task_id": task_id, "status": "awaiting_muse",
+                "sent": True, "reply_received": result["reply_received"],
+                "reply": result["reply"], "note": result["note"]}
 
     def _complete(self, args: dict) -> dict:
         task = self.store.get_task(args.get("task_id", ""))
