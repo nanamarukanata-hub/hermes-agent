@@ -278,26 +278,22 @@ _INITIALIZED_PATHS: set[str] = set()
 
 
 def workspaces_root(board: Optional[str] = None) -> Path:
-    """Return the directory under which ``scratch`` workspaces are created."""
+    """Keep scratch workspaces inside the configured Obsidian Vault.
+
+    An explicit workspace override is permitted only if its resolved path
+    stays inside the Vault; legacy Hermes-home fallbacks are forbidden.
+    """
     override = os.environ.get("HERMES_KANBAN_WORKSPACES_ROOT", "").strip()
     if override:
-        return Path(override).expanduser()
-    slug = _normalize_board_slug(board)
-    if slug is None:
-        slug = get_current_board()
-    if slug == DEFAULT_BOARD:
-        return kanban_home() / "kanban" / "workspaces"
-    return board_dir(slug) / "workspaces"
+        return _checked_kanban_file(Path(override).expanduser())
+    slug = _normalize_board_slug(board) or get_current_board()
+    return _checked_kanban_file(kanban_store_dir(board=slug) / "workspaces")
 
 
 def worker_logs_dir(board: Optional[str] = None) -> Path:
-    """Return the directory under which per-task worker logs are written."""
-    slug = _normalize_board_slug(board)
-    if slug is None:
-        slug = get_current_board()
-    if slug == DEFAULT_BOARD:
-        return kanban_home() / "kanban" / "logs"
-    return board_dir(slug) / "logs"
+    """Keep persistent per-task worker logs in the Obsidian Vault."""
+    slug = _normalize_board_slug(board) or get_current_board()
+    return _checked_kanban_file(kanban_store_dir(board=slug) / "logs")
 
 
 def _checked_kanban_file(path: Path) -> Path:
