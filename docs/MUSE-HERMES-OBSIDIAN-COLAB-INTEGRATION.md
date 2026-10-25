@@ -16,11 +16,24 @@ Muse is the operator/development coordinator; Hermes Agent runs the Discord RP b
 4. Colab is an ephemeral job executor: job specs/results/checkpoints are stored in Vault, no unattended guarantee, no secrets in notebooks/logs, no assumption that a free runtime is always available.
 5. Muse -> authenticated MCP bridge -> authorized CLI execution -> GitHub development PRs. OAuth for ChatGPT-to-bridge and Muse CLI login are separate authentications; verify both with a harmless read-only command before allowing code changes.
 
-## Muse execution instruction (send through authenticated muse-cli when available)
-Inspect Hermes PR #11 and APEX-6 PR #16, including latest GitHub Actions logs. Audit the Discord session load/save path for duplicate messages and dual JSONL/Vault persistence; implement a minimal fix and regression tests on the Hermes development branch. Confirm Obsidian-only durability, then test Google Drive Vault synchronization with a non-sensitive test note and verify readback. Design and validate a manually triggered Colab job with Vault-backed checkpoints. Keep both PRs Draft; do not merge, deploy, delete real data, publish secrets, or add RP content/filters. Report exact commands, commits, CI URLs and outstanding failures. Do not claim any unexecuted step as complete.
+## Muse execution instruction — execute 10 development iterations
+
+Do not spend iterations on Muse Bridge OAuth or Muse CLI authentication. Begin directly with the engineering tasks below. Complete each iteration only after recording changed files, commit SHA, test output and CI run URL; if blocked, report the blocker and continue with the next independently executable task. Never claim an unexecuted action succeeded.
+
+1. Inspect Hermes PR #11 and APEX-6 PR #16, collect latest failing CI tests and identify exact root causes.
+2. Fix duplicate Discord session messages caused by Vault/legacy JSONL merge; add idempotency tests and preserve all existing user data.
+3. Make Vault the only canonical runtime store for session transcripts and memory; remove legacy write fallbacks without deleting old files.
+4. Audit Kanban, thread metadata, worker logs, and workspaces for writes outside the configured Vault; fix and test.
+5. Run Hermes Discord E2E and full regression suite; address storage-related failures, isolate unrelated failures.
+6. Pin the tested Hermes commit in APEX-6 CI and validate cross-project integration.
+7. Verify a safe test note can be written, synced to the existing Google Drive Obsidian Vault, and read back; handle conflicts and report evidence.
+8. Implement a manually invoked Colab job contract with sanitized fixtures, bounded execution and Vault-based checkpoint/result paths; no unattended runtime claims.
+9. Execute a permitted Colab smoke test, if a runtime is available, and verify its result is synchronized back into Vault; otherwise provide exact blocker and tested local equivalent.
+10. Run restart/crash/concurrency and no-outside-Vault-write tests; produce a go/no-go readiness report. Keep both PRs Draft.
+
+Do not merge, deploy, delete real data, publish secrets, or add RP content/filters. No production activation without explicit approval.
 
 ## Activation gates
-- [ ] Muse CLI authentication and read-only command executed; record redacted output.
 - [ ] Hermes CI including Discord E2E and duplicate-message regression green.
 - [ ] APEX-6 CI green on pinned Hermes commit (not moving branch).
 - [ ] Obsidian Vault writable on target runtime; real Drive sync and readback proven.
