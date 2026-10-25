@@ -74,9 +74,11 @@ jobs:
 
       - name: Run e2e tests
         run: |
+          mkdir -p "$HERMES_OBSIDIAN_VAULT"
           source .venv/bin/activate
           python -m pytest tests/e2e/ -v --tb=short
         env:
+          HERMES_OBSIDIAN_VAULT: ${{ runner.temp }}/hermes-e2e-vault
           OPENROUTER_API_KEY: ""
           OPENAI_API_KEY: ""
           NOUS_API_KEY: ""
