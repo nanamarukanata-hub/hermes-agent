@@ -1300,6 +1300,24 @@ class SessionStore:
             for msg in messages:
                 f.write(json.dumps(msg, ensure_ascii=False) + "\n")
 
+    def load_transcript_unified(self, session_id: str) -> List[Dict[str, Any]]:
+        """Canonical transcript: PR #11 Obsidian SessionDB only.
+
+        This is the unified read path used by the hermes_hybrid gateway
+        integration. The legacy JSONL mirror in GatewayRouting is NOT
+        consulted here, so a session cannot silently split between two
+        Vault locations. ``load_transcript`` keeps its legacy
+        longer-source fallback for pre-migration sessions and is
+        unchanged.
+        """
+        if not self._db:
+            return []
+        try:
+            return self._db.get_messages_as_conversation(session_id)
+        except Exception as e:
+            logger.debug("Could not load messages from Obsidian SessionDB: %s", e)
+            return []
+
     def load_transcript(self, session_id: str) -> List[Dict[str, Any]]:
         """Load all messages from a session's transcript."""
         db_messages = []

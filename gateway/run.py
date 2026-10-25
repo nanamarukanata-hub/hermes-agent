@@ -6737,6 +6737,36 @@ class GatewayRunner:
             }
             await self.hooks.emit("agent:start", hook_ctx)
 
+            # --- Hermes hybrid RP hook (Discord Gateway integration) ---
+            # Inbound Discord messages flow through this handler, so this
+            # is where RP processing, Vault memory search, and RP state
+            # updates attach to the real conversation path. The hook is
+            # a no-op when no character card is active for this user or
+            # when HERMES_OBSIDIAN_VAULT is unset, and it never raises
+            # into the gateway: a failure here must not drop a message.
+            # RP state is keyed by (user, character) in the Vault, so it
+            # survives session resets and gateway restarts; conversation
+            # turns themselves stay in the PR #11 SessionDB.
+            _rp_bridge = None
+            try:
+                import os as _rp_os
+                if _rp_os.environ.get("HERMES_RP_ENABLED", "1") not in ("0", "false", "no"):
+                    from hermes_hybrid.gateway_integration import RPConversation as _RPConversation
+                    from hermes_hybrid.obsidian_store import VaultStore as _VaultStore
+                    _rp_vault = _rp_os.environ.get("HERMES_OBSIDIAN_VAULT")
+                    if _rp_vault:
+                        _rp_bridge = _RPConversation(
+                            _VaultStore(_rp_vault),
+                            session_db=getattr(self.session_store, "_db", None),
+                        )
+                    _rp_prompt = _rp_bridge.before_agent(
+                        str(source.user_id or ""), session_entry.session_id, message_text)
+                    if _rp_prompt:
+                        context_prompt = context_prompt + "\n\n" + _rp_prompt
+            except Exception as _rp_err:
+                logger.debug("RP hook before_agent failed (non-fatal): %s", _rp_err)
+                _rp_bridge = None
+
             # Run the agent
             agent_result = await self._run_agent(
                 message=message_text,
@@ -6788,6 +6818,17 @@ class GatewayRunner:
                     "rephrase your question."
                 )
             agent_messages = agent_result.get("messages", [])
+
+            # --- Hermes hybrid RP hook: persist RP state after the turn ---
+            # Conversation turns are persisted by the gateway's SessionDB
+            # below; this only advances RP turn state in the Vault.
+            try:
+                if _rp_bridge is not None:
+                    _rp_bridge.after_agent(
+                        str(source.user_id or ""), session_entry.session_id,
+                        message_text, response)
+            except Exception as _rp_err:
+                logger.debug("RP hook after_agent failed (non-fatal): %s", _rp_err)
             _response_time = time.time() - _msg_start_time
             _api_calls = agent_result.get("api_calls", 0)
             _resp_len = len(response)
