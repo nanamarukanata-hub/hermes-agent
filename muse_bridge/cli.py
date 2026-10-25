@@ -106,6 +106,13 @@ def main(argv: list[str] | None = None) -> int:
         return 0
 
     # serve
+    # Render's existing build command performs syntax checks only. Provision
+    # pinned muse-cli at process startup without changing other services.
+    from .bootstrap import ensure_muse_cli_installed
+    if ensure_muse_cli_installed():
+        print("muse-cli dependency: installed", file=sys.stderr)
+    else:
+        print("warning: muse-cli unavailable; remote dispatch tools will report an error", file=sys.stderr)
     from .muse_cli_adapter import configure_cookie_from_environment
     try:
         configure_cookie_from_environment()
