@@ -345,7 +345,8 @@ def make_handler(bridge: Bridge, token: str | None, oauth=None):
             path = parsed.path
             if path in ("/health", "/health/"):
                 self._send_json(200, {"status": "ok", "version": VERSION, "tools": [t["name"] for t in TOOLS],
-                                     "oauth": oauth is not None})
+                                     "oauth": oauth is not None,
+                                     "muse_cli_installed": muse_cli_adapter._available()})
                 return
             if oauth is not None and path in ("/.well-known/oauth-protected-resource",
                                               "/.well-known/oauth-protected-resource/mcp"):
