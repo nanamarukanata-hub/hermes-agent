@@ -106,13 +106,9 @@ def main(argv: list[str] | None = None) -> int:
         return 0
 
     # serve
-    # Render's existing build command performs syntax checks only. Provision
-    # pinned muse-cli at process startup without changing other services.
+    # Start the authenticated MCP server promptly. Installing an optional
+    # third-party CLI must not block Render readiness checks.
     from .bootstrap import ensure_muse_cli_installed
-    if ensure_muse_cli_installed():
-        print("muse-cli dependency: installed", file=sys.stderr)
-    else:
-        print("warning: muse-cli unavailable; remote dispatch tools will report an error", file=sys.stderr)
     from .muse_cli_adapter import configure_cookie_from_environment
     try:
         configure_cookie_from_environment()
@@ -142,6 +138,15 @@ def main(argv: list[str] | None = None) -> int:
         return 2
     repos = load_repos(args.repos)
     server = serve(args.host, args.port, store, repos, default_checkout=Path.cwd(), token=token, oauth=oauth)
+
+    def _install_optional_muse_cli():
+        if ensure_muse_cli_installed():
+            print("muse-cli dependency: installed", file=sys.stderr)
+        else:
+            print("warning: muse-cli unavailable; remote dispatch tools report an error", file=sys.stderr)
+
+    import threading
+    threading.Thread(target=_install_optional_muse_cli, name="muse-cli-bootstrap", daemon=True).start()
     print(f"muse-bridge {VERSION} listening on http://{args.host}:{args.port}/mcp (health: /health, oauth: {'on' if oauth else 'off'})", file=sys.stderr)
     try:
         server.serve_forever()
