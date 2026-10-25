@@ -76,5 +76,31 @@ class KanbanMigrationGuardTests(unittest.TestCase):
         self.assertFalse(list(external.iterdir()))
 
 
+    def test_missing_required_tasks_table_fails_closed(self):
+        with sqlite3.connect(self.db) as conn:
+            conn.execute("DROP TABLE tasks")
+        result = self.run_cli()
+        self.assertEqual(result.returncode, 2, result.stderr)
+        self.assertIn("no such table: tasks", result.stderr)
+        self.assertFalse(self.vault.exists())
+
+    def test_broken_optional_table_fails_instead_of_silent_data_loss(self):
+        with sqlite3.connect(self.db) as conn:
+            conn.execute("CREATE VIEW task_links AS SELECT * FROM missing_source")
+        result = self.run_cli()
+        self.assertEqual(result.returncode, 2, result.stderr)
+        self.assertIn("no such table", result.stderr)
+        self.assertFalse(self.vault.exists())
+
+    def test_read_only_uri_handles_reserved_filename_characters(self):
+        renamed = self.root / "kanban #?%.db"
+        self.db.rename(renamed)
+        self.db = renamed
+        result = self.run_cli()
+        self.assertEqual(result.returncode, 0, result.stderr)
+        task_file = self.vault / "06_Automation/Hermes/Kanban/default/t1.json"
+        self.assertEqual(json.loads(task_file.read_text())["title"], "Task")
+
+
 if __name__ == "__main__":
     unittest.main()
