@@ -34,11 +34,18 @@ _RECORD_ID_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9_.-]*$")
 _RESERVED_NAMES = frozenset({"links", "comments", "events", "runs"})
 
 
-def _dump_table(conn: sqlite3.Connection, name: str) -> list[dict]:
+def _dump_table(conn: sqlite3.Connection, name: str, *, optional: bool = False) -> list[dict]:
+    """Read a table without silently discarding schema or I/O errors.
+
+    Older Kanban schemas may lack optional tables, but a missing tasks
+    table or an unreadable existing table must abort migration.
+    """
     try:
         cur = conn.execute(f"SELECT * FROM {name}")
-    except sqlite3.Error:
-        return []
+    except sqlite3.OperationalError as exc:
+        if optional and str(exc).lower() == f"no such table: {name}":
+            return []
+        raise
     cols = [d[0] for d in cur.description]
     return [dict(zip(cols, row)) for row in cur.fetchall()]
 
@@ -70,16 +77,23 @@ def main() -> int:
         print("error: board destination resolves outside the Vault", file=sys.stderr)
         return 2
 
-    conn = sqlite3.connect(f"file:{db_path}?mode=ro", uri=True)
-    conn.row_factory = sqlite3.Row
+    # as_uri() escapes '?' and '#' in legacy DB filenames. A single
+    # read transaction gives all exported tables one consistent snapshot.
     try:
-        tasks = _dump_table(conn, "tasks")
-        links = _dump_table(conn, "task_links")
-        comments = _dump_table(conn, "task_comments")
-        events = _dump_table(conn, "task_events")
-        runs = _dump_table(conn, "task_runs")
-    finally:
-        conn.close()
+        conn = sqlite3.connect(f"{db_path.resolve().as_uri()}?mode=ro", uri=True)
+        try:
+            conn.row_factory = sqlite3.Row
+            conn.execute("BEGIN")
+            tasks = _dump_table(conn, "tasks")
+            links = _dump_table(conn, "task_links", optional=True)
+            comments = _dump_table(conn, "task_comments", optional=True)
+            events = _dump_table(conn, "task_events", optional=True)
+            runs = _dump_table(conn, "task_runs", optional=True)
+        finally:
+            conn.close()
+    except sqlite3.Error as exc:
+        print(f"error: cannot read legacy Kanban database: {exc}", file=sys.stderr)
+        return 2
 
 
     # Validate all names and preflight collisions BEFORE any Vault writes.
