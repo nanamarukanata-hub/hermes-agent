@@ -82,10 +82,11 @@ def migrate(dbfile, commit=False):
         record["messages"] = messages.get(sid, [])
         record["message_count"] = len(record["messages"])
         destination = target._load(sid)
-        if destination is not None:
-            if (destination.get("messages") != record["messages"] or
-                destination.get("source") != record.get("source")):
-                raise RuntimeError(f"Conflicting Vault session: {sid}")
+        if destination is not None and destination != record:
+            # Matching messages/source alone is insufficient: the existing
+            # session may have different ownership, model, timing or usage.
+            # Never silently accept a partially migrated or edited record.
+            raise RuntimeError(f"Conflicting Vault session: {sid}")
         prepared.append((sid, record, destination is not None))
     unknown = sorted(set(messages) - {sid for sid, _, _ in prepared})
     if unknown:
@@ -101,11 +102,15 @@ def migrate(dbfile, commit=False):
         return result
     with target._guard():
         for sid, record, already in prepared:
+            # Recheck ALL destinations under the writer lock, including ones
+            # that matched during preflight. A running gateway may have
+            # modified an existing record between the two checks.
+            current = target._load(sid)
             if already:
+                if current != record:
+                    raise RuntimeError(f"Conflicting Vault session changed during migration: {sid}")
                 continue
-            # Recheck under the writer lock; never silently overwrite a
-            # concurrent edit, even if dry-run passed before another writer.
-            if target._load(sid) is not None:
+            if current is not None:
                 raise RuntimeError(f"Destination created during migration: {sid}")
             target._save(sid, record)
             loaded = target._load(sid)
