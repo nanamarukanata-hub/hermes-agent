@@ -106,6 +106,12 @@ def main(argv: list[str] | None = None) -> int:
         return 0
 
     # serve
+    from .muse_cli_adapter import configure_cookie_from_environment
+    try:
+        configure_cookie_from_environment()
+    except OSError:
+        # Do not leak the cookie value in startup logs.
+        print("warning: Muse CLI cookie file could not be provisioned", file=sys.stderr)
     from .oauth import OAuthServer
     from .policy import load_repos
 
