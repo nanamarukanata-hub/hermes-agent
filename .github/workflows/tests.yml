@@ -49,7 +49,7 @@ jobs:
           source .venv/bin/activate
           # Triage mode: stop at first failure so CI prints the failing test and traceback
           # before the 20-minute job timeout. Restore full-suite execution once fixed.
-          python -m pytest tests/ -q --ignore=tests/integration --ignore=tests/e2e --tb=short -n 4 --maxfail=1
+          python -m pytest tests/ -q --ignore=tests/integration --ignore=tests/e2e --tb=short -n auto --maxfail=1
         env:
           # Isolated CI-only Vault: production data and SQLite are never used.
           HERMES_OBSIDIAN_VAULT: ${{ runner.temp }}/hermes-unit-vault
