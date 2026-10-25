@@ -276,6 +276,14 @@ def _hermetic_environment(tmp_path, monkeypatch):
     (fake_hermes_home / "skills").mkdir()
     monkeypatch.setenv("HERMES_HOME", str(fake_hermes_home))
 
+    # Obsidian is the sole persistent session backend. Never let concurrent
+    # pytest-xdist workers (or tests in the same worker) share a CI Vault:
+    # session titles, ACP listings and gateway suspension state would leak
+    # between otherwise independent tests. Production Drive data is untouched.
+    fake_vault = tmp_path / "obsidian_vault"
+    fake_vault.mkdir()
+    monkeypatch.setenv("HERMES_OBSIDIAN_VAULT", str(fake_vault))
+
     # 4. Deterministic locale / timezone / hashseed. CI runs in UTC with
     #    C.UTF-8 locale; local dev often doesn't. Pin everything.
     monkeypatch.setenv("TZ", "UTC")
