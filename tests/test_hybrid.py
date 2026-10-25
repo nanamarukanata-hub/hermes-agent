@@ -105,10 +105,16 @@ def test_context_compression(tmp_path):
     for i in range(25):
         mgr.record_turn(s, "user", f"msg {i}")
     compressed = store.compress_conversation("userA", s.session_id, keep_last=5, summary="early chat")
-    assert len(compressed["turns"]) == 5
-    assert compressed["archived_turn_count"] == 20
+    # Unified PR #11 format: messages, not turns.
+    assert len(compressed["messages"]) == 5
+    assert compressed["archived_message_count"] == 20
     archive = store.load_document("Conversations", "userA", f"{s.session_id}-archive")
-    assert len(archive["archived_turns"]) == 20
+    assert len(archive["turns"]) == 20
+    # Canonical layout check: PR #11 session folder + Transcript.md.
+    assert (tmp_path / "vault" / "06_Automation" / "Hermes" / "Sessions"
+            / s.session_id / "metadata.json").exists()
+    assert (tmp_path / "vault" / "06_Automation" / "Hermes" / "Sessions"
+            / s.session_id / "Transcript.md").exists()
 
 
 def test_character_switch_keeps_old_state(tmp_path):
@@ -131,10 +137,11 @@ def test_path_traversal_and_symlink_rejected(tmp_path):
     # Symlink inside the vault pointing outside must be rejected.
     outside = tmp_path / "outside"
     outside.mkdir()
-    (tmp_path / "vault" / "Sessions").mkdir(parents=True)
-    os.symlink(outside, tmp_path / "vault" / "Sessions" / "userA")
+    sessions_dir = tmp_path / "vault" / "06_Automation" / "Hermes" / "Sessions"
+    sessions_dir.mkdir(parents=True)
+    os.symlink(outside, sessions_dir / "evil")
     with pytest.raises(ValueError):
-        store.load_document("Sessions", "userA", "x")
+        store.load_document("Sessions", "userA", "evil")
 
 
 def test_atomic_and_concurrent_writes(tmp_path):
@@ -151,7 +158,7 @@ def test_atomic_and_concurrent_writes(tmp_path):
     )
     procs = [subprocess.Popen([sys.executable, "-c", script]) for _ in range(20)]
     assert all(p.wait() == 0 for p in procs)
-    assert store.load_document("Sessions", "userA", "shared") == {"v": 1}
+    assert store.load_document("Sessions", "userA", "shared")["v"] == 1
 
 
 def test_vault_sync_conflict_and_refusal(tmp_path):
