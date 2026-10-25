@@ -142,15 +142,29 @@ class TestClient:
 # _WriteQueue tests
 # ===========================================================================
 
+
+def _queue_files(queue_dir):
+    """Vault queue files, excluding the flock file."""
+    return [f for f in Path(queue_dir).glob("*.json") if f.name != ".vault-writer.lock"]
+
+def _read_queue_files(queue_dir):
+    out = []
+    for f in _queue_files(queue_dir):
+        try:
+            out.append(json.loads(f.read_text(encoding="utf-8")))
+        except (OSError, json.JSONDecodeError):
+            continue
+    return out
+
 class TestWriteQueue:
-    """Test the SQLite-backed write queue with real SQLite."""
+    """Test the Vault-backed write queue with real JSON files."""
 
     def _make_queue(self, tmp_path, client=None):
         if client is None:
             client = MagicMock()
             client.ingest_session = MagicMock(return_value={"status": "ok"})
-        db_path = tmp_path / "test_queue.db"
-        return _WriteQueue(client, db_path), client, db_path
+        queue_dir = tmp_path / "test_queue"
+        return _WriteQueue(client, queue_dir), client, queue_dir
 
     def test_enqueue_creates_row(self, tmp_path):
         q, client, db_path = self._make_queue(tmp_path)
@@ -162,76 +176,69 @@ class TestWriteQueue:
         # If ingest succeeded, the row should be deleted
         client.ingest_session.assert_called_once()
 
-    def test_enqueue_persists_to_sqlite(self, tmp_path):
+    def test_enqueue_persists_to_vault(self, tmp_path):
         client = MagicMock()
-        # Make ingest slow so the row is still in SQLite when we peek.
+        # Make ingest slow so the file is still in the Vault when we peek.
         # 0.5s is plenty — the test just needs the flush to still be in-flight.
         client.ingest_session = MagicMock(side_effect=lambda *a, **kw: time.sleep(0.5))
-        db_path = tmp_path / "test_queue.db"
-        q = _WriteQueue(client, db_path)
+        queue_dir = tmp_path / "test_queue"
+        q = _WriteQueue(client, queue_dir)
         q.enqueue("user1", "sess1", [{"role": "user", "content": "test"}])
-        # Check SQLite directly — row should exist since flush is slow
-        conn = sqlite3.connect(str(db_path))
-        rows = conn.execute("SELECT user_id, session_id FROM pending").fetchall()
-        conn.close()
+        # Check the Vault directly — a file should exist since flush is slow
+        rows = _read_queue_files(queue_dir)
         assert len(rows) >= 1
-        assert rows[0][0] == "user1"
+        assert rows[0]["user_id"] == "user1"
+        assert rows[0]["session_id"] == "sess1"
         q.shutdown()
 
     def test_flush_deletes_row_on_success(self, tmp_path):
-        q, client, db_path = self._make_queue(tmp_path)
+        q, client, queue_dir = self._make_queue(tmp_path)
         q.enqueue("user1", "sess1", [{"role": "user", "content": "hi"}])
         q.shutdown()  # blocks until drain
-        # Row should be gone
-        conn = sqlite3.connect(str(db_path))
-        rows = conn.execute("SELECT COUNT(*) FROM pending").fetchone()[0]
-        conn.close()
-        assert rows == 0
+        # File should be gone
+        assert _queue_files(queue_dir) == []
 
     def test_flush_records_error_on_failure(self, tmp_path):
         client = MagicMock()
         client.ingest_session = MagicMock(side_effect=RuntimeError("API down"))
-        db_path = tmp_path / "test_queue.db"
-        q = _WriteQueue(client, db_path)
+        queue_dir = tmp_path / "test_queue"
+        q = _WriteQueue(client, queue_dir)
         q.enqueue("user1", "sess1", [{"role": "user", "content": "hi"}])
         # Poll for the error to be recorded (max 2s), instead of a fixed 3s wait.
         deadline = time.time() + 2.0
         last_error = None
         while time.time() < deadline:
-            conn = sqlite3.connect(str(db_path))
-            row = conn.execute("SELECT last_error FROM pending").fetchone()
-            conn.close()
-            if row and row[0]:
-                last_error = row[0]
+            for row in _read_queue_files(queue_dir):
+                if row.get("last_error"):
+                    last_error = row["last_error"]
+                    break
+            if last_error:
                 break
             time.sleep(0.05)
         q.shutdown()
         assert last_error is not None
         assert "API down" in last_error
 
-    def test_thread_local_connection_reuse(self, tmp_path):
-        q, _, _ = self._make_queue(tmp_path)
-        # Same thread should get same connection
-        conn1 = q._get_conn()
-        conn2 = q._get_conn()
-        assert conn1 is conn2
+    def test_queue_dir_reuse(self, tmp_path):
+        # Same queue directory is the shared durable state across
+        # instances (the Vault replacement for a thread-local connection).
+        q, _, queue_dir = self._make_queue(tmp_path)
+        assert q._queue_dir == queue_dir
+        assert q.pending_count() == 0
         q.shutdown()
 
     def test_crash_recovery_replays_pending(self, tmp_path):
         """Simulate crash: create rows, then new queue should replay them."""
-        db_path = tmp_path / "recovery_test.db"
+        queue_dir = tmp_path / "recovery_test"
         # First: create a queue and insert rows, but don't let them flush
         client1 = MagicMock()
         client1.ingest_session = MagicMock(side_effect=RuntimeError("fail"))
-        q1 = _WriteQueue(client1, db_path)
+        q1 = _WriteQueue(client1, queue_dir)
         q1.enqueue("user1", "sess1", [{"role": "user", "content": "lost turn"}])
         # Wait until the error is recorded (poll with short interval).
         deadline = time.time() + 2.0
         while time.time() < deadline:
-            conn = sqlite3.connect(str(db_path))
-            row = conn.execute("SELECT last_error FROM pending").fetchone()
-            conn.close()
-            if row and row[0]:
+            if any(row.get("last_error") for row in _read_queue_files(queue_dir)):
                 break
             time.sleep(0.05)
         q1.shutdown()
@@ -239,7 +246,7 @@ class TestWriteQueue:
         # Now create a new queue — it should replay the pending rows
         client2 = MagicMock()
         client2.ingest_session = MagicMock(return_value={"status": "ok"})
-        q2 = _WriteQueue(client2, db_path)
+        q2 = _WriteQueue(client2, queue_dir)
         # Poll for the replay to happen.
         deadline = time.time() + 2.0
         while time.time() < deadline:
