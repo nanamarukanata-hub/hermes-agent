@@ -1,0 +1,36 @@
+name: Muse GPT connector tests
+
+on:
+  push:
+    branches:
+      - feat/muse-chatgpt-bridge-20261025
+    paths:
+      - 'muse_bridge/gpt_connector.py'
+      - 'muse_bridge/server.py'
+      - 'muse_bridge/agent_courier.py'
+      - 'tests/test_muse_gpt_connector.py'
+      - '.github/workflows/muse-gpt-connector-ci.yml'
+  pull_request:
+    paths:
+      - 'muse_bridge/gpt_connector.py'
+      - 'muse_bridge/server.py'
+      - 'muse_bridge/agent_courier.py'
+      - 'tests/test_muse_gpt_connector.py'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  muse-gpt:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+      - name: Compile connector sources
+        run: python -m compileall -q muse_bridge
+      - name: Run GPT connector regression tests without external API calls
+        run: python -m unittest discover -s tests -p 'test_muse_gpt_connector.py' -v
