@@ -153,7 +153,17 @@ class VaultStore:
         return json.loads(path.read_text(encoding="utf-8"))
 
     def save_session_data(self, session_id: str, data: dict[str, Any]) -> Path:
+        # Session folders are shared by all users. Never allow a caller to
+        # replace an existing session with another user's (or ownerless)
+        # payload, including via save_document("Sessions", ...).
+        incoming_owner = data.get("user_id")
+        if incoming_owner is not None:
+            validate_id(incoming_owner)
+
         def _do():
+            existing = self.load_session(session_id)
+            if existing is not None and existing.get("user_id") != incoming_owner:
+                raise PermissionError("session is not owned by this user")
             item = {"id": session_id, "source": data.get("source", "gateway"),
                     "started_at": data.get("started_at", time.time()),
                     "ended_at": data.get("ended_at"),
@@ -309,6 +319,7 @@ class VaultStore:
             user_id=validate_id(user_id))
 
     def save_memory(self, user_id: str, memory_id: str, data: dict[str, Any]) -> Path:
+        user_id = validate_id(user_id)
         body = str(data.get("content") or data.get("text") or "")
         front = {"id": memory_id, "user_id": user_id,
                  "kind": data.get("kind", "fact"),
@@ -321,12 +332,19 @@ class VaultStore:
 
         def _do():
             path = self.memory_path(memory_id)
+            # Memory uses a flat filename layout for PR #16 compatibility.
+            # Reject cross-user collisions and ownerless legacy notes under
+            # the same lock as the write, rather than silently taking over.
+            if path.exists():
+                existing_meta, _ = _parse_frontmatter(path.read_text(encoding="utf-8"))
+                if existing_meta.get("user_id") != user_id:
+                    raise PermissionError("memory is not owned by this user")
             self._atomic_write(path, text)
             return path
         return self._locked(_do)
 
     def save_session(self, user_id: str, session_id: str, data: dict[str, Any]) -> Path:
-        merged = {"user_id": user_id, **data}
+        merged = {**data, "user_id": validate_id(user_id)}
         return self.save_session_data(session_id, merged)
 
     def save_character_state(self, user_id: str, character_id: str, data: dict[str, Any]) -> Path:
