@@ -781,43 +781,43 @@ def run_doctor(args):
             check_ok(f"Created {_DHH}/memories/")
             fixed_count += 1
     
-    # Check SQLite session store
+    # Check Obsidian Vault session store (canonical since the SQLite
+    # session store was replaced).  A legacy state.db is never opened
+    # here — it is reported as a legacy artifact only.
+    import os as _os
+
+    vault_root = _os.environ.get("HERMES_OBSIDIAN_VAULT", "").strip()
+    vault_sessions = None
+    if vault_root:
+        vault_sessions = Path(vault_root).expanduser() / "06_Automation" / "Hermes" / "Sessions"
+    if vault_sessions is not None and vault_sessions.is_dir():
+        count = sum(1 for p in vault_sessions.iterdir() if p.is_dir())
+        check_ok(f"Obsidian Vault sessions ({count} sessions)")
+    elif vault_root:
+        check_info("Obsidian Vault sessions not created yet (will be created on first session)")
+    else:
+        check_info("HERMES_OBSIDIAN_VAULT is not set; Vault sessions are not configured")
+
     state_db_path = hermes_home / "state.db"
     if state_db_path.exists():
-        try:
-            import sqlite3
-            conn = sqlite3.connect(str(state_db_path))
-            cursor = conn.execute("SELECT COUNT(*) FROM sessions")
-            count = cursor.fetchone()[0]
-            conn.close()
-            check_ok(f"{_DHH}/state.db exists ({count} sessions)")
-        except Exception as e:
-            check_warn(f"{_DHH}/state.db exists but has issues: {e}")
-    else:
-        check_info(f"{_DHH}/state.db not created yet (will be created on first session)")
+        check_info(
+            f"{_DHH}/state.db exists as a legacy artifact "
+            "(not opened; migrate with scripts/migrate_sessions_to_obsidian.py)"
+        )
 
-    # Check WAL file size (unbounded growth indicates missed checkpoints)
+    # Legacy WAL sidecar (no longer written by the runtime; reported only,
+    # never checkpointed from doctor, which no longer uses SQLite).
     wal_path = hermes_home / "state.db-wal"
     if wal_path.exists():
         try:
             wal_size = wal_path.stat().st_size
             if wal_size > 50 * 1024 * 1024:  # 50 MB
                 check_warn(
-                    f"WAL file is large ({wal_size // (1024*1024)} MB)",
-                    "(may indicate missed checkpoints)"
+                    f"Legacy WAL file is large ({wal_size // (1024*1024)} MB)",
+                    "(legacy artifact — migrate, then remove it with the legacy DB)"
                 )
-                if should_fix:
-                    import sqlite3
-                    conn = sqlite3.connect(str(state_db_path))
-                    conn.execute("PRAGMA wal_checkpoint(PASSIVE)")
-                    conn.close()
-                    new_size = wal_path.stat().st_size if wal_path.exists() else 0
-                    check_ok(f"WAL checkpoint performed ({wal_size // 1024}K → {new_size // 1024}K)")
-                    fixed_count += 1
-                else:
-                    issues.append("Large WAL file — run 'hermes doctor --fix' to checkpoint")
             elif wal_size > 10 * 1024 * 1024:  # 10 MB
-                check_info(f"WAL file is {wal_size // (1024*1024)} MB (normal for active sessions)")
+                check_info(f"Legacy WAL file is {wal_size // (1024*1024)} MB (legacy artifact)")
         except Exception:
             pass
 

@@ -12,7 +12,6 @@ import json
 import logging
 import os
 import shutil
-import sqlite3
 import sys
 import tempfile
 import time
@@ -45,11 +44,11 @@ _EXCLUDED_DIRS = {
 _EXCLUDED_SUFFIXES = (
     ".pyc",
     ".pyo",
-    # SQLite sidecar files — the backup takes a consistent snapshot of ``*.db``
-    # via ``sqlite3.backup()``, so shipping the live WAL / shared-memory /
-    # rollback-journal alongside would pair a fresh snapshot with stale sidecar
-    # state and produce a torn restore on the next open. They're transient and
-    # regenerated on first connection anyway.
+    # Legacy SQLite sidecar files — ``*.db`` files are copied as opaque
+    # legacy artifacts, so shipping the live WAL / shared-memory /
+    # rollback-journal alongside would pair a fresh copy with stale sidecar
+    # state and produce a torn restore on the next open. They're transient
+    # and were regenerated on first connection anyway.
     ".db-wal",
     ".db-shm",
     ".db-journal",
@@ -86,30 +85,26 @@ def _should_exclude(rel_path: Path) -> bool:
 
 
 # ---------------------------------------------------------------------------
-# SQLite safe copy
+# Legacy DB copy (opaque file copy, no SQLite)
 # ---------------------------------------------------------------------------
 
 def _safe_copy_db(src: Path, dst: Path) -> bool:
-    """Copy a SQLite database safely using the backup() API.
+    """Copy a legacy ``*.db`` file as an opaque artifact.
 
-    Handles WAL mode — produces a consistent snapshot even while
-    the DB is being written to.  Falls back to raw copy on failure.
+    In the Vault era no runtime code writes ``*.db`` files, so a
+    legacy DB is a closed artifact, not a live store — a plain file
+    copy is its backup.  No SQLite is used here.  Live legacy DBs
+    should be migrated to the Vault first (see scripts/
+    migrate_sessions_to_obsidian.py and the other migration scripts);
+    backing up a DB that is still being written by an old process
+    may capture a torn copy, and that is logged as a warning.
     """
     try:
-        conn = sqlite3.connect(f"file:{src}?mode=ro", uri=True)
-        backup_conn = sqlite3.connect(str(dst))
-        conn.backup(backup_conn)
-        backup_conn.close()
-        conn.close()
+        shutil.copy2(src, dst)
         return True
     except Exception as exc:
-        logger.warning("SQLite safe copy failed for %s: %s", src, exc)
-        try:
-            shutil.copy2(src, dst)
-            return True
-        except Exception as exc2:
-            logger.error("Raw copy also failed for %s: %s", src, exc2)
-            return False
+        logger.error("Legacy DB copy failed for %s: %s", src, exc)
+        return False
 
 
 # ---------------------------------------------------------------------------
@@ -200,7 +195,7 @@ def run_backup(args) -> None:
     with zipfile.ZipFile(out_path, "w", zipfile.ZIP_DEFLATED, compresslevel=6) as zf:
         for i, (abs_path, rel_path) in enumerate(files_to_add, 1):
             try:
-                # Safe copy for SQLite databases (handles WAL mode)
+                # Opaque copy for legacy .db artifacts
                 if abs_path.suffix == ".db":
                     with tempfile.NamedTemporaryFile(suffix=".db", delete=False) as tmp:
                         tmp_db = Path(tmp.name)
@@ -210,7 +205,7 @@ def run_backup(args) -> None:
                         tmp_db.unlink(missing_ok=True)
                     else:
                         tmp_db.unlink(missing_ok=True)
-                        errors.append(f"  {rel_path}: SQLite safe copy failed")
+                        errors.append(f"  {rel_path}: legacy DB copy failed")
                         continue
                 else:
                     zf.write(abs_path, arcname=str(rel_path))
@@ -708,7 +703,7 @@ def run_quick_backup(args) -> None:
 def _write_full_zip_backup(out_path: Path, hermes_root: Path) -> Optional[Path]:
     """Write a full zip snapshot of ``hermes_root`` to ``out_path``.
 
-    Uses the same exclusion rules and SQLite safe-copy as :func:`run_backup`.
+    Uses the same exclusion rules and legacy DB copy as :func:`run_backup`.
     Returns the output path on success, None on failure (nothing to back up,
     or write error — caller should surface the outcome but not raise).
     """
@@ -831,7 +826,7 @@ def create_pre_update_backup(
 ) -> Optional[Path]:
     """Create a full zip backup of HERMES_HOME under ``backups/``.
 
-    Mirrors :func:`run_backup` (same exclusion rules, same SQLite safe-copy)
+    Mirrors :func:`run_backup` (same exclusion rules, same legacy DB copy)
     but writes to ``<HERMES_HOME>/backups/pre-update-<timestamp>.zip`` and
     auto-prunes old pre-update backups.
 
@@ -906,7 +901,7 @@ def create_pre_migration_backup(
     ``hermes claw migrate`` apply.
 
     Shares implementation with :func:`create_pre_update_backup` via
-    ``_write_full_zip_backup`` — same exclusions, same SQLite safe-copy,
+    ``_write_full_zip_backup`` — same exclusions, same legacy DB copy,
     restorable with ``hermes import <archive>``.  Writes to
     ``<HERMES_HOME>/backups/pre-migration-<timestamp>.zip`` and auto-prunes
     old pre-migration backups.
