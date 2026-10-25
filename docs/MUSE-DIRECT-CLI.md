@@ -18,7 +18,13 @@ Service: `muse-chatgpt-bridge`; repo `nanamarukanata-hub/hermes-agent`;
 branch `feat/muse-chatgpt-bridge-20261025`.
 **Do not modify the APEX-6 service.** The service has auto-deploy disabled.
 
-1. Change build command to:
+1. The existing Render build command only compiles Python. The bridge now
+   installs pinned `muse-cli==0.3.2` on process startup through
+   `muse_bridge/bootstrap.py`, so manual build-command changes are **not**
+   required. This installation is attempted on each fresh container; it is
+   slower and depends on PyPI network access. If the log reports
+   `warning: muse-cli unavailable`, configure a proper build command
+   through Render Dashboard instead:
    ```sh
    python -m pip install -r muse_bridge/requirements-muse.txt && python -m compileall -q muse_bridge
    ```
