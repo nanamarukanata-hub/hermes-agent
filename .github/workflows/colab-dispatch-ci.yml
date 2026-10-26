@@ -36,3 +36,12 @@ jobs:
         run: python -m pytest tests/hermes_hybrid/test_colab_dispatch.py -q -o addopts=""
       - name: Existing Drive Vault and integration regression
         run: python -m pytest tests/hermes_hybrid/test_drive_vault.py tests/hermes_hybrid/test_drive_integration_ops.py -q -o addopts=""
+      - name: Build self-contained Colab worker notebook
+        run: python -c "from pathlib import Path; from hermes_hybrid.colab_worker import worker_notebook_bytes; Path('hermes-colab-queue-worker.ipynb').write_bytes(worker_notebook_bytes())"
+      - name: Upload verified Colab notebook
+        uses: actions/upload-artifact@v4
+        with:
+          name: hermes-colab-worker-notebook
+          path: hermes-colab-queue-worker.ipynb
+          if-no-files-found: error
+          retention-days: 7
