@@ -161,6 +161,42 @@ recover stale `running` **idempotent** jobs after 120 seconds, repair
 `result.json`-saved-but-status-not-final crash cases, and leave the
 Colab-specific queue alone.
 
+### Muse VM: existing authenticated Workspace CLI (no new OAuth secrets)
+
+On the Muse VM, `/opt/hatch/bin/hatch_gws_cli` provides a user-authorized
+Drive connector. This is a **different** credential source from the
+Google-account login inside Colab. `hermes_hybrid/cli_drive_transport.py`
+supports this existing CLI without extracting its tokens. The operator should
+first verify `hatch_gws_cli drive status` reports connected **in the VM**
+before selecting the provider.
+
+Set these non-secret values in private `~/.config/hermes/colab-resident.env`
+(permissions `chmod 600`, owned by the same Unix user):
+
+    HERMES_DRIVE_VAULT_ROOT_ID=1DEgP8VbExIRrizosKK4Jo0GOhet9oni3
+    HERMES_DRIVE_PROVIDER=hatch
+    HERMES_GWS_CLI=/opt/hatch/bin/hatch_gws_cli
+
+Then, in the actual Hermes checkout, once verified by the owner:
+
+    python3 -m hermes_hybrid.resident_worker --once
+    bash deploy/start-hermes-colab-worker.sh
+
+The launcher spawns `deploy/hermes-colab-watchdog.sh`. `flock` prevents
+multiple watchdogs on the **same Unix host**, and the watchdog will restart
+the resident process if that process exits. It **does not** reboot an offline
+VM or respawn after the VM is destroyed and re-created. The host's
+authenticated boot/recovery hook or an independent always-on supervisor
+must relaunch the script for true crash/reboot survivability. Do not modify
+the existing Muse console-only Supervisor and Hook blindly.
+
+Muse's independent read-only task report showed a worker kill/restart test
+(PID 7233 → 7973 → 8484) and a completed resident echo job. Google Drive
+independently contained `job-resident-echo-20261026-01` with `done`
+status and `result.ok=true`, and `resident-worker.json` was running
+on October 26, 2026. That is proof of startup and job delivery, **not**
+24 hours of uninterrupted availability or VM re-creation recovery.
+
 ## Native tool examples
 
 When Drive OAuth is configured, from the Hermes Discord bot say:
