@@ -1765,6 +1765,7 @@ def build_anthropic_kwargs(
     base_url: str | None = None,
     fast_mode: bool = False,
     drop_context_1m_beta: bool = False,
+    is_bedrock: bool = False,
 ) -> Dict[str, Any]:
     """Build kwargs for anthropic.messages.create().
 
@@ -1953,7 +1954,7 @@ def build_anthropic_kwargs(
     # reject the unknown beta header and speed parameter.
     if (
         fast_mode
-        and not _is_third_party_anthropic_endpoint(base_url)
+        and (is_bedrock or not _is_third_party_anthropic_endpoint(base_url))
         and _supports_fast_mode(model)
     ):
         kwargs.setdefault("extra_body", {})["speed"] = "fast"
@@ -1963,6 +1964,10 @@ def build_anthropic_kwargs(
             base_url,
             drop_context_1m_beta=drop_context_1m_beta,
         ))
+        # AnthropicBedrock has no identifying HTTP base URL. Per-request
+        # headers override client defaults, so preserve its 1M opt-in.
+        if is_bedrock and not drop_context_1m_beta and _CONTEXT_1M_BETA not in betas:
+            betas.append(_CONTEXT_1M_BETA)
         if is_oauth:
             betas.extend(_OAUTH_ONLY_BETAS)
         betas.append(_FAST_MODE_BETA)
