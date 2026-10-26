@@ -59,6 +59,33 @@ class ObsidianStateTests(unittest.TestCase):
             "My Coding Session #4",
         )
 
+    def test_resume_title_prefers_highest_numbered_lineage(self):
+        self.db.create_session("root", "discord")
+        self.db.set_session_title("root", "My Project")
+        self.db.create_session("branch_2", "discord")
+        self.db.set_session_title("branch_2", "My Project #2")
+        self.db.create_session("branch_10", "discord")
+        self.db.set_session_title("branch_10", "My Project #10")
+        self.db.create_session("legacy_3", "discord")
+        self.db.set_session_title("legacy_3", "My Project (3)")
+        self.db.create_session("unrelated", "discord")
+        self.db.set_session_title("unrelated", "My Project Extra #99")
+
+        # Numeric lineage takes precedence over lexical and last-active order.
+        self.assertEqual(self.db.resolve_session_by_title("My Project"), "branch_10")
+        # Explicitly requesting a numbered session must not silently advance.
+        self.assertEqual(self.db.resolve_session_by_title("My Project #2"), "branch_2")
+        self.assertEqual(self.db.resolve_session_by_title("My Project (3)"), "legacy_3")
+        self.assertEqual(self.db.resolve_session_by_title("My Project Extra"), "unrelated")
+        self.assertIsNone(self.db.resolve_session_by_title("Missing"))
+
+    def test_resume_title_can_find_lineage_without_original_root(self):
+        self.db.create_session("branch_2", "discord")
+        self.db.set_session_title("branch_2", "Archived Project #2")
+        self.db.create_session("branch_3", "discord")
+        self.db.set_session_title("branch_3", "Archived Project (3)")
+        self.assertEqual(self.db.resolve_session_by_title("Archived Project"), "branch_3")
+
     def test_rewrite_title_search_and_cleanup(self):
         self.db.create_session("test_a", "discord")
         self.db.append_message("test_a", "user", "old")
