@@ -140,3 +140,23 @@ def test_hermes_native_tool_handlers_use_drive_vault(monkeypatch, vault):
         "type": "echo", "message": "nope"
     }))
     assert no_auth.get("error")
+
+
+def test_hermes_discord_toolset_includes_colab_tools_but_schema_gated(monkeypatch):
+    from toolsets import resolve_toolset
+    from tools import colab_job_tools
+    from tools.registry import registry, invalidate_check_fn_cache
+    tools = resolve_toolset("hermes-discord")
+    assert "colab_submit" in tools
+    assert "colab_status" in tools
+    monkeypatch.delenv("GOOGLE_DRIVE_ACCESS_TOKEN", raising=False)
+    monkeypatch.delenv("HERMES_DRIVE_VAULT_ROOT_ID", raising=False)
+    invalidate_check_fn_cache()
+    names = {d["function"]["name"] for d in registry.get_definitions(set(tools), quiet=True)}
+    assert "colab_submit" not in names
+    monkeypatch.setenv("GOOGLE_DRIVE_ACCESS_TOKEN", "in-memory-test-only")
+    monkeypatch.setenv("HERMES_DRIVE_VAULT_ROOT_ID", "test-vault")
+    invalidate_check_fn_cache()
+    names = {d["function"]["name"] for d in registry.get_definitions(set(tools), quiet=True)}
+    assert "colab_submit" in names and "colab_status" in names
+    invalidate_check_fn_cache()
