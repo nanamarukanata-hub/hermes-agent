@@ -15,6 +15,7 @@ jobs:
       - run: python3 -m py_compile hermes_hybrid/*.py tests/*.py
       # Hybrid smoke tests are scoped here; the repository-wide suite runs in tests.yml.
       - run: python3 -m pytest tests/test_hybrid.py tests/test_hybrid_user_isolation.py -q
+      - run: python3 -m pytest tests/hermes_hybrid/test_drive_vault.py tests/hermes_hybrid/test_drive_integration_ops.py -q
       - run: python3 -m unittest discover -s tests -t . -p 'test_obsidian_session_state.py' -q
       - run: python3 -m unittest discover -s tests -t . -p 'test_kanban_migration_guards.py' -q
       - run: python3 -c "from hermes_hybrid import audit; r=audit('hermes_hybrid'); assert not r['sqlite_imports'] and not r['db_files'], r"
