@@ -358,3 +358,25 @@ def test_hermes_tool_reads_both_worker_heartbeats(monkeypatch, vault):
     assert health["resident"]["restart_count"] == 3
     assert 0 <= health["resident"]["current_process_uptime_seconds"] <= 30
     assert health["colab"]["online"] is False
+
+
+def test_authorized_muse_hatch_cli_credential_provider(monkeypatch, tmp_path, vault):
+    """No static Google token is required on a VM with an authorized hatch CLI."""
+    from tools import colab_job_tools
+    from hermes_hybrid import cli_drive_transport
+    exe = tmp_path / "fake-hatch-gws-cli"
+    exe.write_text("#!/bin/sh\nexit 0\n", encoding="utf8")
+    exe.chmod(0o700)
+    monkeypatch.delenv("GOOGLE_DRIVE_ACCESS_TOKEN", raising=False)
+    monkeypatch.delenv("GOOGLE_APPLICATION_CREDENTIALS", raising=False)
+    monkeypatch.setenv("HERMES_DRIVE_PROVIDER", "hatch")
+    monkeypatch.setenv("HERMES_DRIVE_VAULT_ROOT_ID", "fixture-vault")
+    monkeypatch.setenv("HERMES_GWS_CLI", str(exe))
+    assert colab_job_tools._enabled()
+    called = []
+    monkeypatch.setattr(cli_drive_transport, "cli_vault",
+                        lambda root_id: called.append(root_id) or vault)
+    assert colab_job_tools._vault() is vault
+    assert called == ["fixture-vault"]
+    monkeypatch.setenv("HERMES_GWS_CLI", "/nonexistent/unauthorized")
+    assert not colab_job_tools._enabled()
