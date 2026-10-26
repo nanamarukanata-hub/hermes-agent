@@ -66,7 +66,7 @@ _HERMES_CORE_TOOLS = [
     "kanban_show", "kanban_complete", "kanban_block", "kanban_heartbeat",
     "kanban_comment", "kanban_create", "kanban_link",
     # Colab jobs: dormant until Drive OAuth + pinned Vault folder ID configured.
-    "colab_submit", "colab_status",
+    "colab_submit", "colab_status", "colab_health",
 ]
 
 
