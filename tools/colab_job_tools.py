@@ -7,25 +7,67 @@ A submit queues a job; it cannot boot a stopped Colab runtime.
 from __future__ import annotations
 
 import os
+import threading
 
 from tools.registry import registry, tool_error, tool_result
 
 
+_CREDENTIAL_LOCK = threading.RLock()
+_CREDENTIALS = None
+
+
 def _enabled() -> bool:
-    return bool(
-        os.environ.get("GOOGLE_DRIVE_ACCESS_TOKEN")
-        and os.environ.get("HERMES_DRIVE_VAULT_ROOT_ID")
-    )
+    # A pinned canonical Vault and EITHER a live access token or a mounted
+    # renewable Application Default Credentials JSON are required.
+    if not os.environ.get("HERMES_DRIVE_VAULT_ROOT_ID"):
+        return False
+    token = bool(os.environ.get("GOOGLE_DRIVE_ACCESS_TOKEN"))
+    adc_file = os.environ.get("GOOGLE_APPLICATION_CREDENTIALS")
+    return token or bool(adc_file and os.path.isfile(adc_file))
 
 
 def _vault():
-    from hermes_hybrid.drive_vault import drive_vault_from_env
-    return drive_vault_from_env()
+    from hermes_hybrid.drive_vault import (
+        DriveVault, DriveAuthError, HttpDriveTransport, drive_vault_from_env,
+    )
+    if os.environ.get("GOOGLE_DRIVE_ACCESS_TOKEN"):
+        return drive_vault_from_env()
+    filename = os.environ.get("GOOGLE_APPLICATION_CREDENTIALS")
+    if not filename or not os.path.isfile(filename):
+        raise DriveAuthError("No authorized Google credentials are configured")
+    try:
+        import google.auth
+        from google.auth.transport.requests import Request
+    except ImportError as exc:
+        raise DriveAuthError("Install google-auth for renewable Google credentials") from exc
+
+    # Existing runtime credentials are used; no browser flow runs here.
+    # Credentials may represent a service account or an authorized OAuth user.
+    global _CREDENTIALS
+    with _CREDENTIAL_LOCK:
+        if _CREDENTIALS is None or _CREDENTIALS[0] != filename:
+            credentials, _project = google.auth.load_credentials_from_file(
+                filename, scopes=["https://www.googleapis.com/auth/drive"])
+            _CREDENTIALS = (filename, credentials)
+        credentials = _CREDENTIALS[1]
+
+    def token_provider():
+        with _CREDENTIAL_LOCK:
+            if not credentials.valid:
+                credentials.refresh(Request())
+            if not credentials.token:
+                raise DriveAuthError("Authorized credential has no access token")
+            return credentials.token
+
+    return DriveVault(
+        HttpDriveTransport(token_provider),
+        root_id=os.environ["HERMES_DRIVE_VAULT_ROOT_ID"],
+    )
 
 
 def _submit(args: dict, **_kwargs) -> str:
     if not _enabled():
-        return tool_error("Hermes Drive OAuth and pinned Vault root are not configured")
+        return tool_error("Hermes Drive credentials and pinned Vault root are not configured")
     try:
         from hermes_hybrid.colab_dispatch import submit_job
         kind = args.get("type")
