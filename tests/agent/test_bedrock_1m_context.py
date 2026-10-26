@@ -5,8 +5,9 @@ Bedrock (and Azure AI Foundry) that window is still gated behind the
 ``context-1m-2025-08-07`` beta header as of 2026-04. Without it, Bedrock
 caps these models at 200K even though ``model_metadata.py`` advertises 1M.
 
-These tests guard the invariant that the header is always emitted on the
-Bedrock client path, and that it survives the MiniMax bearer-auth strip.
+These tests guard the invariant that the header is emitted on the
+Bedrock client path, while native Anthropic subscriptions and MiniMax
+endpoints that reject the beta do not receive it.
 """
 
 from unittest.mock import MagicMock, patch
@@ -15,23 +16,34 @@ from unittest.mock import MagicMock, patch
 class TestBedrockContext1MBeta:
     """``context-1m-2025-08-07`` must reach Bedrock Claude requests."""
 
-    def test_common_betas_includes_1m(self):
+    def test_common_betas_excludes_1m_for_subscription_compatibility(self):
         from agent.anthropic_adapter import _COMMON_BETAS, _CONTEXT_1M_BETA
 
         assert _CONTEXT_1M_BETA == "context-1m-2025-08-07"
-        assert _CONTEXT_1M_BETA in _COMMON_BETAS
+        # A global beta breaks short requests on Anthropic subscriptions that\n        # have not been granted long-context access. Bedrock opts in separately.\n        assert _CONTEXT_1M_BETA not in _COMMON_BETAS
 
-    def test_common_betas_for_native_anthropic_includes_1m(self):
-        """Native Anthropic endpoints (and Bedrock with empty base_url) get 1M."""
+    def test_common_betas_for_native_anthropic_omits_1m(self):
+        """Native Anthropic requests must not require subscription-gated 1M."""
         from agent.anthropic_adapter import (
             _common_betas_for_base_url,
             _CONTEXT_1M_BETA,
         )
 
-        assert _CONTEXT_1M_BETA in _common_betas_for_base_url(None)
-        assert _CONTEXT_1M_BETA in _common_betas_for_base_url("")
-        assert _CONTEXT_1M_BETA in _common_betas_for_base_url(
+        assert _CONTEXT_1M_BETA not in _common_betas_for_base_url(None)
+        assert _CONTEXT_1M_BETA not in _common_betas_for_base_url("")
+        assert _CONTEXT_1M_BETA not in _common_betas_for_base_url(
             "https://api.anthropic.com"
+        )
+
+    def test_common_betas_for_azure_includes_1m(self):
+        """Azure AI Foundry endpoints still need the 1M beta."""
+        from agent.anthropic_adapter import (
+            _common_betas_for_base_url,
+            _CONTEXT_1M_BETA,
+        )
+
+        assert _CONTEXT_1M_BETA in _common_betas_for_base_url(
+            "https://example.services.ai.azure.com/anthropic"
         )
 
     def test_common_betas_strips_1m_for_minimax(self):
