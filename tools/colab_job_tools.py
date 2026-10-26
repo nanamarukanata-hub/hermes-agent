@@ -77,6 +77,8 @@ def _submit(args: dict, **_kwargs) -> str:
             spec = {"type": kind, "input": args.get("input", "")}
         else:
             return tool_error("unsupported Colab job type")
+        if "executor" in args:
+            spec["executor"] = args["executor"]
         result = submit_job(_vault(), spec, args.get("job_id") or None)
         return tool_result(success=True, **result,
                            note="Job queued in Drive; Colab executes only while worker notebook is running.")
@@ -114,6 +116,8 @@ COLAB_SUBMIT_SCHEMA = {
             "message": {"type": "string", "maxLength": 2000},
             "input": {"type": "string", "description": "Vault-relative path under 06_Automation/Hermes/"},
             "job_id": {"type": "string", "description": "Optional idempotency key; reuse on retry"},
+            "executor": {"type": "string", "enum": ["colab", "resident"],
+                         "description": "colab (default): only active notebook; resident: Linux 24/7 worker"},
         },
         "required": ["type"],
     },
