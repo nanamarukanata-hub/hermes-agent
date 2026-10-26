@@ -17,6 +17,7 @@ from hermes_hybrid.vault_kv import validate_id
 
 INPUT_PREFIX = "06_Automation/Hermes/"
 WORKER_FILE = colab_jobs._BASE + "/worker.json"
+RESIDENT_WORKER_FILE = colab_jobs._BASE + "/resident-worker.json"
 _HEARTBEAT_STALE_SECONDS = 120
 _SEGMENT = re.compile(r"^[A-Za-z0-9_. -]+$")
 
@@ -37,13 +38,22 @@ def validate_spec(spec: dict) -> dict:
     if not isinstance(spec, dict):
         raise ValueError("job spec must be an object")
     jtype = spec.get("type")
+    executor = spec.get("executor", "colab")
+    if executor not in ("colab", "resident"):
+        raise ValueError("executor must be colab or resident")
     if jtype == "echo":
         msg = spec.get("message", "")
         if not isinstance(msg, str) or len(msg) > 2000:
             raise ValueError("echo message must be a string of at most 2000 chars")
-        return {"type": "echo", "message": msg}
+        clean = {"type": "echo", "message": msg}
+        if executor == "resident":
+            clean["executor"] = executor
+        return clean
     if jtype in ("text_stats", "hash_file"):
-        return {"type": jtype, "input": safe_input_path(spec.get("input", ""))}
+        clean = {"type": jtype, "input": safe_input_path(spec.get("input", ""))}
+        if executor == "resident":
+            clean["executor"] = executor
+        return clean
     raise ValueError("supported Colab jobs: echo, text_stats, hash_file")
 
 
@@ -62,11 +72,23 @@ def submit_job(vault: DriveVault, spec: dict, job_id: Optional[str] = None) -> d
         return {"job_id": name, "state": "already_exists", "job": existing}
     colab_jobs.write_job(vault, name, clean)
     return {"job_id": name, "state": "queued", "job": clean,
-            "worker": worker_health(vault)}
+            "executor": clean.get("executor", "colab"),
+            "worker": resident_health(vault) if clean.get("executor") == "resident"
+                else worker_health(vault)}
 
 
 def worker_health(vault: DriveVault, *, current_time: Optional[datetime] = None) -> dict:
-    data = vault.read_json(WORKER_FILE)
+    """Liveness of the user-started Colab notebook worker."""
+    return _health(vault, WORKER_FILE, current_time=current_time)
+
+
+def resident_health(vault: DriveVault, *, current_time: Optional[datetime] = None) -> dict:
+    """Liveness of the separately supervised Linux resident worker."""
+    return _health(vault, RESIDENT_WORKER_FILE, current_time=current_time)
+
+
+def _health(vault: DriveVault, file_path: str, *, current_time: Optional[datetime]) -> dict:
+    data = vault.read_json(file_path)
     if not isinstance(data, dict):
         return {"online": False, "reason": "no_worker_heartbeat"}
     stamp = data.get("last_seen_at")
@@ -94,5 +116,8 @@ def job_report(vault: DriveVault, job_id: str) -> dict:
     state = status.get("state", "unknown")
     if state in ("done", "failed") and result is None:
         state = "inconsistent_missing_result"
+    executor = (job.get("spec") or {}).get("executor", "colab")
     return {"found": True, "job_id": name, "state": state,
-            "result": result, "worker": worker_health(vault)}
+            "executor": executor,
+            "result": result, "worker": resident_health(vault) if executor == "resident"
+                else worker_health(vault)}
