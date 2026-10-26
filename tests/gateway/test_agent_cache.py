@@ -963,13 +963,18 @@ class TestAgentCacheSpilloverLive:
         CAP = 16
         monkeypatch.setattr(gw_run, "_AGENT_CACHE_MAX_SIZE", CAP)
         runner = self._runner()
+        # This test exercises concurrent cache insertion/eviction, not AIAgent
+        # construction or teardown (covered by the other live spillover tests).
+        # Constructing 160 real agents under xdist can exceed the suite's
+        # 30-second per-test deadline before the cache assertions run.
+        runner._release_evicted_agent_soft = lambda _agent: None
 
         N_THREADS = 8
         PER_THREAD = 20  # 8 * 20 = 160 inserts into a 16-slot cache
 
         def worker(tid: int):
             for j in range(PER_THREAD):
-                a = self._real_agent()
+                a = object()  # lightweight unique identity; no external resources
                 key = f"t{tid}-s{j}"
                 with runner._agent_cache_lock:
                     runner._agent_cache[key] = (a, "sig")
