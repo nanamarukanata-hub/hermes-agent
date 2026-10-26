@@ -17,6 +17,7 @@ from pathlib import Path
 import signal
 import sys
 import tempfile
+import threading
 import time
 import uuid
 from datetime import datetime, timezone
@@ -118,6 +119,68 @@ def heartbeat(vault: DriveVault, worker_id: str, state: str, *,
     vault.write_json(RESIDENT_WORKER_FILE, payload)
 
 
+def heartbeat_with_retry(vault: DriveVault, worker_id: str, state: str, *,
+                         started_at: str | None = None, restart_count: int = 0,
+                         cycle_count: int = 0, attempts: int = 3) -> bool:
+    """Write one heartbeat, retrying transient Drive failures briefly.
+
+    Returns True on success. Failures are logged by exception type only;
+    the timestamp is generated at write time and never backdated.
+    """
+    delay = 1.0
+    for attempt in range(max(1, attempts)):
+        try:
+            heartbeat(vault, worker_id, state, started_at=started_at,
+                      restart_count=restart_count, cycle_count=cycle_count)
+            return True
+        except Exception as exc:
+            LOG.warning("heartbeat write failed (%s), attempt %d",
+                        type(exc).__name__, attempt + 1)
+            if attempt + 1 < attempts:
+                time.sleep(delay)
+                delay *= 2
+    return False
+
+
+class _HeartbeatThread(threading.Thread):
+    """Publishes heartbeats independently of the job-scan loop.
+
+    A slow scan, a long job, or the scan loop's error backoff must not
+    starve the heartbeat: this thread keeps writing on its own cadence
+    so liveness reflects the process, not the slowest Drive call.
+    """
+
+    def __init__(self, vault: DriveVault, worker_id: str, *,
+                 started_at: str, restart_count: int,
+                 cycle_counter: dict, interval: float = 30.0):
+        super().__init__(name="resident-heartbeat", daemon=True)
+        self._vault = vault
+        self._worker_id = worker_id
+        self._started_at = started_at
+        self._restart_count = restart_count
+        self._cycles = cycle_counter
+        self._interval = max(0.5, interval)
+        self._stop_event = threading.Event()
+        self.consecutive_failures = 0
+
+    def request_stop(self) -> None:
+        self._stop_event.set()
+
+    def run(self) -> None:
+        while not self._stop_event.wait(self._interval):
+            ok = heartbeat_with_retry(
+                self._vault, self._worker_id, "running",
+                started_at=self._started_at,
+                restart_count=self._restart_count,
+                cycle_count=int(self._cycles.get("cycles", 0)))
+            if ok:
+                self.consecutive_failures = 0
+            else:
+                self.consecutive_failures += 1
+                LOG.error("heartbeat unavailable (%d consecutive failures)",
+                          self.consecutive_failures)
+
+
 @contextlib.contextmanager
 def single_instance():
     # This local lock is held for the entire process lifetime, not a Drive
@@ -132,6 +195,7 @@ def single_instance():
 
 def run(vault: DriveVault, *, interval: float = 30.0,
         max_jobs: int = 5, once: bool = False,
+        heartbeat_interval: float | None = None,
         stop=None) -> int:
     """Run Drive I/O loop; never schedule AI messages/tasks."""
     stopper = stop or (lambda: False)
@@ -142,19 +206,31 @@ def run(vault: DriveVault, *, interval: float = 30.0,
                      0 <= prior_count < 1_000_000_000 else 0) + 1
     started_at = now()
     failures = 0
-    cycles = 0
-    heartbeat(vault, worker_id, "running", started_at=started_at,
-              restart_count=restart_count)
+    cycle_counter = {"cycles": 0}
+    heartbeat_with_retry(vault, worker_id, "running", started_at=started_at,
+                         restart_count=restart_count)
+    beat = None
+    if not once:
+        beat = _HeartbeatThread(vault, worker_id, started_at=started_at,
+                                restart_count=restart_count,
+                                cycle_counter=cycle_counter,
+                                interval=(heartbeat_interval if heartbeat_interval
+                                          is not None else
+                                          min(max(interval, 5.0), 60.0)))
+        beat.start()
     try:
         while not stopper():
             try:
                 stats = scan_once(vault, max_jobs=max_jobs)
-                cycles += 1
-                heartbeat(vault, worker_id, "running", started_at=started_at,
-                          restart_count=restart_count, cycle_count=cycles)
+                cycle_counter["cycles"] += 1
                 failures = 0
                 if stats["done"] or stats["failed"]:
                     LOG.info("job cycle result: %s", json.dumps(stats))
+                if once:
+                    heartbeat_with_retry(
+                        vault, worker_id, "running", started_at=started_at,
+                        restart_count=restart_count,
+                        cycle_count=cycle_counter["cycles"])
             except Exception as exc:
                 failures = min(failures + 1, 8)
                 LOG.warning("Drive polling failed (%s); retry backoff", type(exc).__name__)
@@ -169,10 +245,12 @@ def run(vault: DriveVault, *, interval: float = 30.0,
                 elapsed += step
         return 0
     finally:
-        try:
-            heartbeat(vault, worker_id, "stopped", started_at=started_at,
-                      restart_count=restart_count, cycle_count=cycles)
-        except Exception:
+        if beat is not None:
+            beat.request_stop()
+        if not heartbeat_with_retry(vault, worker_id, "stopped",
+                                    started_at=started_at,
+                                    restart_count=restart_count,
+                                    cycle_count=cycle_counter["cycles"]):
             LOG.warning("Unable to publish stop heartbeat (Drive unavailable)")
 
 
