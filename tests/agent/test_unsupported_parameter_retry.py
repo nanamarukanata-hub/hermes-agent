@@ -147,6 +147,35 @@ class TestMaxTokensRetryHardening:
         assert "max_tokens" not in second_call.kwargs
         assert second_call.kwargs["max_completion_tokens"] == 512
 
+    def test_sync_non_openai_provider_omits_unsupported_limit(self):
+        """Non-OpenAI endpoints should omit, not rename, rejected max_tokens."""
+        client = MagicMock()
+        client.base_url = "https://open.bigmodel.cn/api/paas/v4"
+        response = _dummy_response()
+        client.chat.completions.create.side_effect = [
+            RuntimeError("Unknown parameter: max_tokens"), response,
+        ]
+
+        with (
+            patch("agent.auxiliary_client._resolve_task_provider_model",
+                  return_value=("zai", "glm-5", None, None, None)),
+            patch("agent.auxiliary_client._get_cached_client",
+                  return_value=(client, "glm-5")),
+            patch("agent.auxiliary_client._validate_llm_response",
+                  side_effect=lambda resp, _task: resp),
+        ):
+            result = call_llm(
+                task="session_search",
+                messages=[{"role": "user", "content": "hi"}],
+                max_tokens=512,
+            )
+
+        assert result is response
+        assert client.chat.completions.create.call_count == 2
+        retry = client.chat.completions.create.call_args_list[1].kwargs
+        assert "max_tokens" not in retry
+        assert "max_completion_tokens" not in retry
+
     @pytest.mark.asyncio
     async def test_async_max_tokens_retry_skipped_when_max_tokens_is_none(self):
         client = MagicMock()
