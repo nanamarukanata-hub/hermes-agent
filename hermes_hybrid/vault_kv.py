@@ -26,6 +26,7 @@ import fcntl
 import json
 import os
 import re
+import tempfile
 from pathlib import Path
 from typing import Any
 
@@ -63,12 +64,30 @@ class VaultDir:
 
     def _locked(self, fn):
         self.dir.mkdir(parents=True, exist_ok=True)
-        with open(self.lock_file, "a+", encoding="utf-8") as lock:
+        # A lock symlink must never redirect the writer outside the Vault.
+        flags = os.O_CREAT | os.O_RDWR | os.O_NOFOLLOW
+        fd = os.open(self.lock_file, flags, 0o600)
+        with os.fdopen(fd, "a+", encoding="utf-8") as lock:
             fcntl.flock(lock.fileno(), fcntl.LOCK_EX)
             try:
                 return fn()
             finally:
                 fcntl.flock(lock.fileno(), fcntl.LOCK_UN)
+
+    @staticmethod
+    def _atomic_write(path: Path, text: str) -> None:
+        # A predictable PID-based temp name can be pre-created as a symlink.
+        # mkstemp uses O_EXCL and an unpredictable name in the same directory.
+        fd, tmp = tempfile.mkstemp(prefix=f".{path.name}.tmp-", dir=path.parent)
+        try:
+            with os.fdopen(fd, "w", encoding="utf-8") as f:
+                f.write(text)
+                f.flush()
+                os.fsync(f.fileno())
+            os.replace(tmp, path)
+        finally:
+            if os.path.lexists(tmp):
+                os.unlink(tmp)
 
     def read(self, record_id: str) -> dict[str, Any] | None:
         p = self.path(record_id)
@@ -86,12 +105,7 @@ class VaultDir:
         def _do():
             p = self.path(record_id)
             p.parent.mkdir(parents=True, exist_ok=True)
-            tmp = p.with_name(f".{p.name}.tmp-{os.getpid()}")
-            with open(tmp, "w", encoding="utf-8") as f:
-                f.write(text)
-                f.flush()
-                os.fsync(f.fileno())
-            os.replace(tmp, p)
+            self._atomic_write(p, text)
 
         self._locked(_do)
 
@@ -122,7 +136,7 @@ class VaultDir:
         """Allocate a monotonically increasing integer id, atomically."""
 
         def _do():
-            counter = self.dir / f"{counter_name}.json"
+            counter = self.path(counter_name)
             current = 0
             if counter.exists():
                 try:
@@ -134,12 +148,7 @@ class VaultDir:
                     if record_id.isdigit():
                         current = max(current, int(record_id))
             nxt = current + 1
-            tmp = counter.with_name(f".{counter.name}.tmp-{os.getpid()}")
-            with open(tmp, "w", encoding="utf-8") as f:
-                f.write(json.dumps({"next": nxt + 1}) + "\n")
-                f.flush()
-                os.fsync(f.fileno())
-            os.replace(tmp, counter)
+            self._atomic_write(counter, json.dumps({"next": nxt + 1}) + "\n")
             return nxt
 
         return self._locked(_do)
