@@ -250,11 +250,18 @@ class TestBoardCRUD:
 
     def test_remove_hard_delete(self, fresh_home):
         kb.create_board("nuke")
-        d = kb.board_dir("nuke")
-        assert d.exists()
+        # The live board data is Vault-backed; board_dir() is a legacy
+        # Hermes Home path and must not be created by this operation.
+        vault_dir = kb.kanban_store_dir(board="nuke")
+        legacy_dir = kb.board_dir("nuke")
+        assert vault_dir.exists()
+        assert not legacy_dir.exists()
+
         res = kb.remove_board("nuke", archive=False)
         assert res["action"] == "deleted"
-        assert not d.exists()
+        assert not vault_dir.exists()
+        assert not legacy_dir.exists()
+        assert not kb.board_exists("nuke")
 
     def test_remove_default_forbidden(self, fresh_home):
         with pytest.raises(ValueError, match="default"):
