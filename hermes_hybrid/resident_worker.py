@@ -106,10 +106,16 @@ def scan_once(vault: DriveVault, max_jobs: int = 5) -> dict:
     return {"scanned": scanned, "done": done, "failed": failed}
 
 
-def heartbeat(vault: DriveVault, worker_id: str, state: str):
-    vault.write_json(RESIDENT_WORKER_FILE, {
+def heartbeat(vault: DriveVault, worker_id: str, state: str, *,
+              started_at: str | None = None, restart_count: int = 0,
+              cycle_count: int = 0):
+    payload = {
         "worker_id": worker_id, "state": state, "last_seen_at": now(),
-    })
+        "restart_count": restart_count, "cycle_count": cycle_count,
+    }
+    if started_at is not None:
+        payload["started_at"] = started_at
+    vault.write_json(RESIDENT_WORKER_FILE, payload)
 
 
 @contextlib.contextmanager
@@ -130,13 +136,22 @@ def run(vault: DriveVault, *, interval: float = 30.0,
     """Run Drive I/O loop; never schedule AI messages/tasks."""
     stopper = stop or (lambda: False)
     worker_id = "resident-" + uuid.uuid4().hex[:12]
+    old = vault.read_json(RESIDENT_WORKER_FILE) or {}
+    prior_count = old.get("restart_count", 0)
+    restart_count = (prior_count if type(prior_count) is int and
+                     0 <= prior_count < 1_000_000_000 else 0) + 1
+    started_at = now()
     failures = 0
-    heartbeat(vault, worker_id, "running")
+    cycles = 0
+    heartbeat(vault, worker_id, "running", started_at=started_at,
+              restart_count=restart_count)
     try:
         while not stopper():
             try:
                 stats = scan_once(vault, max_jobs=max_jobs)
-                heartbeat(vault, worker_id, "running")
+                cycles += 1
+                heartbeat(vault, worker_id, "running", started_at=started_at,
+                          restart_count=restart_count, cycle_count=cycles)
                 failures = 0
                 if stats["done"] or stats["failed"]:
                     LOG.info("job cycle result: %s", json.dumps(stats))
@@ -155,7 +170,8 @@ def run(vault: DriveVault, *, interval: float = 30.0,
         return 0
     finally:
         try:
-            heartbeat(vault, worker_id, "stopped")
+            heartbeat(vault, worker_id, "stopped", started_at=started_at,
+                      restart_count=restart_count, cycle_count=cycles)
         except Exception:
             LOG.warning("Unable to publish stop heartbeat (Drive unavailable)")
 
