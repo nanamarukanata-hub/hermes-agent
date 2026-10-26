@@ -37,6 +37,28 @@ class ObsidianStateTests(unittest.TestCase):
         self.assertEqual(reopened.get_session("discord_demo")["tool_call_count"], 1)
         self.assertTrue((reopened.root / "discord_demo" / "Transcript.md").exists())
 
+    def test_branch_lineage_title_uses_hash_suffix_without_legacy_collisions(self):
+        self.db.create_session("base", "cli")
+        self.db.set_session_title("base", "My Coding Session")
+        self.assertEqual(
+            self.db.get_next_title_in_lineage("My Coding Session"),
+            "My Coding Session #2",
+        )
+
+        self.db.create_session("old_branch", "cli")
+        self.db.set_session_title("old_branch", "My Coding Session (2)")
+        self.assertEqual(
+            self.db.get_next_title_in_lineage("My Coding Session"),
+            "My Coding Session #3",
+        )
+
+        self.db.create_session("new_branch", "cli")
+        self.db.set_session_title("new_branch", "My Coding Session #3")
+        self.assertEqual(
+            self.db.get_next_title_in_lineage("My Coding Session"),
+            "My Coding Session #4",
+        )
+
     def test_rewrite_title_search_and_cleanup(self):
         self.db.create_session("test_a", "discord")
         self.db.append_message("test_a", "user", "old")
