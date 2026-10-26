@@ -706,6 +706,22 @@ async def test_first_message_inside_topic_records_topic_binding(tmp_path, monkey
     assert binding["session_key"] == build_session_key(_make_source(thread_id="17585"))
 
 
+def test_topic_capability_hint_first_send_on_recent_boot(monkeypatch):
+    """The first BotFather hint must not be suppressed by low monotonic uptime."""
+    import time
+
+    runner = _make_runner()
+    source = _make_source()
+    monkeypatch.setattr(time, "monotonic", lambda: 15.0)
+
+    assert runner._should_send_telegram_capability_hint(source) is True
+    assert runner._should_send_telegram_capability_hint(source) is False
+
+    # The same chat may receive the hint again after the cooldown.
+    monkeypatch.setattr(time, "monotonic", lambda: 315.0)
+    assert runner._should_send_telegram_capability_hint(source) is True
+
+
 @pytest.mark.asyncio
 async def test_topic_root_command_checks_getme_capabilities_before_enabling(tmp_path, monkeypatch):
     import gateway.run as gateway_run
