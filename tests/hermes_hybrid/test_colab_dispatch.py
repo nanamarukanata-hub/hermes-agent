@@ -160,3 +160,61 @@ def test_hermes_discord_toolset_includes_colab_tools_but_schema_gated(monkeypatc
     names = {d["function"]["name"] for d in registry.get_definitions(set(tools), quiet=True)}
     assert "colab_submit" in names and "colab_status" in names
     invalidate_check_fn_cache()
+
+
+def test_google_adc_provider_refreshes_on_demand(monkeypatch, tmp_path):
+    """A protected ADC file can refresh Drive tokens without Colab or static secrets."""
+    import sys
+    from types import ModuleType
+    from tools import colab_job_tools
+
+    creds_file = tmp_path / "owner-authorized-adc.json"
+    creds_file.write_text("{}", encoding="utf8")
+    monkeypatch.delenv("GOOGLE_DRIVE_ACCESS_TOKEN", raising=False)
+    monkeypatch.setenv("GOOGLE_APPLICATION_CREDENTIALS", str(creds_file))
+    monkeypatch.setenv("HERMES_DRIVE_VAULT_ROOT_ID", "canonical-vault-id")
+    monkeypatch.setattr(colab_job_tools, "_CREDENTIALS", None)
+
+    class FakeCredentials:
+        valid = False
+        token = None
+        calls = 0
+
+        def refresh(self, _request):
+            self.calls += 1
+            self.token = "test-token-not-secret"
+            self.valid = True
+
+    cred = FakeCredentials()
+    auth_module = ModuleType("google.auth")
+    auth_module.__path__ = []
+    load_args = []
+    def load(filename, scopes):
+        load_args.append((filename, scopes))
+        return cred, "dummy-project"
+    auth_module.load_credentials_from_file = load
+    request_module = ModuleType("google.auth.transport.requests")
+    request_module.Request = lambda: object()
+    transport_module = ModuleType("google.auth.transport")
+    transport_module.__path__ = []
+    transport_module.requests = request_module
+    google_module = ModuleType("google")
+    google_module.__path__ = []
+    google_module.auth = auth_module
+    auth_module.transport = transport_module
+
+    for name, module in [
+        ("google", google_module),
+        ("google.auth", auth_module),
+        ("google.auth.transport", transport_module),
+        ("google.auth.transport.requests", request_module),
+    ]:
+        monkeypatch.setitem(sys.modules, name, module)
+
+    assert colab_job_tools._enabled()
+    vault = colab_job_tools._vault()
+    assert vault._t._token_provider() == "test-token-not-secret"
+    assert vault._t._token_provider() == "test-token-not-secret"
+    assert cred.calls == 1
+    assert load_args[0][0] == str(creds_file)
+    assert load_args[0][1] == ["https://www.googleapis.com/auth/drive"]
