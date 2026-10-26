@@ -273,11 +273,18 @@ class SessionDB:
         return s["id"] if s else None
 
     def get_next_title_in_lineage(self, base_title):
+        """Keep the CLI's #2/#3 lineage format when using the Vault backend.
+
+        Treat the older Vault "(2)" suffix as occupied too, so sessions
+        migrated from earlier versions cannot acquire duplicate branch numbers.
+        """
         titles = {s.get("title") for s in self.search_sessions(limit=100000)}
-        if base_title not in titles: return base_title
+        if base_title not in titles:
+            return base_title
         for n in range(2, 100001):
-            choice = f"{base_title} ({n})"
-            if choice not in titles: return choice
+            choice = f"{base_title} #{n}"
+            if choice not in titles and f"{base_title} ({n})" not in titles:
+                return choice
         raise RuntimeError("No available lineage title")
 
     def get_compression_tip(self, session_id):
