@@ -246,9 +246,22 @@ class SessionDB:
 
     @staticmethod
     def sanitize_title(title):
-        if not title: return None
-        clean = " ".join("".join(c for c in title if c.isprintable()).split())
-        return clean[:100] if clean else None
+        """Normalize display titles without silently truncating user input.
+
+        Whitespace separates words; other non-printing characters are removed
+        to prevent invisible title collisions and misleading names.
+        """
+        if not title:
+            return None
+        cleaned = "".join(
+            " " if char.isspace() else char
+            for char in title
+            if char.isprintable() or char.isspace()
+        )
+        cleaned = " ".join(cleaned.split())
+        if len(cleaned) > 100:
+            raise ValueError("Session title too long (maximum 100 characters)")
+        return cleaned or None
 
     def set_session_title(self, session_id, title):
         title = self.sanitize_title(title)
