@@ -7073,10 +7073,12 @@ class GatewayRunner:
                             {"role": "assistant", "content": response, "timestamp": ts}
                         )
                 else:
-                    # The agent already persisted these messages to SQLite via
-                    # _flush_messages_to_session_db(), so skip the DB write here
-                    # to prevent the duplicate-write bug (#860).  We still write
-                    # to JSONL for backward compatibility and as a backup.
+                    # The agent already persisted these messages to the
+                    # canonical SessionDB via _flush_messages_to_session_db(),
+                    # so skip the DB write here to prevent the duplicate-write
+                    # bug (#860).  append_to_transcript with skip_db=True is
+                    # now a no-op: the legacy JSONL mirror is no longer
+                    # written, so the SessionDB stays the single copy.
                     agent_persisted = self._session_db is not None
                     for msg in new_messages:
                         # Skip system messages (they're rebuilt each run)
