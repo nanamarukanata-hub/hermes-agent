@@ -101,6 +101,25 @@ def _status(args: dict, **_kwargs) -> str:
         return tool_error("Colab result read unavailable: " + type(exc).__name__)
 
 
+def _health_status(_args: dict, **_kwargs) -> str:
+    if not _enabled():
+        return tool_error("Hermes Drive credentials and pinned Vault root are not configured")
+    try:
+        from hermes_hybrid.colab_dispatch import worker_health, resident_health
+        vault = _vault()
+        return tool_result(success=True, colab=worker_health(vault),
+                           resident=resident_health(vault))
+    except Exception as exc:
+        return tool_error("Colab worker health unavailable: " + type(exc).__name__)
+
+
+COLAB_HEALTH_SCHEMA = {
+    "name": "colab_health",
+    "description": "Read Colab notebook and 24h Linux resident worker heartbeats and current process uptime from Google Drive. No job ID required. Not proof of 24-hour uninterrupted availability.",
+    "parameters": {"type": "object", "properties": {}, "required": []},
+}
+
+
 COLAB_SUBMIT_SCHEMA = {
     "name": "colab_submit",
     "description": (
@@ -145,4 +164,10 @@ registry.register(
     name="colab_status", toolset="colab", schema=COLAB_STATUS_SCHEMA,
     handler=_status, check_fn=_enabled, requires_env=[],
     description=COLAB_STATUS_SCHEMA["description"], emoji="🧮",
+)
+
+registry.register(
+    name="colab_health", toolset="colab", schema=COLAB_HEALTH_SCHEMA,
+    handler=_health_status, check_fn=_enabled, requires_env=[],
+    description=COLAB_HEALTH_SCHEMA["description"], emoji="🩺",
 )
