@@ -6824,6 +6824,10 @@ class GatewayRunner:
             # below; this only advances RP turn state in the Vault.
             try:
                 if _rp_bridge is not None:
+                    # Normalize only for explicitly adult, opted-in character
+                    # cards. Persist the formatted version as turn state.
+                    response = _rp_bridge.postprocess_reply(
+                        str(source.user_id or ""), response)
                     _rp_bridge.after_agent(
                         str(source.user_id or ""), session_entry.session_id,
                         message_text, response)
