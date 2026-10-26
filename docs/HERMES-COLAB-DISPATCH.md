@@ -80,6 +80,87 @@ Google Drive mounted folders are eventually consistent, not a transactional
 multi-consumer queue. For multi-worker exactly-once guarantees, use a proper
 server-run worker with atomic leasing instead of free Colab.
 
+## Continuous Linux worker (24h-capable service)
+
+**Not an always-on Colab runtime.** The supervised Linux worker continues
+running while the underlying Muse or Hermes VM is available, even after the
+user closes Colab. Whether that VM truly remains available for 24 hours is
+an operational property that requires a real 24-hour measurement; code/CI is
+not proof of uninterrupted service. VM replacement/restart needs an active
+Supervisor/Hook or user-systemd service.
+
+Job routing:
+
+- `{"executor":"colab"}` or omitted: only a *manually-started* Colab
+  notebook executes the job. No remote restart claim.
+- `{"executor":"resident"}`: only the **Linux resident worker**
+  processes the job. The Colab notebook skips it to avoid dual execution.
+- Both executors consume the same canonical Drive Vault path, with separate
+  `worker.json` (Colab) and `resident-worker.json` (Linux) heartbeats.
+- Resident computation is intentionally restricted to `echo`,
+  `text_stats`, and `hash_file` (no arbitrary remote Python execution).
+  Existing Colab jobs and completed jobs are never re-run.
+
+Example Hermes native tool call:
+
+    colab_submit({
+      "executor": "resident",
+      "type": "echo",
+      "message": "Check Hermes resident worker availability"
+    })
+
+Once the **authorized** Hermes Linux runtime has access to the canonical
+Drive Vault, from the verified Hermes checkout path:
+
+    python3 -m hermes_hybrid.resident_worker --once
+    python3 -m hermes_hybrid.resident_worker --interval 30
+
+The `--once` option scans one queue cycle, then leaves a `stopped`
+heartbeat. Continuous mode checks the Drive JSON queue every 30 seconds
+(**I/O only; not a repeating AI task**). A singleton `flock` prevents two
+copies under the same Unix user on one host. Do NOT use multi-replica
+deployment without a stronger distributed leasing mechanism.
+
+To survive process crashes/reboots under Linux `systemd --user`:
+
+1. First verify the real checkout path and Python interpreter in
+   `deploy/hermes-colab-resident.service`; adapt `WorkingDirectory`
+   and `ExecStart` to the target VM. The template alone does nothing.
+2. Keep the actual ADC file readable only by the intended service account,
+   outside the repository. In the private
+   `~/.config/hermes/colab-resident.env`, put only the authorized file
+   **path** and the canonical Drive folder ID, such as
+
+       HERMES_DRIVE_VAULT_ROOT_ID=1DEgP8VbExIRrizosKK4Jo0GOhet9oni3
+       GOOGLE_APPLICATION_CREDENTIALS=/absolute/private/path/to/owner-authorized-adc.json
+
+   Do not include the credential JSON or OAuth tokens in this file.
+3. Install user service and restart it using the VM's systemd, or register
+   the same single process with the **existing Muse Supervisor/Hook**:
+
+       mkdir -p ~/.config/systemd/user
+       cp deploy/hermes-colab-resident.service ~/.config/systemd/user/
+       systemctl --user daemon-reload
+       systemctl --user enable --now hermes-colab-resident.service
+       systemctl --user status hermes-colab-resident.service
+
+   When authorized by the VM owner, use `loginctl enable-linger <user>` to
+   allow a **user** systemd manager after logout. On hosted VMs, prefer
+   their existing real supervisor and boot recovery mechanisms instead.
+4. Verify restart independently and use a new unique echo job, then read
+   Drive `status.json`, `result.json`, and `resident-worker.json`.
+   Do not kill an existing Hermes gateway, Discord worker, Supervisor or Hook.
+5. For a 24h uptime claim, collect 24h wall-clock heartbeats and post-reboot
+   evidence. A 24h guarantee requires infrastructure SLA/redundancy, not
+   just a service definition. Report downtime/restarts honestly.
+
+**Operational limitation:** One VM with local `flock` and Google Drive as
+queue storage is not an exactly-once distributed queue. Competing machines
+must never both run this resident worker against the same queue. The workers
+recover stale `running` **idempotent** jobs after 120 seconds, repair
+`result.json`-saved-but-status-not-final crash cases, and leave the
+Colab-specific queue alone.
+
 ## Native tool examples
 
 When Drive OAuth is configured, from the Hermes Discord bot say:
