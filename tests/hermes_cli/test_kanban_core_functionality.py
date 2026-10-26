@@ -2168,17 +2168,23 @@ def test_claim_task_recovers_from_invariant_leak(kanban_home):
 # -------------------------------------------------------------------------
 
 def test_cli_create_on_fresh_home_auto_inits(tmp_path, monkeypatch):
-    """First CLI action on an empty HERMES_HOME must not error with
-    an uninitialized board — init_db auto-runs now."""
+    """First CLI action with a fresh Hermes Home and configured Vault
+    must initialize Kanban in the Vault without creating legacy DB files."""
     home = tmp_path / ".hermes"
     home.mkdir()
+    vault = tmp_path / "obsidian_vault"
+    vault.mkdir()
     monkeypatch.setenv("HERMES_HOME", str(home))
+    monkeypatch.setenv("HERMES_OBSIDIAN_VAULT", str(vault))
+    monkeypatch.delenv("HERMES_KANBAN_DB", raising=False)
+    monkeypatch.delenv("HERMES_KANBAN_BOARD", raising=False)
     monkeypatch.setattr(Path, "home", lambda: tmp_path)
-    # Sanity: kanban.db does NOT exist yet.
+
     import subprocess as _sp
     import sys as _sys
     worktree_root = Path(__file__).resolve().parents[2]
     env = {**os.environ, "HERMES_HOME": str(home),
+           "HERMES_OBSIDIAN_VAULT": str(vault),
            "PYTHONPATH": str(worktree_root)}
     r = _sp.run(
         [_sys.executable, "-m", "hermes_cli.main", "kanban",
@@ -2189,10 +2195,13 @@ def test_cli_create_on_fresh_home_auto_inits(tmp_path, monkeypatch):
     import json as _json
     out = _json.loads(r.stdout)
     assert out["status"] == "ready"
-    # Vault store exists now (task JSON + aggregate files, not kanban.db).
-    store = home / "kanban" / "boards" / "default"
+
+    store = vault / "06_Automation" / "Hermes" / "Kanban" / "default"
+    assert store == kb.kanban_store_dir(board="default")
     assert (store / "links.json").exists()
     assert any(store.glob("t_*.json"))
+    assert not (home / "kanban" / "boards" / "default").exists()
+    assert not list(home.rglob("*.db"))
 
 
 def test_connect_auto_inits_fresh_db(tmp_path, monkeypatch):
