@@ -8,6 +8,7 @@ on:
       - "tools/colab_job_tools.py"
       - "toolsets.py"
       - "tests/hermes_hybrid/test_colab_dispatch.py"
+      - "tests/hermes_hybrid/test_cli_drive_transport_pagination.py"
       - ".github/workflows/colab-dispatch-ci.yml"
   pull_request:
     paths:
@@ -31,9 +32,9 @@ jobs:
       - name: Install pytest and hybrid dependencies
         run: python -m pip install --disable-pip-version-check pytest PyYAML
       - name: Compile Hermes-Colab code
-        run: python -m py_compile hermes_hybrid/colab_dispatch.py hermes_hybrid/colab_worker.py hermes_hybrid/resident_worker.py tools/colab_job_tools.py tests/hermes_hybrid/test_colab_dispatch.py
+        run: python -m py_compile hermes_hybrid/colab_dispatch.py hermes_hybrid/colab_worker.py hermes_hybrid/resident_worker.py hermes_hybrid/cli_drive_transport.py tools/colab_job_tools.py tests/hermes_hybrid/test_colab_dispatch.py
       - name: Hermes to Colab and resident Linux worker test suite
-        run: python -m pytest tests/hermes_hybrid/test_colab_dispatch.py -q -o addopts=""
+        run: python -m pytest tests/hermes_hybrid/test_colab_dispatch.py tests/hermes_hybrid/test_cli_drive_transport_pagination.py -q -o addopts=""
       - name: Existing Drive Vault and integration regression
         run: python -m pytest tests/hermes_hybrid/test_drive_vault.py tests/hermes_hybrid/test_drive_integration_ops.py -q -o addopts=""
       - name: Build self-contained Colab worker notebook
