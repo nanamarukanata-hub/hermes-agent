@@ -1028,7 +1028,10 @@ class TestSlashCommands:
         assert "Provider: anthropic" in result
         assert state.agent.provider == "anthropic"
         assert state.agent.base_url == "https://anthropic.example/v1"
-        assert runtime_calls[-1] == "anthropic"
+        # Slash-command persistence may invoke an unrelated provider resolver
+        # afterward. Verify the requested provider was resolved, not that it
+        # happened to be the final resolver invocation in the process.
+        assert "anthropic" in runtime_calls
 
 
 # ---------------------------------------------------------------------------
