@@ -95,12 +95,12 @@ class TestBedrockContext1MBeta:
         """Fast-mode requests (per-request extra_headers) still include 1M beta.
 
         Per-request extra_headers override client-level default_headers, so
-        the fast-mode path must re-include everything in _COMMON_BETAS.
+        the fast-mode path must preserve all endpoint-specific betas.
         """
         from agent.anthropic_adapter import build_anthropic_kwargs
 
         kwargs = build_anthropic_kwargs(
-            model="claude-opus-4-7",
+            model="claude-opus-4-6",
             messages=[{"role": "user", "content": "hi"}],
             tools=None,
             max_tokens=1024,
@@ -109,9 +109,63 @@ class TestBedrockContext1MBeta:
             # Empty base_url mirrors AnthropicBedrock (no HTTP base URL)
             base_url=None,
             fast_mode=True,
+            is_bedrock=True,
         )
         beta_header = kwargs.get("extra_headers", {}).get("anthropic-beta", "")
         assert "context-1m-2025-08-07" in beta_header, (
             "fast-mode extra_headers must carry the 1M beta or it overrides "
             "client-level default_headers and Bedrock drops back to 200K"
         )
+
+    def test_native_fastmode_does_not_force_bedrock_beta(self):
+        """Native Anthropic accounts without 1M access must not get this beta."""
+        from agent.anthropic_adapter import build_anthropic_kwargs
+
+        kwargs = build_anthropic_kwargs(
+            model="claude-opus-4-6",
+            messages=[{"role": "user", "content": "hi"}],
+            tools=None,
+            max_tokens=1024,
+            reasoning_config=None,
+            base_url=None,
+            fast_mode=True,
+        )
+        beta_header = kwargs.get("extra_headers", {}).get("anthropic-beta", "")
+        assert "fast-mode-2026-02-01" in beta_header
+        assert "context-1m-2025-08-07" not in beta_header
+
+    def test_bedrock_fastmode_respects_beta_drop(self):
+        """A rejected 1M beta can be removed without losing fast-mode headers."""
+        from agent.anthropic_adapter import build_anthropic_kwargs
+
+        kwargs = build_anthropic_kwargs(
+            model="claude-opus-4-6",
+            messages=[{"role": "user", "content": "hi"}],
+            tools=None,
+            max_tokens=1024,
+            reasoning_config=None,
+            base_url="https://bedrock-runtime.us-west-2.amazonaws.com",
+            fast_mode=True,
+            is_bedrock=True,
+            drop_context_1m_beta=True,
+        )
+        beta_header = kwargs.get("extra_headers", {}).get("anthropic-beta", "")
+        assert "fast-mode-2026-02-01" in beta_header
+        assert "context-1m-2025-08-07" not in beta_header
+
+    def test_bedrock_transport_forwards_provider_flag(self):
+        """The transport must not silently drop the Bedrock endpoint identity."""
+        from agent.transports.anthropic import AnthropicTransport
+
+        kwargs = AnthropicTransport().build_kwargs(
+            model="claude-opus-4-6",
+            messages=[{"role": "user", "content": "hi"}],
+            tools=None,
+            max_tokens=1024,
+            reasoning_config=None,
+            base_url=None,
+            fast_mode=True,
+            is_bedrock=True,
+        )
+        beta_header = kwargs.get("extra_headers", {}).get("anthropic-beta", "")
+        assert "context-1m-2025-08-07" in beta_header
