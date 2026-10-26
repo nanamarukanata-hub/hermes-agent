@@ -1,0 +1,25 @@
+# Hermes resident worker — system-level systemd unit (Hermes-owned host).
+#
+# Unlike the user unit (deploy/hermes-colab-resident.service), a system
+# unit does not need a user bus / lingering session, so it can start the
+# watchdog at boot on a machine Hermes controls. Install with:
+#   sudo cp deploy/hermes-resident-system.service /etc/systemd/system/
+#   sudo systemctl daemon-reload && sudo systemctl enable --now hermes-resident-system
+#
+# The unit runs the boot entry point, which is idempotent: it starts the
+# watchdog only when it is missing. The watchdog supervises the worker
+# process (restart with exponential backoff); the worker publishes its
+# own heartbeat to the Drive Vault.
+[Unit]
+Description=Hermes resident Colab-queue worker (boot entry)
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=oneshot
+RemainAfterExit=yes
+Environment=HERMES_WORKER_HOME=/home/hatch/hermes-colab-worker
+ExecStart=/home/hatch/workspace/hermes-work/hermes-colab-dispatch/deploy/hermes-boot.sh
+
+[Install]
+WantedBy=multi-user.target
