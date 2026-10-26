@@ -86,6 +86,23 @@ class ObsidianStateTests(unittest.TestCase):
         self.db.set_session_title("branch_3", "Archived Project (3)")
         self.assertEqual(self.db.resolve_session_by_title("Archived Project"), "branch_3")
 
+    def test_title_sanitization_preserves_whitespace_and_strips_controls(self):
+        self.assertEqual(SessionDB.sanitize_title("hello\t\nworld"), "hello world")
+        self.assertEqual(SessionDB.sanitize_title("hello\x00world"), "helloworld")
+        self.assertEqual(SessionDB.sanitize_title("hello\u200bworld"), "helloworld")
+        self.assertIsNone(SessionDB.sanitize_title("\x00\x01"))
+
+    def test_oversized_title_rejected_without_mutating_vault(self):
+        self.db.create_session("title_limit", "discord")
+        self.db.set_session_title("title_limit", "Original")
+        self.assertEqual(SessionDB.sanitize_title("A" * 100), "A" * 100)
+        with self.assertRaisesRegex(ValueError, "too long"):
+            SessionDB.sanitize_title("A" * 101)
+        with self.assertRaisesRegex(ValueError, "too long"):
+            self.db.set_session_title("title_limit", "B" * 150)
+        reopened = SessionDB()
+        self.assertEqual(reopened.get_session_title("title_limit"), "Original")
+
     def test_rewrite_title_search_and_cleanup(self):
         self.db.create_session("test_a", "discord")
         self.db.append_message("test_a", "user", "old")
