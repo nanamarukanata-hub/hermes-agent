@@ -537,12 +537,17 @@ class TestLoadTranscriptCorruptLines:
 
 
 class TestLoadTranscriptPreferLongerSource:
-    """Regression: load_transcript must return whichever source (SQLite or JSONL)
-    has more messages to prevent silent truncation.  GH-3212."""
+    """Regression: load_transcript must not silently truncate history.
+
+    Originally GH-3212 (prefer the longer source). Step 2 supersedes the
+    lossy half of that rule: the canonical SessionDB and a surviving
+    legacy JSONL are merged with deduplication, so no source's unique
+    messages are dropped and shared messages are returned once.
+    """
 
     @pytest.fixture()
     def store_with_db(self, tmp_path):
-        """SessionStore with both Obsidian SessionDB and JSONL active."""
+        """SessionStore with both Obsidian SessionDB and legacy JSONL present."""
         from hermes_state import SessionDB
 
         config = GatewayConfig()
@@ -552,36 +557,47 @@ class TestLoadTranscriptPreferLongerSource:
         s._loaded = True
         return s
 
-    def test_jsonl_longer_than_sqlite_returns_jsonl(self, store_with_db):
-        """Legacy session: JSONL has full history, Vault has only recent turn."""
+    @staticmethod
+    def _write_legacy(store, sid, messages):
+        """Write a legacy JSONL transcript directly (pre-migration artifact).
+
+        append_to_transcript no longer writes JSONL when a SessionDB
+        exists, so fixtures create the legacy file the way history did.
+        """
+        path = store.get_transcript_path(sid)
+        path.parent.mkdir(parents=True, exist_ok=True)
+        with open(path, "w", encoding="utf-8") as f:
+            for msg in messages:
+                f.write(json.dumps(msg, ensure_ascii=False) + "\n")
+
+    def test_jsonl_longer_than_sqlite_merges_without_loss(self, store_with_db):
+        """Legacy session: JSONL has full history, Vault has only recent turn.
+
+        Both unique parts survive: 10 legacy + 2 canonical, legacy first.
+        """
         sid = "legacy_session"
         store_with_db._db.create_session(session_id=sid, source="gateway", model="m")
-        # JSONL has 10 messages (legacy history — written before SQLite existed)
-        for i in range(10):
-            role = "user" if i % 2 == 0 else "assistant"
-            store_with_db.append_to_transcript(
-                sid, {"role": role, "content": f"msg-{i}"}, skip_db=True,
-            )
-        # SQLite has only 2 messages (recent turn after migration)
+        legacy = [
+            {"role": "user" if i % 2 == 0 else "assistant", "content": f"msg-{i}"}
+            for i in range(10)
+        ]
+        self._write_legacy(store_with_db, sid, legacy)
         store_with_db._db.append_message(session_id=sid, role="user", content="new-q")
         store_with_db._db.append_message(session_id=sid, role="assistant", content="new-a")
 
         result = store_with_db.load_transcript(sid)
-        assert len(result) == 10
+        assert len(result) == 12
         assert result[0]["content"] == "msg-0"
+        assert result[-1]["content"] == "new-a"
 
     def test_sqlite_longer_than_jsonl_returns_sqlite(self, store_with_db):
-        """Fully migrated session: Vault has more (JSONL stopped growing)."""
+        """Fully migrated session: Vault is a superset (JSONL stopped growing)."""
         sid = "migrated_session"
         store_with_db._db.create_session(session_id=sid, source="gateway", model="m")
-        # JSONL has 2 old messages
-        store_with_db.append_to_transcript(
-            sid, {"role": "user", "content": "old-q"}, skip_db=True,
-        )
-        store_with_db.append_to_transcript(
-            sid, {"role": "assistant", "content": "old-a"}, skip_db=True,
-        )
-        # SQLite has 4 messages (superset after migration)
+        self._write_legacy(store_with_db, sid, [
+            {"role": "user", "content": "db-0"},
+            {"role": "assistant", "content": "db-1"},
+        ])
         for i in range(4):
             role = "user" if i % 2 == 0 else "assistant"
             store_with_db._db.append_message(session_id=sid, role=role, content=f"db-{i}")
@@ -593,12 +609,10 @@ class TestLoadTranscriptPreferLongerSource:
     def test_sqlite_empty_falls_back_to_jsonl(self, store_with_db):
         """No Vault rows — falls back to JSONL (original behavior preserved)."""
         sid = "no_db_rows"
-        store_with_db.append_to_transcript(
-            sid, {"role": "user", "content": "hello"}, skip_db=True,
-        )
-        store_with_db.append_to_transcript(
-            sid, {"role": "assistant", "content": "hi"}, skip_db=True,
-        )
+        self._write_legacy(store_with_db, sid, [
+            {"role": "user", "content": "hello"},
+            {"role": "assistant", "content": "hi"},
+        ])
 
         result = store_with_db.load_transcript(sid)
         assert len(result) == 2
@@ -609,25 +623,23 @@ class TestLoadTranscriptPreferLongerSource:
         result = store_with_db.load_transcript("nonexistent")
         assert result == []
 
-    def test_equal_length_prefers_sqlite(self, store_with_db):
-        """When both have same count, Vault wins (has richer fields like reasoning)."""
+    def test_equal_length_disjoint_sources_merge(self, store_with_db):
+        """Equal counts with different content: nothing is dropped.
+
+        The old rule silently discarded the JSONL half; the merged,
+        deduplicated transcript keeps both, legacy first.
+        """
         sid = "equal_session"
         store_with_db._db.create_session(session_id=sid, source="gateway", model="m")
-        # Write 2 messages to JSONL only
-        store_with_db.append_to_transcript(
-            sid, {"role": "user", "content": "jsonl-q"}, skip_db=True,
-        )
-        store_with_db.append_to_transcript(
-            sid, {"role": "assistant", "content": "jsonl-a"}, skip_db=True,
-        )
-        # Write 2 different messages to SQLite only
+        self._write_legacy(store_with_db, sid, [
+            {"role": "user", "content": "jsonl-q"},
+            {"role": "assistant", "content": "jsonl-a"},
+        ])
         store_with_db._db.append_message(session_id=sid, role="user", content="db-q")
         store_with_db._db.append_message(session_id=sid, role="assistant", content="db-a")
 
         result = store_with_db.load_transcript(sid)
-        assert len(result) == 2
-        # Should be the Vault version (equal count → prefers Vault)
-        assert result[0]["content"] == "db-q"
+        assert [m["content"] for m in result] == ["jsonl-q", "jsonl-a", "db-q", "db-a"]
 
 
 class TestSessionStoreSwitchSession:
