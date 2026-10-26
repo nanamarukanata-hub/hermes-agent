@@ -323,3 +323,38 @@ def test_submit_tool_can_route_to_resident(monkeypatch, vault):
     assert reply["success"]
     assert reply["executor"] == "resident"
     assert colab_jobs.read_job(vault, "resident-tool-test")["spec"]["executor"] == "resident"
+
+
+def test_linux_worker_uptime_record_carries_across_restarts(vault):
+    from hermes_hybrid.resident_worker import run
+    from hermes_hybrid.colab_dispatch import RESIDENT_WORKER_FILE, resident_health
+    assert run(vault, once=True) == 0
+    first = vault.read_json(RESIDENT_WORKER_FILE)
+    assert first["restart_count"] == 1
+    assert first["state"] == "stopped"
+    assert first["cycle_count"] == 1
+    assert run(vault, once=True) == 0
+    second = vault.read_json(RESIDENT_WORKER_FILE)
+    assert second["restart_count"] == 2
+    assert second["cycle_count"] == 1
+    assert second["worker_id"] != first["worker_id"]
+    assert not resident_health(vault)["online"]
+
+
+def test_hermes_tool_reads_both_worker_heartbeats(monkeypatch, vault):
+    from tools import colab_job_tools
+    from hermes_hybrid.colab_dispatch import RESIDENT_WORKER_FILE, WORKER_FILE
+    monkeypatch.setenv("GOOGLE_DRIVE_ACCESS_TOKEN", "fixture-token")
+    monkeypatch.setenv("HERMES_DRIVE_VAULT_ROOT_ID", "fixture-vault")
+    monkeypatch.setattr(colab_job_tools, "_vault", lambda: vault)
+    current = datetime.now(timezone.utc).isoformat()
+    vault.write_json(RESIDENT_WORKER_FILE, {
+        "state": "running", "last_seen_at": current, "started_at": current,
+        "restart_count": 3, "cycle_count": 100
+    })
+    health = json.loads(colab_job_tools._health_status({}))
+    assert health["success"] is True
+    assert health["resident"]["online"] is True
+    assert health["resident"]["restart_count"] == 3
+    assert 0 <= health["resident"]["current_process_uptime_seconds"] <= 30
+    assert health["colab"]["online"] is False
