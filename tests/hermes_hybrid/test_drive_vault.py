@@ -7,17 +7,20 @@ write surfaces as a conflict instead of silent data loss.
 """
 
 import json
+from urllib.parse import parse_qs, urlparse
 
 import pytest
 
 from hermes_hybrid import colab_jobs
 from hermes_hybrid.drive_vault import (
     DriveConflict,
+    DriveError,
     DriveNotFound,
     DriveUnavailable,
     DriveVault,
     DriveVaultDir,
     FakeDriveTransport,
+    HttpDriveTransport,
 )
 
 
@@ -157,3 +160,58 @@ class TestColabJobs:
         assert "drive.mount" in code
         # The notebook is JSON-serialisable as an .ipynb file.
         json.dumps(nb)
+
+
+class TestHttpDriveTransportPagination:
+    @staticmethod
+    def _item(item_id: str, name: str) -> dict:
+        return {"id": item_id, "name": name, "mimeType": "application/json"}
+
+    def test_list_children_reads_all_pages(self, monkeypatch):
+        transport = HttpDriveTransport(lambda: "unused")
+        requests = []
+
+        def fake_json(method, url, payload=None):
+            params = parse_qs(urlparse(url).query)
+            requests.append(params)
+            if "pageToken" not in params:
+                return {"files": [self._item("a", "one.json")],
+                        "nextPageToken": "page 2/+?"}
+            assert params["pageToken"] == ["page 2/+?"]
+            return {"files": [self._item("b", "two.json")]}
+
+        monkeypatch.setattr(transport, "_json", fake_json)
+        files = transport.list_children("parent-id")
+        assert [item.name for item in files] == ["one.json", "two.json"]
+        assert len(requests) == 2
+        assert requests[0]["pageSize"] == ["1000"]
+        assert "nextPageToken" in requests[0]["fields"][0]
+
+    def test_find_by_name_checks_later_pages(self, monkeypatch):
+        transport = HttpDriveTransport(lambda: "unused")
+        queries = []
+
+        def fake_json(method, url, payload=None):
+            params = parse_qs(urlparse(url).query)
+            queries.append(params)
+            if "pageToken" not in params:
+                return {"files": [], "nextPageToken": "second"}
+            return {"files": [self._item("found", "session.json")]}
+
+        monkeypatch.setattr(transport, "_json", fake_json)
+        files = transport.find_by_name("session.json", "parent-id")
+        assert [item.id for item in files] == ["found"]
+        assert len(queries) == 2
+        assert "'parent-id' in parents" in queries[0]["q"][0]
+        assert queries[1]["pageToken"] == ["second"]
+
+    def test_repeated_page_token_fails_instead_of_looping(self, monkeypatch):
+        transport = HttpDriveTransport(lambda: "unused")
+        monkeypatch.setattr(
+            transport, "_json",
+            lambda method, url, payload=None: {
+                "files": [], "nextPageToken": "stuck",
+            },
+        )
+        with pytest.raises(DriveError, match="repeated pagination token"):
+            transport.list_children("parent-id")
