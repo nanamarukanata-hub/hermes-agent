@@ -1024,7 +1024,8 @@ async def test_topic_refuses_unauthorized_user(tmp_path, monkeypatch):
     """Unauthorized DMs cannot flip multi-session mode on."""
     import gateway.run as gateway_run
 
-    db = SessionDB(db_path=tmp_path / "state.db")
+    # Isolate the test in its own Vault instead of relying on the CI Vault.
+    db = SessionDB(vault_path=tmp_path)
     runner = _make_runner(session_db=db)
     runner._is_user_authorized = lambda _source: False  # Deny
 
@@ -1035,14 +1036,15 @@ async def test_topic_refuses_unauthorized_user(tmp_path, monkeypatch):
     result = await runner._handle_topic_command(_make_event("/topic"))
 
     assert "not authorized" in result.lower()
-    # Tables must not be created for an unauthorized caller.
-    tables = {
-        row[0]
-        for row in db._conn.execute(
-            "SELECT name FROM sqlite_master WHERE type='table' AND name LIKE 'telegram_dm%'"
-        ).fetchall()
-    }
-    assert tables == set()
+    # Unauthorized callers must not persist topic settings or create a DB.
+    assert db._read_state_meta() == {}
+    assert not (db.root / "state_meta.json").exists()
+    assert not list(tmp_path.rglob("*.db"))
+    # The denied setting must remain disabled after a fresh Vault load.
+    reloaded = SessionDB(vault_path=tmp_path)
+    assert reloaded.is_telegram_topic_mode_enabled(
+        chat_id="208214988", user_id="208214988"
+    ) is False
 
 
 def test_capability_hint_is_debounced_per_chat(tmp_path):
