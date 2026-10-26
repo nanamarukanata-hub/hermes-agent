@@ -38,7 +38,7 @@ def timestamp():
     return datetime.now(timezone.utc).isoformat()
 
 def persist(path, value):
-    path.write_text(json.dumps(value, indent=2, ensure_ascii=False) + "\\\\n", encoding="utf-8")
+    path.write_text(json.dumps(value, indent=2, ensure_ascii=False) + "\\n", encoding="utf-8")
 
 def health(state):
     persist(QUEUE / "worker.json", {
@@ -77,7 +77,7 @@ def execute(spec):
         if kind == "text_stats":
             text = blob.decode("utf-8")
             result.update({
-                "lines": text.count("\\\\n") + (1 if text and not text.endswith("\\\\n") else 0),
+                "lines": text.count("\\n") + (1 if text and not text.endswith("\\n") else 0),
                 "words": len(text.split()), "chars": len(text)
             })
         return result
