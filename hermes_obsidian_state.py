@@ -279,7 +279,7 @@ class SessionDB:
         exact = self.get_session_by_title(title)
         if not isinstance(title, str) or not title:
             return None
-        if re.search(r"(?: #\\d+| \\(\\d+\\))$", title):
+        if re.search(r"(?: #\d+| \(\d+\))$", title):
             return exact["id"] if exact else None
 
         best = exact
@@ -289,7 +289,7 @@ class SessionDB:
             if not isinstance(candidate, str) or not candidate.startswith(title):
                 continue
             suffix = candidate[len(title):]
-            match = re.fullmatch(r" #([0-9]+)| \\(([0-9]+)\\)", suffix)
+            match = re.fullmatch(r" #([0-9]+)| \(([0-9]+)\)", suffix)
             if not match:
                 continue
             number = int(match.group(1) or match.group(2))
