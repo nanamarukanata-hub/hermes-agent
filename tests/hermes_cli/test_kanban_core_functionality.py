@@ -732,7 +732,8 @@ def test_gc_events_keeps_active_task_history(kanban_home):
 
 
 def test_gc_worker_logs_deletes_old_files(kanban_home):
-    log_dir = kanban_home / "kanban" / "logs"
+    log_dir = kb.worker_logs_dir()
+    assert log_dir.is_relative_to(Path(os.environ["HERMES_OBSIDIAN_VAULT"]))
     log_dir.mkdir(parents=True, exist_ok=True)
     old = log_dir / "old.log"
     young = log_dir / "young.log"
@@ -741,10 +742,17 @@ def test_gc_worker_logs_deletes_old_files(kanban_home):
     # Age the old file by 100 days.
     past = time.time() - 100 * 24 * 3600
     os.utime(old, (past, past))
+    # Vault GC must not touch legacy Hermes-home files, even if they are old.
+    legacy_dir = kanban_home / "kanban" / "logs"
+    legacy_dir.mkdir(parents=True, exist_ok=True)
+    legacy_old = legacy_dir / "legacy.log"
+    legacy_old.write_text("legacy")
+    os.utime(legacy_old, (past, past))
     removed = kb.gc_worker_logs(older_than_seconds=30 * 24 * 3600)
     assert removed == 1
     assert not old.exists()
     assert young.exists()
+    assert legacy_old.read_text() == "legacy"
 
 
 # ---------------------------------------------------------------------------
@@ -752,7 +760,8 @@ def test_gc_worker_logs_deletes_old_files(kanban_home):
 # ---------------------------------------------------------------------------
 
 def test_worker_log_rotation_keeps_one_generation(kanban_home, tmp_path):
-    log_dir = kanban_home / "kanban" / "logs"
+    log_dir = kb.worker_logs_dir()
+    assert log_dir.is_relative_to(Path(os.environ["HERMES_OBSIDIAN_VAULT"]))
     log_dir.mkdir(parents=True, exist_ok=True)
     target = log_dir / "t_aaaa.log"
     target.write_bytes(b"x" * (3 * 1024 * 1024))  # 3 MiB, over 2 MiB threshold
@@ -762,7 +771,8 @@ def test_worker_log_rotation_keeps_one_generation(kanban_home, tmp_path):
 
 
 def test_read_worker_log_tail(kanban_home):
-    log_dir = kanban_home / "kanban" / "logs"
+    log_dir = kb.worker_logs_dir()
+    assert log_dir.is_relative_to(Path(os.environ["HERMES_OBSIDIAN_VAULT"]))
     log_dir.mkdir(parents=True, exist_ok=True)
     p = log_dir / "t_beef.log"
     # 10 lines
