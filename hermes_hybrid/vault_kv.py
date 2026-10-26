@@ -136,7 +136,13 @@ class VaultDir:
         """Allocate a monotonically increasing integer id, atomically."""
 
         def _do():
-            counter = self.path(counter_name)
+            # The legacy default "_counter" is an internal reserved name;
+            # all caller-supplied alternatives must pass the normal ID guard.
+            if counter_name != "_counter":
+                validate_id(counter_name)
+            counter = self.dir / f"{counter_name}.json"
+            if counter.is_symlink():
+                raise ValueError("symlink in vault path is rejected")
             current = 0
             if counter.exists():
                 try:
