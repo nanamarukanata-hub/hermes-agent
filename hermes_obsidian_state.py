@@ -464,6 +464,20 @@ class SessionDB:
                     other["parent_session_id"] = None
                     self._save(other["id"], other)
             shutil.rmtree(self._folder(session_id))
+            # A deleted session must not leave a topic binding pointing to it.
+            state, _, bindings = self._telegram_maps()
+            changed = False
+            for chat_id, topics in list(bindings.items()):
+                if not isinstance(topics, dict):
+                    raise RuntimeError("Invalid Telegram topic bindings in Vault")
+                for thread_id, binding in list(topics.items()):
+                    if isinstance(binding, dict) and binding.get("session_id") == session_id:
+                        del topics[thread_id]
+                        changed = True
+                if not topics:
+                    del bindings[chat_id]
+            if changed:
+                self._save_telegram_maps(state)
         return True
 
     def prune_sessions(self, older_than_days=90, source=None, sessions_dir=None):
