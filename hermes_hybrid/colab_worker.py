@@ -98,6 +98,9 @@ def process_one(folder):
         job = json.loads(job_file.read_text(encoding="utf-8"))
         if job.get("job_id") != job_id or job.get("schema") != 1:
             raise ValueError("job definition mismatch")
+        # Resident jobs are owned by the supervised Linux worker, never Colab.
+        if (job.get("spec") or {}).get("executor", "colab") != "colab":
+            return False
     except (OSError, json.JSONDecodeError, KeyError, ValueError):
         # Incomplete/concurrent Drive sync: leave queued job for next cycle.
         return False
