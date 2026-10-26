@@ -444,7 +444,7 @@ async def test_new_inside_telegram_topic_rewrites_binding_to_new_session(tmp_pat
 
 
 @pytest.mark.asyncio
-async def test_topic_root_command_explicitly_migrates_and_enables_topic_mode(tmp_path, monkeypatch):
+async def test_topic_root_command_enables_persistent_vault_topic_mode(tmp_path, monkeypatch):
     import gateway.run as gateway_run
 
     session_db = SessionDB(db_path=tmp_path / "state.db")
@@ -461,7 +461,7 @@ async def test_topic_root_command_explicitly_migrates_and_enables_topic_mode(tmp
 
     assert "Telegram multi-session topics are enabled" in result
     assert "All Messages" in result
-    assert session_db.get_meta("telegram_dm_topic_schema_version") == "2"
+    assert session_db._read_state_meta()["telegram_topic_modes"]["208214988"]["enabled"] is True
     assert session_db.is_telegram_topic_mode_enabled(chat_id="208214988", user_id="208214988")
     assert runner._telegram_topic_mode_enabled(_make_source()) is True
     runner._run_agent.assert_not_called()
