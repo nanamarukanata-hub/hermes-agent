@@ -153,22 +153,39 @@ class HttpDriveTransport:
         )
 
     # -- transport API -------------------------------------------------
+    def _list_files(self, query: str) -> list[FileMeta]:
+        """Read every Drive API page; silently truncating a Vault listing loses records."""
+        files: list[FileMeta] = []
+        page_token: Optional[str] = None
+        seen_tokens: set[str] = set()
+        while True:
+            params = {
+                "q": query,
+                "fields": f"nextPageToken,files({self._FIELDS})",
+                "pageSize": "1000",
+            }
+            if page_token:
+                params["pageToken"] = page_token
+            url = f"{self._API}/files?{urllib.parse.urlencode(params)}"
+            response = self._json("GET", url)
+            files.extend(self._meta(item) for item in response.get("files", []))
+            next_token = response.get("nextPageToken")
+            if not next_token:
+                return files
+            if next_token in seen_tokens:
+                raise DriveError("Drive API returned a repeated pagination token")
+            seen_tokens.add(next_token)
+            page_token = next_token
+
     def find_by_name(self, name: str, parent_id: Optional[str]) -> list[FileMeta]:
         escaped = name.replace("\\", "\\\\").replace("'", "\\'")
         q = f"name = '{escaped}' and trashed = false"
         if parent_id:
             q += f" and '{parent_id}' in parents"
-        params = urllib.parse.urlencode({"q": q, "fields": f"files({self._FIELDS})"})
-        out = self._json("GET", f"{self._API}/files?{params}")
-        return [self._meta(f) for f in out.get("files", [])]
+        return self._list_files(q)
 
     def list_children(self, folder_id: str) -> list[FileMeta]:
-        params = urllib.parse.urlencode({
-            "q": f"'{folder_id}' in parents and trashed = false",
-            "fields": f"files({self._FIELDS})", "pageSize": "1000",
-        })
-        out = self._json("GET", f"{self._API}/files?{params}")
-        return [self._meta(f) for f in out.get("files", [])]
+        return self._list_files(f"'{folder_id}' in parents and trashed = false")
 
     def create_folder(self, name: str, parent_id: str) -> FileMeta:
         out = self._json("POST", f"{self._API}/files?fields={self._FIELDS}", {
