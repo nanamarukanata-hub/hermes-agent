@@ -614,6 +614,10 @@ class TestAuxiliaryPoolAwareness:
         with (
             patch("agent.auxiliary_client.load_pool", return_value=_Pool()),
             patch("agent.auxiliary_client.OpenAI") as mock_openai,
+            # This test covers pool credentials, not the live Portal model
+            # recommendation. Pin the fallback so remote changes cannot
+            # make an unrelated credentials test fail.
+            patch("hermes_cli.models.get_nous_recommended_aux_model", return_value=None),
         ):
             from agent.auxiliary_client import _try_nous
 
