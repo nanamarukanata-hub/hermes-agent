@@ -523,14 +523,18 @@ def test_dispatch_reclaims_stale_before_spawning(kanban_home):
 # Workspace resolution
 # ---------------------------------------------------------------------------
 
-def test_scratch_workspace_created_under_hermes_home(kanban_home):
+def test_scratch_workspace_created_inside_obsidian_vault(kanban_home):
+    """Scratch workspaces must not fall back to legacy Hermes Home."""
     with kb.connect() as conn:
         t = kb.create_task(conn, title="x")
         task = kb.get_task(conn, t)
         ws = kb.resolve_workspace(task)
     assert ws.exists()
     assert ws.is_dir()
-    assert "kanban" in str(ws)
+    assert ws.parent == kb.workspaces_root()
+    vault = Path(os.environ["HERMES_OBSIDIAN_VAULT"]).resolve()
+    assert ws.resolve().is_relative_to(vault)
+    assert not (kanban_home / "kanban" / "workspaces").exists()
 
 
 def test_dir_workspace_honors_given_path(kanban_home, tmp_path):
