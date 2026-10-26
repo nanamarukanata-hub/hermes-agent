@@ -227,6 +227,7 @@ class RPCharacterState:
     world_book: WorldBook = field(default_factory=WorldBook)
     relationship_stage: str = "stranger"
     turn_count: int = 0
+    adult_style_state: dict[str, Any] = field(default_factory=dict)
 
     def __post_init__(self) -> None:
         if not self.world_book.entries and self.card.world_book:
@@ -245,7 +246,8 @@ class RPCharacterState:
                 "scene": self.scene.to_dict(),
                 "world_book": list(self.world_book.entries),
                 "relationship_stage": self.relationship_stage,
-                "turn_count": self.turn_count}
+                "turn_count": self.turn_count,
+                "adult_style_state": dict(self.adult_style_state)}
 
 
 def check_no_user_narration(reply: str, user_name: str) -> list[str]:
