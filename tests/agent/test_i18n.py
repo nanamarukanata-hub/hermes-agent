@@ -154,9 +154,22 @@ def test_t_missing_key_in_non_english_falls_back_to_english(tmp_path, monkeypatc
     fake_locales.mkdir()
     (fake_locales / "en.yaml").write_text("foo: English Foo\n", encoding="utf-8")
     (fake_locales / "zh.yaml").write_text("# intentionally empty\n", encoding="utf-8")
-    monkeypatch.setattr(i18n, "_locales_dir", lambda: fake_locales)
-    i18n.reset_language_cache()
-    assert i18n.t("foo", lang="zh") == "English Foo"
+    # The catalog cache is process-global.  Leaving the fake English catalog
+    # cached breaks unrelated gateway tests later in the same pytest worker.
+    try:
+        with monkeypatch.context() as scoped_patch:
+            scoped_patch.setattr(i18n, "_locales_dir", lambda: fake_locales)
+            i18n.reset_language_cache()
+            assert i18n.t("foo", lang="zh") == "English Foo"
+    finally:
+        # Restore the real catalog after the patched path is reverted, even
+        # when the assertion above fails.
+        i18n.reset_language_cache()
+
+    # Regression guard: a later gateway restart must see the real English key.
+    assert i18n.t("gateway.draining", lang="en", count=1) == (
+        "⏳ Draining 1 active agent(s) before restart..."
+    )
 
 
 def test_t_unknown_language_uses_english():
