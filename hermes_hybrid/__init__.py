@@ -1,6 +1,7 @@
 """Hermes hybrid: Unified RP Engine + Obsidian-only storage."""
 from .rp_engine import (CharacterCard, EmotionalState, PsychologicalProfile,
                         RPCharacterState, SceneState, WorldBook)
+from .adult_roleplay_style import AdultStyleProfile, AdultSceneEvents, format_heart_punctuation
 from .obsidian_store import VaultStore
 from .vault_sync import VaultSync
 from .session_manager import SessionManager, Session
@@ -20,4 +21,5 @@ __all__ = ["CharacterCard", "EmotionalState", "PsychologicalProfile",
            "AdapterRegistry", "audit", "RPConversation", "build_rp_prompt",
            "discord_session_key", "DeepMemory", "estimate_tokens",
            "search_vault", "ProactivePolicy", "ProactiveWatcher",
-           "proactive_should_respond", "VaultDir", "resolve_vault_root"]
+           "proactive_should_respond", "VaultDir", "resolve_vault_root",
+           "AdultStyleProfile", "AdultSceneEvents", "format_heart_punctuation"]

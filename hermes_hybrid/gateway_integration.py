@@ -31,6 +31,8 @@ from typing import Any
 
 from .obsidian_store import VaultStore, validate_id
 from .rp_engine import CharacterCard, RPCharacterState, WorldBook
+from .adult_roleplay_style import (AdultStyleProfile, AdultSceneEvents,
+                                   format_heart_punctuation, reply_ends_with_heart)
 
 
 def discord_session_key(*, chat_type: str, chat_id: str = "", thread_id: str = "",
@@ -88,6 +90,10 @@ def build_rp_prompt(state: RPCharacterState, *, world_hits: list[dict[str, Any]]
     if bar:
         lines.append(f"**Scene status:** {bar}")
     lines.append(f"**Relationship stage:** {state.relationship_stage}")
+    _adult_style = AdultStyleProfile.from_extra(card.extra)
+    if _adult_style is not None:
+        lines.append("")
+        lines.append(_adult_style.prompt(AdultSceneEvents.from_dict(state.adult_style_state)))
     if world_hits:
         lines.append("")
         lines.append("**World Book entries matched:**")
@@ -135,7 +141,8 @@ class RPConversation:
             first_message=card_data.get("first_message", ""),
             dialogue_examples=card_data.get("dialogue_examples", ""),
             tags=list(card_data.get("tags") or []),
-            world_book=list(card_data.get("world_book") or []))
+            world_book=list(card_data.get("world_book") or []),
+            extra=dict(card_data.get("extra") or {}))
         from .rp_engine import EmotionalState, PsychologicalProfile, SceneState
         psych = data.get("psychology") or {}
         emo = data.get("emotion") or {}
@@ -154,7 +161,8 @@ class RPConversation:
                                 ("location", "time", "atmosphere", "outfit",
                                  "posture", "psyche", "desire", "body")}),
             relationship_stage=data.get("relationship_stage", "stranger"),
-            turn_count=int(data.get("turn_count", 0)))
+            turn_count=int(data.get("turn_count", 0)),
+            adult_style_state=dict(data.get("adult_style_state") or {}))
         state.world_book = WorldBook(list(card.world_book))
         return state
 
@@ -211,6 +219,28 @@ class RPConversation:
                 pass
         return prompt
 
+    def postprocess_reply(self, user_id: str, assistant_response: str) -> str:
+        """Format typography for an opted-in adult card; otherwise no-op."""
+        state = self.load_active_state(user_id)
+        if state is None or AdultStyleProfile.from_extra(state.card.extra) is None:
+            return assistant_response
+        events = AdultSceneEvents.from_dict(state.adult_style_state)
+        return format_heart_punctuation(
+            assistant_response,
+            previous_ended_heart=events.last_reply_ended_heart,
+        )
+
+    def trigger_adult_event(self, user_id: str, event_name: str) -> RPCharacterState:
+        """Explicit event API; never advances intimate beats automatically."""
+        state = self.load_active_state(user_id)
+        if state is None or AdultStyleProfile.from_extra(state.card.extra) is None:
+            raise ValueError("active, explicitly adult character card required")
+        events = AdultSceneEvents.from_dict(state.adult_style_state)
+        state.adult_style_state = events.transition(event_name).to_dict()
+        self.store.save_character_state(
+            user_id, validate_id(state.card.name or "character"), state.to_dict())
+        return state
+
     def after_agent(self, user_id: str, session_id: str, user_message: str,
                     assistant_response: str) -> RPCharacterState | None:
         """Persist RP state after a completed turn.
@@ -223,6 +253,10 @@ class RPConversation:
         if state is None:
             return None
         state.turn_count += 1
+        if AdultStyleProfile.from_extra(state.card.extra) is not None:
+            events = AdultSceneEvents.from_dict(state.adult_style_state)
+            events.last_reply_ended_heart = reply_ends_with_heart(assistant_response)
+            state.adult_style_state = events.to_dict()
         self.store.save_character_state(user_id, validate_id(state.card.name or "character"),
                                         state.to_dict())
         return state
