@@ -63,6 +63,33 @@ class TestDriveVaultBasics:
 
 
 class TestConflictAndFailure:
+    def test_duplicate_folder_blocks_writes(self, vault):
+        v, transport = vault
+        root = v.root_id()
+        transport.create_folder("06_Automation", root)
+        transport.create_folder("06_Automation", root)
+        with pytest.raises(DriveConflict, match="multiple Vault folders"):
+            v.write_text("06_Automation/Hermes/log.md", "new")
+        assert all(item["name"] != "log.md" for item in transport._items.values())
+
+    def test_duplicate_file_blocks_reads_and_writes(self, vault):
+        v, transport = vault
+        rel = "06_Automation/Hermes/log.md"
+        v.write_text(rel, "first")
+        parent = v._folder_id(("06_Automation", "Hermes"))
+        transport.upload_new("log.md", parent, b"second", "text/plain")
+        with pytest.raises(DriveConflict, match="multiple Vault files"):
+            v.read_text(rel)
+        with pytest.raises(DriveConflict, match="multiple Vault files"):
+            v.write_text(rel, "new")
+
+    def test_expected_revision_on_missing_file_blocks_creation(self, vault):
+        v, _ = vault
+        rel = "06_Automation/Hermes/missing.md"
+        with pytest.raises(DriveConflict, match="file missing"):
+            v.write_text(rel, "new", expected_revision="old-revision")
+        assert not v.exists(rel)
+
     def test_stale_revision_is_refused_before_overwrite(self, vault):
         v, _ = vault
         meta = v.write_text("06_Automation/Hermes/state.json", "v1")

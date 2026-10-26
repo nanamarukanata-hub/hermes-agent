@@ -391,6 +391,8 @@ class DriveVault:
                 continue
             found = [m for m in self._retry(lambda p=part, c=current: self._t.find_by_name(p, c))
                      if m.mime_type == _FOLDER_MIME]
+            if len(found) > 1:
+                raise DriveConflict(f"multiple Vault folders at {'/'.join(walked)}")
             if found:
                 current = found[0].id
             elif create:
@@ -408,6 +410,8 @@ class DriveVault:
             return None
         matches = [m for m in self._retry(lambda: self._t.find_by_name(parts[-1], parent))
                    if m.mime_type != _FOLDER_MIME]
+        if len(matches) > 1:
+            raise DriveConflict(f"multiple Vault files at {rel}")
         return matches[0] if matches else None
 
     # -- reads -----------------------------------------------------------
@@ -454,6 +458,8 @@ class DriveVault:
         mime = mime_type or mimetypes.guess_type(parts[-1])[0] or "application/octet-stream"
         parent = self._folder_id(parts[:-1], create=True)
         existing = self._find_file(rel)
+        if existing is None and expected_revision is not None:
+            raise DriveConflict(f"{rel}: expected revision {expected_revision}, file missing")
         if existing is not None and expected_revision is not None:
             current = self._retry(lambda: self._t.get_meta(existing.id))
             if current.revision != expected_revision:
