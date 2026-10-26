@@ -21,6 +21,10 @@ def _enabled() -> bool:
     # renewable Application Default Credentials JSON are required.
     if not os.environ.get("HERMES_DRIVE_VAULT_ROOT_ID"):
         return False
+    if os.environ.get("HERMES_DRIVE_PROVIDER") == "hatch":
+        from hermes_hybrid.cli_drive_transport import DEFAULT_CLI
+        cli = os.environ.get("HERMES_GWS_CLI") or DEFAULT_CLI
+        return os.path.isabs(cli) and os.path.isfile(cli) and os.access(cli, os.X_OK)
     token = bool(os.environ.get("GOOGLE_DRIVE_ACCESS_TOKEN"))
     adc_file = os.environ.get("GOOGLE_APPLICATION_CREDENTIALS")
     return token or bool(adc_file and os.path.isfile(adc_file))
@@ -30,6 +34,11 @@ def _vault():
     from hermes_hybrid.drive_vault import (
         DriveVault, DriveAuthError, HttpDriveTransport, drive_vault_from_env,
     )
+    if os.environ.get("HERMES_DRIVE_PROVIDER") == "hatch":
+        if not _enabled():
+            raise DriveAuthError("Authorized hatch Drive connector is unavailable")
+        from hermes_hybrid.cli_drive_transport import cli_vault
+        return cli_vault(root_id=os.environ["HERMES_DRIVE_VAULT_ROOT_ID"])
     if os.environ.get("GOOGLE_DRIVE_ACCESS_TOKEN"):
         return drive_vault_from_env()
     filename = os.environ.get("GOOGLE_APPLICATION_CREDENTIALS")
