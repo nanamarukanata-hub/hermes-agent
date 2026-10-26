@@ -54,7 +54,11 @@ def test_run_job_calls_discover_mcp_tools_before_agent_construction():
 
     with patch("tools.mcp_tool.discover_mcp_tools", side_effect=fake_discover), \
          patch("run_agent.AIAgent", _FakeAgent), \
-         patch("cron.scheduler._resolve_cron_enabled_toolsets", return_value=None):
+         patch("cron.scheduler._resolve_cron_enabled_toolsets", return_value=None), \
+         patch("hermes_cli.runtime_provider.resolve_runtime_provider", return_value={
+             "provider": "openai", "api_key": "cron-mcp-test-key",
+             "base_url": "https://example.invalid/v1", "api_mode": "openai",
+         }):
         scheduler.run_job(job)
 
     # Discovery must be called, and must be called BEFORE agent construction.
@@ -100,7 +104,11 @@ def test_run_job_tolerates_discover_mcp_tools_failure():
         "tools.mcp_tool.discover_mcp_tools",
         side_effect=fake_discover_that_raises,
     ), patch("run_agent.AIAgent", _FakeAgent), \
-         patch("cron.scheduler._resolve_cron_enabled_toolsets", return_value=None):
+         patch("cron.scheduler._resolve_cron_enabled_toolsets", return_value=None), \
+         patch("hermes_cli.runtime_provider.resolve_runtime_provider", return_value={
+             "provider": "openai", "api_key": "cron-mcp-test-key",
+             "base_url": "https://example.invalid/v1", "api_mode": "openai",
+         }):
         # Should NOT raise
         success, doc, final_response, error = scheduler.run_job(job)
 
