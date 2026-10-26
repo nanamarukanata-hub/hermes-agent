@@ -596,234 +596,201 @@ def test_tenant_propagates_to_events(kanban_home):
 # ---------------------------------------------------------------------------
 
 class TestSharedBoardPaths:
-    """`kanban_home`/`kanban_db_path`/`workspaces_root`/`worker_log_path`
-    must anchor at the **shared root**, not the active profile's HERMES_HOME."""
+    """Dispatcher and profile workers must share one Vault-backed board."""
 
     def _set_home(self, monkeypatch, tmp_path, hermes_home):
+        vault = tmp_path / "obsidian_vault"
+        vault.mkdir(exist_ok=True)
         monkeypatch.setattr(Path, "home", lambda: tmp_path)
         monkeypatch.setenv("HERMES_HOME", str(hermes_home))
-        monkeypatch.delenv("HERMES_KANBAN_HOME", raising=False)
+        monkeypatch.setenv("HERMES_OBSIDIAN_VAULT", str(vault))
+        for name in (
+            "HERMES_KANBAN_HOME",
+            "HERMES_KANBAN_BOARD",
+            "HERMES_KANBAN_DB",
+            "HERMES_KANBAN_WORKSPACES_ROOT",
+        ):
+            monkeypatch.delenv(name, raising=False)
+        return vault
 
-    def test_default_install_anchors_at_home_dot_hermes(
+    @staticmethod
+    def _store(vault):
+        return vault / "06_Automation" / "Hermes" / "Kanban" / "default"
+
+    def test_default_install_anchors_at_obsidian_vault(
         self, tmp_path, monkeypatch
     ):
-        # Standard install: HERMES_HOME == ~/.hermes, no profile active.
         default_home = tmp_path / ".hermes"
         default_home.mkdir()
-        self._set_home(monkeypatch, tmp_path, default_home)
+        vault = self._set_home(monkeypatch, tmp_path, default_home)
+        store = self._store(vault)
 
+        # Legacy path helpers remain for compatibility, not persistence.
         assert kb.kanban_home() == default_home
         assert kb.kanban_db_path() == default_home / "kanban.db"
-        assert kb.workspaces_root() == default_home / "kanban" / "workspaces"
-        assert (
-            kb.worker_log_path("t_demo")
-            == default_home / "kanban" / "logs" / "t_demo.log"
-        )
+        assert kb.kanban_store_dir() == store
+        assert kb.workspaces_root() == store / "workspaces"
+        assert kb.worker_log_path("t_demo") == store / "logs" / "t_demo.log"
 
-    def test_profile_worker_resolves_to_shared_root(
+        kb.init_db()
+        assert (store / "counters.json").exists()
+        assert not (default_home / "kanban.db").exists()
+        assert not (default_home / "kanban" / "workspaces").exists()
+
+    def test_profile_worker_resolves_to_shared_vault(
         self, tmp_path, monkeypatch
     ):
-        # Reproduces the bug: dispatcher uses ~/.hermes/kanban.db,
-        # worker spawned with -p <profile> previously resolved to
-        # ~/.hermes/profiles/<profile>/kanban.db. After the fix both
-        # converge on ~/.hermes/kanban.db.
         default_home = tmp_path / ".hermes"
         default_home.mkdir()
         profile_home = default_home / "profiles" / "nehemiahkanban"
         profile_home.mkdir(parents=True)
-        self._set_home(monkeypatch, tmp_path, profile_home)
+        vault = self._set_home(monkeypatch, tmp_path, profile_home)
 
-        # All four resolvers must anchor at the shared root, not the
-        # profile-local HERMES_HOME.
         assert kb.kanban_home() == default_home
-        assert kb.kanban_db_path() == default_home / "kanban.db"
-        assert kb.workspaces_root() == default_home / "kanban" / "workspaces"
-        assert (
-            kb.worker_log_path("t_0d214f19")
-            == default_home / "kanban" / "logs" / "t_0d214f19.log"
+        assert kb.kanban_store_dir() == self._store(vault)
+        assert kb.workspaces_root() == self._store(vault) / "workspaces"
+        assert kb.worker_log_path("t_0d214f19") == (
+            self._store(vault) / "logs" / "t_0d214f19.log"
         )
-
-        # Sanity: the profile-local path that used to be returned is
-        # explicitly NOT what we resolve to anymore.
-        assert kb.kanban_db_path() != profile_home / "kanban.db"
+        assert not (profile_home / "kanban.db").exists()
 
     def test_dispatcher_and_profile_worker_converge(
         self, tmp_path, monkeypatch
     ):
-        # End-to-end convergence: resolve the path under each side's
-        # HERMES_HOME and confirm equality. This is the property the
-        # dispatcher/worker handoff actually depends on.
         default_home = tmp_path / ".hermes"
         default_home.mkdir()
         profile_home = default_home / "profiles" / "coder"
         profile_home.mkdir(parents=True)
-
-        # Dispatcher's perspective.
         self._set_home(monkeypatch, tmp_path, default_home)
-        dispatcher_db = kb.kanban_db_path()
-        dispatcher_ws = kb.workspaces_root()
-        dispatcher_log = kb.worker_log_path("t_handoff")
 
-        # Worker's perspective (profile activated by `hermes -p coder`).
+        dispatcher_paths = (
+            kb.kanban_store_dir(),
+            kb.workspaces_root(),
+            kb.worker_log_path("t_handoff"),
+        )
         monkeypatch.setenv("HERMES_HOME", str(profile_home))
-        worker_db = kb.kanban_db_path()
-        worker_ws = kb.workspaces_root()
-        worker_log = kb.worker_log_path("t_handoff")
+        worker_paths = (
+            kb.kanban_store_dir(),
+            kb.workspaces_root(),
+            kb.worker_log_path("t_handoff"),
+        )
+        assert dispatcher_paths == worker_paths
 
-        assert dispatcher_db == worker_db
-        assert dispatcher_ws == worker_ws
-        assert dispatcher_log == worker_log
-
-    def test_docker_custom_hermes_home_uses_env_path_directly(
+    def test_custom_hermes_home_does_not_move_vault_store(
         self, tmp_path, monkeypatch
     ):
-        # Docker / custom deployment: HERMES_HOME points outside ~/.hermes.
-        # `get_default_hermes_root()` returns env_home directly when it
-        # is not a `<root>/profiles/<name>` shape and not under
-        # `Path.home() / ".hermes"`.
         custom_root = tmp_path / "opt" / "hermes"
         custom_root.mkdir(parents=True)
-        self._set_home(monkeypatch, tmp_path, custom_root)
+        vault = self._set_home(monkeypatch, tmp_path, custom_root)
 
         assert kb.kanban_home() == custom_root
-        assert kb.kanban_db_path() == custom_root / "kanban.db"
+        assert kb.kanban_store_dir() == self._store(vault)
+        assert kb.workspaces_root() == self._store(vault) / "workspaces"
 
-    def test_docker_profile_layout_uses_grandparent(
+    def test_docker_profile_layout_uses_shared_vault(
         self, tmp_path, monkeypatch
     ):
-        # Docker profile shape: HERMES_HOME=/opt/hermes/profiles/coder;
-        # `get_default_hermes_root()` walks up to /opt/hermes because
-        # the immediate parent dir is named "profiles".
         custom_root = tmp_path / "opt" / "hermes"
         profile = custom_root / "profiles" / "coder"
         profile.mkdir(parents=True)
-        self._set_home(monkeypatch, tmp_path, profile)
+        vault = self._set_home(monkeypatch, tmp_path, profile)
 
         assert kb.kanban_home() == custom_root
-        assert kb.kanban_db_path() == custom_root / "kanban.db"
+        assert kb.kanban_store_dir() == self._store(vault)
 
-    def test_explicit_override_via_hermes_kanban_home(
+    def test_kanban_home_override_cannot_redirect_persistence(
         self, tmp_path, monkeypatch
     ):
-        # Explicit override: HERMES_KANBAN_HOME beats every other
-        # resolution rule.
         default_home = tmp_path / ".hermes"
-        profile_home = default_home / "profiles" / "any"
-        profile_home.mkdir(parents=True)
+        default_home.mkdir()
+        vault = self._set_home(monkeypatch, tmp_path, default_home)
         override = tmp_path / "shared-board"
         override.mkdir()
-
-        monkeypatch.setattr(Path, "home", lambda: tmp_path)
-        monkeypatch.setenv("HERMES_HOME", str(profile_home))
         monkeypatch.setenv("HERMES_KANBAN_HOME", str(override))
 
         assert kb.kanban_home() == override
-        assert kb.kanban_db_path() == override / "kanban.db"
-        assert kb.workspaces_root() == override / "kanban" / "workspaces"
+        assert kb.kanban_store_dir() == self._store(vault)
+        assert kb.workspaces_root() == self._store(vault) / "workspaces"
+        assert not (override / "kanban.db").exists()
 
-    def test_empty_override_falls_through(self, tmp_path, monkeypatch):
-        # Empty/whitespace override is treated as unset.
+    def test_empty_home_override_falls_through(self, tmp_path, monkeypatch):
         default_home = tmp_path / ".hermes"
         default_home.mkdir()
-        monkeypatch.setattr(Path, "home", lambda: tmp_path)
-        monkeypatch.setenv("HERMES_HOME", str(default_home))
+        self._set_home(monkeypatch, tmp_path, default_home)
         monkeypatch.setenv("HERMES_KANBAN_HOME", "   ")
-
         assert kb.kanban_home() == default_home
 
-    def test_dispatcher_and_worker_share_a_real_database(
+    def test_dispatcher_and_worker_share_vault_task_without_sqlite(
         self, tmp_path, monkeypatch
     ):
-        # Belt-and-suspenders: round-trip a task across the two
-        # HERMES_HOME perspectives via a real SQLite file. Without the
-        # fix the worker would open a different file and see no rows.
         default_home = tmp_path / ".hermes"
         default_home.mkdir()
         profile_home = default_home / "profiles" / "nehemiahkanban"
         profile_home.mkdir(parents=True)
+        vault = self._set_home(monkeypatch, tmp_path, default_home)
 
-        # Dispatcher creates the board and a task.
-        self._set_home(monkeypatch, tmp_path, default_home)
         kb.init_db()
         with kb.connect() as conn:
             task_id = kb.create_task(conn, title="cross-profile")
+        assert (self._store(vault) / f"{task_id}.json").exists()
 
-        # Worker switches to the profile HERMES_HOME and reads.
         monkeypatch.setenv("HERMES_HOME", str(profile_home))
         with kb.connect() as conn:
             task = kb.get_task(conn, task_id)
         assert task is not None
         assert task.title == "cross-profile"
+        assert not (default_home / "kanban.db").exists()
+        assert not (profile_home / "kanban.db").exists()
 
-    def test_hermes_kanban_db_pin_beats_kanban_home(
+    def test_legacy_db_pin_cannot_bypass_vault(
         self, tmp_path, monkeypatch
     ):
-        # HERMES_KANBAN_DB pins the file path directly and beats both
-        # HERMES_KANBAN_HOME and the `get_default_hermes_root()` path.
-        # This is the env the dispatcher injects into workers.
         default_home = tmp_path / ".hermes"
         default_home.mkdir()
-        umbrella = tmp_path / "umbrella"
-        umbrella.mkdir()
+        vault = self._set_home(monkeypatch, tmp_path, default_home)
         pinned_db = tmp_path / "pinned" / "board.db"
         pinned_db.parent.mkdir()
-
-        monkeypatch.setattr(Path, "home", lambda: tmp_path)
-        monkeypatch.setenv("HERMES_HOME", str(default_home))
-        monkeypatch.setenv("HERMES_KANBAN_HOME", str(umbrella))
         monkeypatch.setenv("HERMES_KANBAN_DB", str(pinned_db))
 
+        # The compatibility path may be pinned, but runtime data cannot.
         assert kb.kanban_db_path() == pinned_db
-        # workspaces_root still follows HERMES_KANBAN_HOME -- the pins
-        # are independent.
-        assert kb.workspaces_root() == umbrella / "kanban" / "workspaces"
+        assert kb.kanban_store_dir() == self._store(vault)
+        kb.init_db()
+        assert (self._store(vault) / "counters.json").exists()
+        assert not pinned_db.exists()
 
-    def test_hermes_kanban_workspaces_root_pin_beats_kanban_home(
+    def test_workspace_override_must_stay_inside_vault(
         self, tmp_path, monkeypatch
     ):
-        # HERMES_KANBAN_WORKSPACES_ROOT pins the workspaces root directly.
         default_home = tmp_path / ".hermes"
         default_home.mkdir()
-        umbrella = tmp_path / "umbrella"
-        umbrella.mkdir()
-        pinned_ws = tmp_path / "pinned-workspaces"
-        pinned_ws.mkdir()
-
-        monkeypatch.setattr(Path, "home", lambda: tmp_path)
-        monkeypatch.setenv("HERMES_HOME", str(default_home))
-        monkeypatch.setenv("HERMES_KANBAN_HOME", str(umbrella))
+        vault = self._set_home(monkeypatch, tmp_path, default_home)
+        pinned_ws = vault / "custom-workspaces"
         monkeypatch.setenv("HERMES_KANBAN_WORKSPACES_ROOT", str(pinned_ws))
-
         assert kb.workspaces_root() == pinned_ws
-        # kanban_db_path still follows HERMES_KANBAN_HOME.
-        assert kb.kanban_db_path() == umbrella / "kanban.db"
 
-    def test_empty_per_path_overrides_fall_through(
-        self, tmp_path, monkeypatch
-    ):
-        # Empty/whitespace pins are treated as unset, same as
-        # HERMES_KANBAN_HOME.
+        monkeypatch.setenv(
+            "HERMES_KANBAN_WORKSPACES_ROOT", str(tmp_path / "outside-vault")
+        )
+        with pytest.raises(ValueError, match="escapes HERMES_OBSIDIAN_VAULT"):
+            kb.workspaces_root()
+
+    def test_empty_path_pins_fall_through(self, tmp_path, monkeypatch):
         default_home = tmp_path / ".hermes"
         default_home.mkdir()
-        monkeypatch.setattr(Path, "home", lambda: tmp_path)
-        monkeypatch.setenv("HERMES_HOME", str(default_home))
+        vault = self._set_home(monkeypatch, tmp_path, default_home)
         monkeypatch.setenv("HERMES_KANBAN_DB", "   ")
         monkeypatch.setenv("HERMES_KANBAN_WORKSPACES_ROOT", "")
 
-        assert kb.kanban_db_path() == default_home / "kanban.db"
-        assert kb.workspaces_root() == default_home / "kanban" / "workspaces"
+        assert kb.kanban_store_dir() == self._store(vault)
+        assert kb.workspaces_root() == self._store(vault) / "workspaces"
 
-    def test_dispatcher_spawn_injects_kanban_db_and_workspaces_root(
+    def test_dispatcher_spawn_passes_vault_to_profile_worker(
         self, tmp_path, monkeypatch
     ):
-        # The dispatcher's `_default_spawn` must inject HERMES_KANBAN_DB
-        # and HERMES_KANBAN_WORKSPACES_ROOT into the worker env so the
-        # worker converges on the dispatcher's paths even when the
-        # `-p <profile>` flag rewrites HERMES_HOME.
         default_home = tmp_path / ".hermes"
         default_home.mkdir()
-        self._set_home(monkeypatch, tmp_path, default_home)
-
+        vault = self._set_home(monkeypatch, tmp_path, default_home)
         captured = {}
 
         class _FakePopen:
@@ -833,7 +800,6 @@ class TestSharedBoardPaths:
                 self.pid = 4242
 
         monkeypatch.setattr("subprocess.Popen", _FakePopen)
-
         task = kb.Task(
             id="t_dispatch_env",
             title="x",
@@ -851,14 +817,16 @@ class TestSharedBoardPaths:
             claim_expires=None,
             tenant=None,
         )
-        kb._default_spawn(task, str(tmp_path / "ws"))
+        assert kb._default_spawn(task, str(tmp_path / "ws")) == 4242
 
         env = captured["env"]
-        assert env["HERMES_KANBAN_DB"] == str(default_home / "kanban.db")
+        assert env["HERMES_OBSIDIAN_VAULT"] == str(vault)
+        assert env["HERMES_KANBAN_BOARD"] == "default"
         assert env["HERMES_KANBAN_WORKSPACES_ROOT"] == str(
-            default_home / "kanban" / "workspaces"
+            self._store(vault) / "workspaces"
         )
         assert env["HERMES_KANBAN_TASK"] == "t_dispatch_env"
+        assert not (default_home / "kanban.db").exists()
 
 
 # ---------------------------------------------------------------------------
