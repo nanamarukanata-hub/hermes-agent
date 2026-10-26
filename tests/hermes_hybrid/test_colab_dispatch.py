@@ -218,3 +218,108 @@ def test_google_adc_provider_refreshes_on_demand(monkeypatch, tmp_path):
     assert cred.calls == 1
     assert load_args[0][0] == str(creds_file)
     assert load_args[0][1] == ["https://www.googleapis.com/auth/drive"]
+
+
+def test_resident_worker_handles_only_explicitly_resident_jobs(vault):
+    from hermes_hybrid.resident_worker import scan_once
+    colab = submit_job(vault, {"type": "echo", "message": "colab"}, "job-colab-only")
+    resident = submit_job(vault, {"type": "echo", "message": "linux",
+                                  "executor": "resident"}, "job-resident-only")
+    assert colab["executor"] == "colab"
+    assert resident["executor"] == "resident"
+    outcome = scan_once(vault, max_jobs=2)
+    assert outcome["done"] == 1
+    assert job_report(vault, "job-resident-only")["state"] == "done"
+    assert job_report(vault, "job-colab-only")["state"] == "queued"
+    assert colab_jobs.read_result(vault, "job-colab-only") is None
+
+
+def test_resident_worker_recovers_a_stale_running_job(vault):
+    from hermes_hybrid.resident_worker import scan_once
+    submit_job(vault, {"type": "echo", "message": "retry",
+                       "executor": "resident"}, "job-stale")
+    folder = colab_jobs.job_dir("job-stale")
+    vault.write_json(folder + "/status.json", {
+        "job_id": "job-stale", "state": "running",
+        "updated_at": "2025-01-01T00:00:00+00:00",
+    })
+    assert scan_once(vault)["done"] == 1
+    assert job_report(vault, "job-stale")["state"] == "done"
+
+
+def test_resident_recovers_crash_after_result_without_reexecuting(vault, monkeypatch):
+    from hermes_hybrid import resident_worker
+    submit_job(vault, {"type": "echo", "message": "preserved",
+                       "executor": "resident"}, "job-partial")
+    folder = colab_jobs.job_dir("job-partial")
+    result = {"job_id": "job-partial", "ok": True,
+              "result": {"type": "echo", "message": "original"},
+              "finished_at": "2026-10-26T01:00:00+00:00"}
+    vault.write_json(folder + "/result.json", result)
+    vault.write_json(folder + "/status.json", {
+        "job_id": "job-partial", "state": "running",
+        "updated_at": "2025-01-01T00:00:00+00:00"
+    })
+    monkeypatch.setattr(colab_jobs, "run_job", lambda *_: pytest.fail("reexecuted"))
+    assert resident_worker.scan_once(vault)["done"] == 1
+    assert job_report(vault, "job-partial")["result"] == result
+
+
+def test_completed_jobs_do_not_starve_new_resident_jobs(vault):
+    from hermes_hybrid.resident_worker import scan_once
+    for i in range(12):
+        name = f"a-completed-{i:02d}"
+        submit_job(vault, {"type": "echo", "message": "done",
+                           "executor": "resident"}, name)
+        colab_jobs.run_job(vault, name)
+    submit_job(vault, {"type": "echo", "message": "new",
+                       "executor": "resident"}, "z-new-job")
+    outcome = scan_once(vault, max_jobs=1)
+    assert outcome["done"] == 1
+    assert job_report(vault, "z-new-job")["state"] == "done"
+
+
+def test_colab_notebook_skips_resident_jobs(tmp_path):
+    notebook = build_worker_notebook()
+    source = "".join(notebook["cells"][2]["source"])
+    expected = 'VAULT = Path("/content/drive/MyDrive") / VAULT_NAME'
+    assert expected in source
+    source = source.replace(expected, "VAULT = Path(" + repr(str(tmp_path)) + ")")
+    source = source.replace(
+        "deadline = time.monotonic() + min(max(WORKER_MINUTES, 1), 120) * 60",
+        "deadline = time.monotonic() + 0.01")
+    source = source.replace("time.sleep(max(POLL_SECONDS, 5))", "time.sleep(0.01)")
+    folder = tmp_path / "06_Automation" / "Hermes" / "ColabJobs" / "resident-only"
+    folder.mkdir(parents=True)
+    (folder / "job.json").write_text(json.dumps({
+        "job_id": "resident-only", "schema": 1,
+        "spec": {"type": "echo", "message": "dont_run",
+                 "executor": "resident"}}), encoding="utf8")
+    (folder / "status.json").write_text(json.dumps({
+        "job_id": "resident-only", "state": "queued"}), encoding="utf8")
+    exec(compile(source, "<worker>", "exec"), {})
+    assert json.loads((folder / "status.json").read_text())["state"] == "queued"
+    assert not (folder / "result.json").exists()
+
+
+def test_resident_health_is_independent_of_colab_heartbeat(vault):
+    from hermes_hybrid.colab_dispatch import RESIDENT_WORKER_FILE, resident_health
+    now = datetime.now(timezone.utc)
+    vault.write_json(RESIDENT_WORKER_FILE, {
+        "worker_id": "test", "state": "running", "last_seen_at": now.isoformat()
+    })
+    assert resident_health(vault, current_time=now)["online"]
+    assert not worker_health(vault, current_time=now)["online"]
+
+
+def test_submit_tool_can_route_to_resident(monkeypatch, vault):
+    from tools import colab_job_tools
+    monkeypatch.setenv("GOOGLE_DRIVE_ACCESS_TOKEN", "fake")
+    monkeypatch.setenv("HERMES_DRIVE_VAULT_ROOT_ID", "fake-root")
+    monkeypatch.setattr(colab_job_tools, "_vault", lambda: vault)
+    reply = json.loads(colab_job_tools._submit({
+        "type": "echo", "message": "linux", "executor": "resident",
+        "job_id": "resident-tool-test"}))
+    assert reply["success"]
+    assert reply["executor"] == "resident"
+    assert colab_jobs.read_job(vault, "resident-tool-test")["spec"]["executor"] == "resident"
