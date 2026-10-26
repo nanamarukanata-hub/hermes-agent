@@ -507,6 +507,138 @@ class SessionDB:
             self._write(self.root / "state_meta.json",
                         json.dumps(data, ensure_ascii=False, indent=2))
 
+
+    # Telegram private-topic routing is persistent Vault metadata, never SQL.
+    # Keep mode and binding maps in state_meta.json so updates share _guard()
+    # and the same atomic replacement path as other global state.
+    def _telegram_maps(self):
+        state = self._read_state_meta()
+        modes = state.setdefault("telegram_topic_modes", {})
+        bindings = state.setdefault("telegram_topic_bindings", {})
+        if not isinstance(modes, dict) or not isinstance(bindings, dict):
+            raise RuntimeError("Invalid Telegram topic metadata in Vault")
+        return state, modes, bindings
+
+    def _save_telegram_maps(self, state):
+        self._write(self.root / "state_meta.json",
+                    json.dumps(state, ensure_ascii=False, indent=2))
+
+    def enable_telegram_topic_mode(self, chat_id, user_id,
+                                   has_topics_enabled=None,
+                                   allows_users_to_create_topics=None):
+        chat_id, user_id = str(chat_id), str(user_id)
+        with self._guard():
+            state, modes, _ = self._telegram_maps()
+            modes[chat_id] = {
+                "user_id": user_id, "enabled": True,
+                "has_topics_enabled": has_topics_enabled,
+                "allows_users_to_create_topics": allows_users_to_create_topics,
+                "updated_at": time.time(),
+            }
+            self._save_telegram_maps(state)
+        return True
+
+    def is_telegram_topic_mode_enabled(self, chat_id, user_id=None):
+        _, modes, _ = self._telegram_maps()
+        mode = modes.get(str(chat_id))
+        return (isinstance(mode, dict) and mode.get("enabled") is True
+                and (user_id is None or mode.get("user_id") == str(user_id)))
+
+    def disable_telegram_topic_mode(self, chat_id):
+        chat_id = str(chat_id)
+        with self._guard():
+            state, modes, bindings = self._telegram_maps()
+            if chat_id in modes:
+                modes[chat_id]["enabled"] = False
+                modes[chat_id]["updated_at"] = time.time()
+            bindings.pop(chat_id, None)
+            self._save_telegram_maps(state)
+        return True
+
+    def bind_telegram_topic(self, chat_id, thread_id, user_id, session_key,
+                            session_id, managed_mode="auto"):
+        chat_id, thread_id, user_id = str(chat_id), str(thread_id), str(user_id)
+        if not chat_id or not thread_id:
+            raise ValueError("Telegram chat and thread IDs are required")
+        with self._guard():
+            session = self._load(session_id)
+            if session is None:
+                raise ValueError("Telegram session not found")
+            if (session.get("source") != "telegram"
+                    or str(session.get("user_id") or "") != user_id):
+                raise ValueError("Telegram session belongs to another source or user")
+            state, _, bindings = self._telegram_maps()
+            for other_chat, topics in bindings.items():
+                if not isinstance(topics, dict):
+                    raise RuntimeError("Invalid Telegram topic bindings in Vault")
+                for other_thread, binding in topics.items():
+                    if (binding.get("session_id") == session_id
+                            and (other_chat, other_thread) != (chat_id, thread_id)):
+                        raise ValueError("Telegram session already linked to another topic")
+            topics = bindings.setdefault(chat_id, {})
+            if not isinstance(topics, dict):
+                raise RuntimeError("Invalid Telegram topic bindings in Vault")
+            previous = topics.get(thread_id) or {}
+            now = time.time()
+            topics[thread_id] = {
+                "chat_id": chat_id, "thread_id": thread_id,
+                "user_id": user_id, "session_key": str(session_key),
+                "session_id": session_id, "managed_mode": str(managed_mode),
+                "linked_at": previous.get("linked_at", now)
+                    if previous.get("session_id") == session_id else now,
+                "updated_at": now,
+            }
+            self._save_telegram_maps(state)
+        return True
+
+    def get_telegram_topic_binding(self, chat_id, thread_id):
+        _, _, bindings = self._telegram_maps()
+        topics = bindings.get(str(chat_id), {})
+        if not isinstance(topics, dict):
+            raise RuntimeError("Invalid Telegram topic bindings in Vault")
+        binding = topics.get(str(thread_id))
+        if not isinstance(binding, dict):
+            return None
+        # Never return a stale link to a session removed from the Vault.
+        return dict(binding) if self._load(binding.get("session_id")) else None
+
+    def is_telegram_session_linked_to_topic(self, session_id):
+        _, _, bindings = self._telegram_maps()
+        return any(
+            isinstance(topics, dict) and any(
+                isinstance(binding, dict) and binding.get("session_id") == session_id
+                for binding in topics.values()
+            )
+            for topics in bindings.values()
+        )
+
+    def list_unlinked_telegram_sessions_for_user(self, chat_id, user_id, limit=10):
+        # Telegram private chats are scoped by their user ID. Never expose
+        # sessions owned by other users or non-Telegram sessions.
+        _, _, bindings = self._telegram_maps()
+        linked = {
+            binding.get("session_id")
+            for topics in bindings.values() if isinstance(topics, dict)
+            for binding in topics.values() if isinstance(binding, dict)
+        }
+        result = []
+        for session in self.search_sessions(source="telegram", limit=100000):
+            if str(session.get("user_id") or "") != str(user_id):
+                continue
+            if session["id"] in linked:
+                continue
+            messages = self.get_messages(session["id"])
+            first = next((str(m.get("content") or "") for m in messages
+                          if m.get("role") == "user"), "")
+            result.append(dict(session, preview=first[:60]))
+            if len(result) >= limit:
+                break
+        return result
+
+    def apply_telegram_topic_migration(self):
+        """Legacy entry point: Vault metadata needs no SQL schema migration."""
+        return None
+
     def vacuum(self):
         return None
 
