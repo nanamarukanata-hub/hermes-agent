@@ -154,10 +154,16 @@ class TestColabJobs:
     def test_notebook_is_valid_and_targets_vault_job(self, vault):
         nb = colab_jobs.build_colab_notebook("job-echo")
         assert nb["nbformat"] == 4
-        code = "".join(nb["cells"][1]["source"])
-        assert "ChatGPT-Obsidian-Vault" in code
-        assert "job-echo" in code
-        assert "drive.mount" in code
+        code_cells = ["".join(c["source"]) for c in nb["cells"]
+                      if c["cell_type"] == "code"]
+        assert len(code_cells) == 2
+        # First code cell is the standard interactive authentication cell:
+        # the user approves Google OAuth in the Colab UI themselves.
+        auth_cell, runner_cell = code_cells
+        assert "auth.authenticate_user()" in auth_cell
+        assert "drive.mount" in auth_cell
+        assert "ChatGPT-Obsidian-Vault" in runner_cell
+        assert "job-echo" in runner_cell
         # The notebook is JSON-serialisable as an .ipynb file.
         json.dumps(nb)
 
