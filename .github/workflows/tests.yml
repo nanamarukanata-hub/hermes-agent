@@ -47,6 +47,8 @@ jobs:
         run: |
           mkdir -p "$HERMES_OBSIDIAN_VAULT"
           source .venv/bin/activate
+          # Always verify the token-limit retry regression before fail-fast triage.
+          python -m pytest tests/agent/test_unsupported_parameter_retry.py -q --tb=short
           # Triage mode: stop at first failure so CI prints the failing test and traceback
           # before the 20-minute job timeout. Restore full-suite execution once fixed.
           python -m pytest tests/ -q --ignore=tests/integration --ignore=tests/e2e --tb=short -n auto --maxfail=1
