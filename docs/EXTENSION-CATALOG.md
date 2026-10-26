@@ -38,7 +38,7 @@ target service; none were installed in this pass.
 
 | Field | Candidate | Source | Status | Hermes fit |
 | --- | --- | --- | --- | --- |
-| Coding / GitHub | GitHub MCP Server (official, remote + local) | github/github-mcp-server | A | Direct fit for §4 GitHub integration; use a Hermes-owned token, read-only outside dev mode |
+| Coding / GitHub | GitHub MCP Server (official, remote + local) | github/github-mcp-server | A | Direct fit for §4 GitHub integration; use a Hermes-owned token |
 | Browser | Playwright MCP | microsoft/playwright-mcp | A | Browser automation toolset; local stdio |
 | Web fetch/search | Fetch reference server | modelcontextprotocol/servers | B | Lightweight fetch; reference quality |
 | Filesystem | Filesystem reference server | modelcontextprotocol/servers | B | Sandbox-scoped file access |
@@ -62,12 +62,9 @@ target service; none were installed in this pass.
 
 1. In-repo first (skills, plugin catalog, memory providers).
 2. Official vendor MCP servers second, per-service credentials held by
-   Hermes' own config (`~/.hermes/.env`), never shared with Muse.
+   Hermes' own config (`~/.hermes/.env`).
 3. Community servers only after license/activity/dependency review.
 4. Load-on-demand always: enable per profile/toolset, never globally.
-5. RP operation and development permissions stay separated: write
-   capable servers (GitHub, Drive, automation gateways) are dev-mode
-   only, mirroring §4 of the overhaul plan.
 
 ## 4. Honest scope note
 

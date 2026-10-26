@@ -4,8 +4,7 @@ Audit date: 2026-10-26, branch `feat/hermes-colab-dispatch-20261026`.
 Principle (from the overhaul order): Hermes Agent itself is the
 Discord RP character. No separate character bot/persona engine is built
 on top of it; Muse is only the development environment. No
-character name/personality/world content was invented, and no
-RP-specific content restrictions were added.
+character name/personality/world content was invented.
 
 ## 1. What already exists in Hermes itself (verified in-repo)
 
@@ -32,7 +31,7 @@ Tests run for this audit (local venv): `tests/hermes_hybrid` (80) +
 
 | Item | Blocker |
 | --- | --- |
-| Hermes speaking on Discord (live) | `~/.hermes/config.yaml` on this VM is effectively empty (only `onboarding:`) and no `DISCORD_BOT_TOKEN` / LLM API key is provisioned. Both are operator secrets; they must be placed by the user in `~/.hermes/.env` (Hermes' own file), never via chat. After that: `hermes gateway run` (or the gateway service) + `HERMES_RP_ENABLED=1` and `HERMES_OBSIDIAN_VAULT` pointing at a local Vault sync/mount or the Drive transport. |
+| Hermes speaking on Discord (live) | `~/.hermes/config.yaml` on this VM is effectively empty (only `onboarding:`) and no `DISCORD_BOT_TOKEN` / LLM API key is provisioned. Both go in `~/.hermes/.env` (Hermes' own file), placed by the user. After that: `hermes gateway run` (or the gateway service) + `HERMES_RP_ENABLED=1` and `HERMES_OBSIDIAN_VAULT` pointing at a local Vault sync/mount or the Drive transport. |
 | Real-Discord multi-user test | Same as above; isolation logic is unit-tested, live test pending credentials |
 | Keina RP assets migration | **Not found.** Repo-wide and Drive-Vault-wide searches for "Keina" return a single catalog line ("the Keina 92 Skills remain installed") inside `codex-plugins/claude-skills-hub/skills/claudeskills-hub-codex/SKILL.md`. No Keina skills/plugins/history exist in this repo or the Vault. Migration needs the actual source location from the user. |
 | Colab real GPU run | Queued job waits for the user to run the Drive notebook (no official API to start Colab) |
@@ -55,7 +54,7 @@ nothing. The remaining hard dependencies are #1 (Drive credential) and,
 on this specific VM, #2 (boot layer) — both are provisioning steps,
 not code gaps.
 
-## 4. Go-live checklist for the operator (no chat secrets)
+## 4. Go-live checklist for the operator
 
 1. Put `DISCORD_BOT_TOKEN` and the LLM provider key into
    `~/.hermes/.env` on the host (Hermes' own file).
