@@ -97,8 +97,10 @@ def scan_once(vault: DriveVault, max_jobs: int = 5) -> dict:
             continue
         if scanned >= max_jobs:
             break
-        scanned += 1
         state = _process(vault, name)
+        if state is None:
+            continue
+        scanned += 1
         done += state == "done"
         failed += state == "failed"
     return {"scanned": scanned, "done": done, "failed": failed}
