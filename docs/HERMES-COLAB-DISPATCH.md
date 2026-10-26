@@ -22,22 +22,31 @@ No SQLite, second queue database, made-up RP character, or 5-minute AI task.
 
 ## Hermes authentication and configuration
 
-On the Hermes Linux runtime, use an **authorized, renewable** Google Drive
-OAuth flow that has permission to access the existing shared Vault. Configure
-the transport already present in `hermes_hybrid.drive_vault`:
+On the Hermes Linux runtime, use an **authorized** Google Drive OAuth flow
+that has access to the existing shared Vault. Pin the canonical Vault root:
 
     HERMES_DRIVE_VAULT_ROOT_ID=1DEgP8VbExIRrizosKK4Jo0GOhet9oni3
-    GOOGLE_DRIVE_ACCESS_TOKEN=<OAuth access token obtained securely at runtime>
 
-The folder ID above was checked against the existing shared Google Drive folder
-**ChatGPT-Obsidian-Vault**. Never post tokens in Discord, ChatGPT, GitHub,
-notebooks, or logs. The existing transport reads the token from the environment;
-it **does not refresh it**. For durable production operation, integrate with a
-proper Google OAuth refresh mechanism managed by the runtime (or a genuine,
-verified live Drive mount). Colab's OAuth does not grant credentials to Hermes.
+Two credential sources are supported:
 
-When either environment variable is absent, the two new model tools are
-**not advertised** by the Hermes registry. When the token expires, commands
+1. **Renewable credentials (recommended):** provide a secure file containing
+   an authorized OAuth user's or a service account's Google Application Default
+   Credentials (ADC), configure `GOOGLE_APPLICATION_CREDENTIALS` to that
+   protected file path, and install the optional `google-auth` Python package
+   on Hermes. The Colab tool refreshes tokens as needed; never place this
+   credential JSON in GitHub, Obsidian, Colab notebook or chat. The Google
+   identity represented by the file must have access to the existing folder.
+   The Colab user sign-in is NOT a portable Hermes credential.
+2. **Short-lived credentials:** set `GOOGLE_DRIVE_ACCESS_TOKEN` from an
+   existing runtime-managed OAuth provider. The existing DriveVault transport
+   reads this env value but **does not refresh it**, so it will expire.
+
+The root ID above was verified as **ChatGPT-Obsidian-Vault**. Credentials are
+not created or exported by this PR. No unattended work begins without the
+real Hermes runtime being independently authorized.
+
+When the pinned Vault ID or both credential methods are absent, the two new
+model tools are **not advertised** by the Hermes registry. When the token expires, commands
 return an error rather than claiming success. No production activation is
 performed by this code branch.
 
