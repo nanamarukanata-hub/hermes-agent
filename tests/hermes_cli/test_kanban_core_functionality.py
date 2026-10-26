@@ -2173,7 +2173,7 @@ def test_cli_create_on_fresh_home_auto_inits(tmp_path, monkeypatch):
     home = tmp_path / ".hermes"
     home.mkdir()
     vault = tmp_path / "obsidian_vault"
-    vault.mkdir()
+    vault.mkdir(exist_ok=True)  # The autouse fixture may create this already.
     monkeypatch.setenv("HERMES_HOME", str(home))
     monkeypatch.setenv("HERMES_OBSIDIAN_VAULT", str(vault))
     monkeypatch.delenv("HERMES_KANBAN_DB", raising=False)
