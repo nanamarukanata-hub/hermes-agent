@@ -45,7 +45,10 @@ def fresh_home(tmp_path, monkeypatch):
     """
     home = tmp_path / "hermes_home"
     home.mkdir()
+    vault = tmp_path / "obsidian_vault"
+    vault.mkdir(exist_ok=True)
     monkeypatch.setenv("HERMES_HOME", str(home))
+    monkeypatch.setenv("HERMES_OBSIDIAN_VAULT", str(vault))
     for var in (
         "HERMES_KANBAN_DB",
         "HERMES_KANBAN_WORKSPACES_ROOT",
@@ -114,17 +117,21 @@ class TestPathResolution:
         assert p == fresh_home / "kanban" / "boards" / "atm10-server" / "kanban.db"
 
     def test_workspaces_per_board(self, fresh_home):
-        assert kb.workspaces_root() == fresh_home / "kanban" / "workspaces"
+        vault = Path(os.environ["HERMES_OBSIDIAN_VAULT"])
+        assert kb.workspaces_root() == vault / "06_Automation" / "Hermes" / "Kanban" / "default" / "workspaces"
         # Uppercase input gets auto-downcased to the on-disk slug.
         assert kb.workspaces_root(board="projA") == (
-            fresh_home / "kanban" / "boards" / "proja" / "workspaces"
+            vault / "06_Automation" / "Hermes" / "Kanban" / "proja" / "workspaces"
         )
+        assert not (fresh_home / "kanban" / "workspaces").exists()
 
     def test_logs_per_board(self, fresh_home):
-        assert kb.worker_logs_dir() == fresh_home / "kanban" / "logs"
+        vault = Path(os.environ["HERMES_OBSIDIAN_VAULT"])
+        assert kb.worker_logs_dir() == vault / "06_Automation" / "Hermes" / "Kanban" / "default" / "logs"
         assert kb.worker_logs_dir(board="other") == (
-            fresh_home / "kanban" / "boards" / "other" / "logs"
+            vault / "06_Automation" / "Hermes" / "Kanban" / "other" / "logs"
         )
+        assert not (fresh_home / "kanban" / "logs").exists()
 
     def test_env_var_db_override_still_wins(self, fresh_home, tmp_path, monkeypatch):
         """``HERMES_KANBAN_DB`` pins the file regardless of board= arg."""
@@ -134,9 +141,14 @@ class TestPathResolution:
         assert kb.kanban_db_path(board="ignored") == forced
 
     def test_env_var_workspaces_override(self, fresh_home, tmp_path, monkeypatch):
-        forced = tmp_path / "ws"
+        vault = Path(os.environ["HERMES_OBSIDIAN_VAULT"])
+        forced = vault / "custom-workspaces"
         monkeypatch.setenv("HERMES_KANBAN_WORKSPACES_ROOT", str(forced))
         assert kb.workspaces_root(board="any") == forced
+        # A legacy external override must not move persistent files outside Vault.
+        monkeypatch.setenv("HERMES_KANBAN_WORKSPACES_ROOT", str(tmp_path / "outside"))
+        with pytest.raises(ValueError, match="escapes"):
+            kb.workspaces_root(board="any")
 
 
 # ---------------------------------------------------------------------------
@@ -161,7 +173,7 @@ class TestCurrentBoard:
         assert kb.get_current_board() == "filepick"
 
     def test_stale_file_pointer_falls_back_to_default(self, fresh_home):
-        current = fresh_home / "kanban" / "current"
+        current = kb.current_board_path()
         current.parent.mkdir(parents=True, exist_ok=True)
         current.write_text("missing-board\n", encoding="utf-8")
 
@@ -366,8 +378,9 @@ class TestWorkerSpawnEnv:
         # DB path should match the per-board DB, not the legacy default.
         expected_db = fresh_home / "kanban" / "boards" / "spawntest" / "kanban.db"
         assert env["HERMES_KANBAN_DB"] == str(expected_db)
-        expected_ws = fresh_home / "kanban" / "boards" / "spawntest" / "workspaces"
+        expected_ws = Path(os.environ["HERMES_OBSIDIAN_VAULT"]) / "06_Automation" / "Hermes" / "Kanban" / "spawntest" / "workspaces"
         assert env["HERMES_KANBAN_WORKSPACES_ROOT"] == str(expected_ws)
+        assert not (fresh_home / "kanban" / "boards" / "spawntest" / "workspaces").exists()
 
     def test_default_board_spawn_keeps_legacy_paths(self, fresh_home, monkeypatch):
         captured = {}
