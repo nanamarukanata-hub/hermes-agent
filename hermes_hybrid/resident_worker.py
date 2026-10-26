@@ -186,8 +186,9 @@ def main(argv=None) -> int:
     if not os.getenv("HERMES_DRIVE_VAULT_ROOT_ID"):
         parser.error("HERMES_DRIVE_VAULT_ROOT_ID must pin the canonical Drive folder")
     if not (os.getenv("GOOGLE_DRIVE_ACCESS_TOKEN") or
-            os.getenv("GOOGLE_APPLICATION_CREDENTIALS")):
-        parser.error("Google Drive credentials are required; no secrets in code")
+            os.getenv("GOOGLE_APPLICATION_CREDENTIALS") or
+            os.getenv("HERMES_DRIVE_PROVIDER") == "hatch"):
+        parser.error("Authorized Drive token, ADC, or hatch CLI provider is required")
     from tools.colab_job_tools import _vault
     logging.basicConfig(level=logging.INFO,
                         format="%(asctime)s %(levelname)s %(name)s %(message)s")
