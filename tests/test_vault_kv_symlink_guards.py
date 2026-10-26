@@ -59,3 +59,5 @@ def test_counter_survives_reopening_vault_directory(tmp_path):
     assert vault.next_id("sequence") == 1
     reopened = VaultDir(root, "06_Automation", "Hermes", "RetainQueue")
     assert reopened.next_id("sequence") == 2
+    assert reopened.next_id() == 1
+    assert VaultDir(root, "06_Automation", "Hermes", "RetainQueue").next_id() == 2
