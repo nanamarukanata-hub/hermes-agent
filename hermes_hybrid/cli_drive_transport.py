@@ -97,12 +97,25 @@ class CliDriveTransport:
         params = json.dumps({"q": query,
                              "fields": f"files({_FIELDS})",
                              "pageSize": 1000})
-        data = self._call_json(["drive", "files", "list",
-                                "--params", params, "--page-all"])
-        files = data.get("files")
-        if not isinstance(files, list):
-            raise DriveUnavailable("drive list returned no files array")
-        return [_meta(item) for item in files if isinstance(item, dict)]
+        output = self._call(["drive", "files", "list",
+                             "--params", params, "--page-all"])
+        # GWS --page-all emits NDJSON (one page per line), not a single JSON
+        # document. The first/only page may also be a standard JSON object.
+        pages = []
+        try:
+            pages = [json.loads(output)]
+        except json.JSONDecodeError:
+            try:
+                pages = [json.loads(line) for line in output.splitlines()
+                         if line.strip()]
+            except json.JSONDecodeError as exc:
+                raise DriveUnavailable("drive paginated listing returned malformed JSON") from exc
+        if not pages or any(not isinstance(page, dict) or
+                            not isinstance(page.get("files"), list)
+                            for page in pages):
+            raise DriveUnavailable("drive list returned invalid page structure")
+        return [_meta(item) for page in pages for item in page["files"]
+                if isinstance(item, dict)]
 
     # -- DriveTransport protocol ------------------------------------------
 
