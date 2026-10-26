@@ -10192,8 +10192,11 @@ class GatewayRunner:
             return True
         import time as _time
         now = _time.monotonic()
-        last = self._telegram_capability_hint_ts.get(chat_id, 0.0)
-        if now - last < self._TELEGRAM_CAPABILITY_HINT_COOLDOWN_S:
+        # No previous hint means this is the first send, even if the
+        # process has been running for less than the cooldown interval.
+        # Using 0.0 as a fallback would suppress the first hint after boot.
+        last = self._telegram_capability_hint_ts.get(chat_id)
+        if last is not None and now - last < self._TELEGRAM_CAPABILITY_HINT_COOLDOWN_S:
             return False
         self._telegram_capability_hint_ts[chat_id] = now
         return True
@@ -10264,8 +10267,8 @@ class GatewayRunner:
             return "Session database not available."
 
         # Authorization: /topic activates multi-session mode and mutates
-        # SQLite side tables. Unauthorized senders (not in allowlist) must
-        # not be able to do that. Gateway routes already authorize the
+        # persistent Vault state. Unauthorized senders (not in allowlist)
+        # must not be able to do that. Gateway routes already authorize the
         # message before reaching here, but defense in depth.
         auth_fn = getattr(self, "_is_user_authorized", None)
         if callable(auth_fn):
