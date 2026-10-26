@@ -269,8 +269,34 @@ class SessionDB:
         return next((s for s in self.search_sessions(limit=100000) if s.get("title") == title), None)
 
     def resolve_session_by_title(self, title):
-        s = self.get_session_by_title(title)
-        return s["id"] if s else None
+        """Resolve a base title to the newest numbered lineage entry.
+
+        /resume My Project must prefer My Project #10 over #2, regardless of
+        file ordering or last-active timestamps. An explicitly requested
+        numbered title (My Project #2) still resolves to that exact session.
+        Also recognize the legacy "My Project (2)" numbering from old Vaults.
+        """
+        exact = self.get_session_by_title(title)
+        if not isinstance(title, str) or not title:
+            return None
+        if re.search(r"(?: #\\d+| \\(\\d+\\))$", title):
+            return exact["id"] if exact else None
+
+        best = exact
+        best_number = 1 if exact else 0
+        for session in self.search_sessions(limit=100000):
+            candidate = session.get("title")
+            if not isinstance(candidate, str) or not candidate.startswith(title):
+                continue
+            suffix = candidate[len(title):]
+            match = re.fullmatch(r" #([0-9]+)| \\(([0-9]+)\\)", suffix)
+            if not match:
+                continue
+            number = int(match.group(1) or match.group(2))
+            if number >= 2 and number > best_number:
+                best = session
+                best_number = number
+        return best["id"] if best else None
 
     def get_next_title_in_lineage(self, base_title):
         """Keep the CLI's #2/#3 lineage format when using the Vault backend.
