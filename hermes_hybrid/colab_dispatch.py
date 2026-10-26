@@ -54,7 +54,12 @@ def validate_spec(spec: dict) -> dict:
         if executor == "resident":
             clean["executor"] = executor
         return clean
-    raise ValueError("supported Colab jobs: echo, text_stats, hash_file")
+    if jtype == "device_info":
+        clean = {"type": "device_info"}
+        if executor == "resident":
+            clean["executor"] = executor
+        return clean
+    raise ValueError("supported Colab jobs: echo, text_stats, hash_file, device_info")
 
 
 def submit_job(vault: DriveVault, spec: dict, job_id: Optional[str] = None) -> dict:

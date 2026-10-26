@@ -32,7 +32,7 @@ from typing import Any, Optional
 from hermes_hybrid.drive_vault import DriveVault, HERMES_TREE, VAULT_ROOT_NAME
 from hermes_hybrid.vault_kv import validate_id
 
-JOB_TYPES = ("echo", "text_stats", "hash_file")
+JOB_TYPES = ("echo", "text_stats", "hash_file", "device_info")
 _BASE = "/".join((*HERMES_TREE, "ColabJobs"))
 
 
@@ -81,6 +81,15 @@ def run_job_spec(read_text, read_bytes, spec: dict) -> dict:
     jtype = spec.get("type")
     if jtype == "echo":
         return {"type": jtype, "message": spec.get("message", "")}
+    if jtype == "device_info":
+        import os
+        import platform as _platform
+        return {"type": jtype, "platform": _platform.platform(),
+                "python": _platform.python_version(),
+                "cpu_count": os.cpu_count(),
+                "gpu": {"available": False,
+                        "note": "reference executor reports CPU only; "
+                                "the Colab notebook reports its real device"}}
     if jtype in ("text_stats", "hash_file"):
         data = read_bytes(spec["input"])
         if data is None:
