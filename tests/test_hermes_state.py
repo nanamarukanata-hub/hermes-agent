@@ -388,6 +388,32 @@ class TestMessageStorage:
 
         conv = db.get_messages_as_conversation("s1")
         assert conv == [{"role": "assistant", "content": "Visible answer"}]
+        # Replay cleanup must not rewrite or discard the canonical Vault data.
+        stored = db.get_messages("s1")
+        assert len(stored) == 1
+        assert stored[0]["content"].startswith("<memory-context>")
+        assert "stale memory" in stored[0]["content"]
+
+    def test_memory_context_cleanup_preserves_user_and_literal_assistant_text(self, db):
+        db.create_session(session_id="s1", source="cli")
+        literal = "<memory-context>quoted text</memory-context>\\n\\nKeep this"
+        db.append_message("s1", role="user", content=literal)
+        db.append_message("s1", role="assistant", content=literal)
+        db.append_message("s1", role="assistant", content="Intro\\n" + literal)
+        db.append_message(
+            "s1", role="assistant",
+            content=("<memory-context>\\n"
+                     "[System note: The following is recalled memory context\\n"
+                     "incomplete prefix without closing tag"),
+        )
+
+        conv = db.get_messages_as_conversation("s1")
+        assert [message["content"] for message in conv] == [
+            literal, literal, "Intro\\n" + literal,
+            ("<memory-context>\\n"
+             "[System note: The following is recalled memory context\\n"
+             "incomplete prefix without closing tag"),
+        ]
 
     def test_reasoning_persisted_and_restored(self, db):
         """Reasoning text is stored for assistant messages and restored by
