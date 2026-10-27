@@ -432,6 +432,11 @@ class SessionDB:
                           "finish_reason", "reasoning", "reasoning_content",
                           "reasoning_details", "codex_reasoning_items", "codex_message_items")
                 entry = {key: msg[key] for key in fields if msg.get(key) is not None}
+                # An empty reasoning summary is absent in the legacy SessionDB
+                # replay contract. Preserve the raw Vault record and other empty
+                # fields (notably provider-native reasoning_content) unchanged.
+                if entry.get("reasoning") == "":
+                    entry.pop("reasoning")
                 # A legacy memory injector sometimes persisted its internal
                 # context prefix as part of an assistant reply. Exclude only
                 # that recognized leading block from model replay; the Vault
