@@ -257,6 +257,18 @@ class TestEnvConfigLoading:
         for v in self._ENV_VARS:
             monkeypatch.delenv(v, raising=False)
 
+        # Bundled plugins are loaded under hermes_plugins.<name>, not the
+        # plugins.platforms.* module imported for the adapter tests above.
+        # Patch the registry callback's own module so these env-config tests
+        # exercise the real Google Chat env gate without optional Google SDKs.
+        from hermes_cli.plugins import discover_plugins
+        from gateway.platform_registry import platform_registry
+
+        discover_plugins()
+        entry = platform_registry.get("google_chat")
+        assert entry is not None
+        monkeypatch.setitem(entry.check_fn.__globals__, "GOOGLE_CHAT_AVAILABLE", True)
+
     def test_project_id_primary(self, monkeypatch):
         self._clean_env(monkeypatch)
         monkeypatch.setenv("GOOGLE_CHAT_PROJECT_ID", "my-proj")
