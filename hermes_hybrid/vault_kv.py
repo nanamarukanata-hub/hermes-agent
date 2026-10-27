@@ -154,7 +154,7 @@ class VaultDir:
                     if record_id.isdigit():
                         current = max(current, int(record_id))
             nxt = current + 1
-            self._atomic_write(counter, json.dumps({"next": nxt + 1}) + "\n")
+            # Store the last allocated ID, not one beyond it. Older Vaults\n            # may contain the old next+1 value; treating that value as a\n            # conservative floor skips an ID but cannot reissue an old one.\n            self._atomic_write(counter, json.dumps({"next": nxt}) + "\n")
             return nxt
 
         return self._locked(_do)
