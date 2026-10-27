@@ -10,9 +10,9 @@ Metadata from official GitHub releases. Does not imply that an update is safe to
 | Project | Latest release | Published (UTC) | Source |
 |---|---|---|---|
 | Codex | `rust-v0.164.0` | 2026-10-23 | [GitHub](https://github.com/openai/codex/releases) |
-| Claude Code | `v2.1.310` | 2026-10-23 | [GitHub](https://github.com/anthropics/claude-code/releases) |
+| Claude Code | `v2.1.311` | 2026-10-26 | [GitHub](https://github.com/anthropics/claude-code/releases) |
 | Hermes Agent | `v0.22.5` | 2026-10-23 | [GitHub](https://github.com/NousResearch/hermes-agent/releases) |
-| GBrain | `v0.60.460.0` | 2026-10-25 | [GitHub](https://github.com/garrytan/gbrain/releases) |
+| GBrain | `v0.60.470.0` | 2026-10-27 | [GitHub](https://github.com/garrytan/gbrain/releases) |
 | Obsidian | `v1.14.5` | 2026-10-22 | [GitHub](https://github.com/obsidianmd/obsidian-releases/releases) |
 
 Review relevance, security and compatibility before installing anything.
