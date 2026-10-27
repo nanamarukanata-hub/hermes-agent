@@ -775,104 +775,58 @@ class TestFTS5Search:
         # the assistant message depending on FTS5 phrase matching
         assert len(results) >= 1
 
-    def test_sanitize_fts5_query_strips_dangerous_chars(self):
-        """Unit test for _sanitize_fts5_query static method."""
-        from hermes_state import SessionDB
-        s = SessionDB._sanitize_fts5_query
-        assert s('hello world') == 'hello world'
-        assert '+' not in s('C++')
-        assert '"' not in s('"unterminated')
-        assert '(' not in s('(problem')
-        assert '{' not in s('{test}')
-        # Dangling operators removed
-        assert s('hello AND') == 'hello'
-        assert s('OR world') == 'world'
-        # Leading bare * removed
-        assert s('***') == ''
-        # Valid prefix kept
-        assert s('deploy*') == 'deploy*'
+    def test_vault_search_treats_fts_syntax_as_literal(self, db):
+        """Vault search matches punctuation literally, without SQL parsing."""
+        db.create_session(session_id="s1", source="cli")
+        db.append_message(
+            "s1", role="user",
+            content='C++ "unterminated (problem {test} deploy* ***',
+        )
+        for query in ("C++", '"unterminated', "(problem", "{test}",
+                      "deploy*", "***"):
+            assert len(db.search_messages(query)) == 1, query
+        assert db.search_messages("missing++") == []
 
-    def test_sanitize_fts5_preserves_quoted_phrases(self):
-        """Properly paired double-quoted phrases should be preserved."""
-        from hermes_state import SessionDB
-        s = SessionDB._sanitize_fts5_query
-        # Simple quoted phrase
-        assert s('"exact phrase"') == '"exact phrase"'
-        # Quoted phrase alongside unquoted terms
-        assert '"docker networking"' in s('"docker networking" setup')
-        # Multiple quoted phrases
-        result = s('"hello world" OR "foo bar"')
-        assert '"hello world"' in result
-        assert '"foo bar"' in result
-        # Unmatched quote still stripped
-        assert '"' not in s('"unterminated')
+    def test_vault_search_preserves_quoted_or_phrase(self, db):
+        """OR inside a fully quoted phrase is text, not an operator."""
+        db.create_session(session_id="s1", source="cli")
+        db.append_message("s1", role="user", content="hello OR world")
+        db.append_message("s1", role="assistant", content="hello world")
+        assert [r["snippet"] for r in db.search_messages('"hello OR world"')] == [
+            "hello OR world",
+        ]
 
-    def test_sanitize_fts5_quotes_hyphenated_terms(self):
-        """Hyphenated terms should be wrapped in quotes for exact matching."""
-        from hermes_state import SessionDB
-        s = SessionDB._sanitize_fts5_query
-        # Simple hyphenated term
-        assert s('chat-send') == '"chat-send"'
-        # Multiple hyphens
-        assert s('docker-compose-up') == '"docker-compose-up"'
-        # Hyphenated term with other words
-        result = s('fix chat-send bug')
-        assert '"chat-send"' in result
-        assert 'fix' in result
-        assert 'bug' in result
-        # Multiple hyphenated terms with OR
-        result = s('chat-send OR deploy-prod')
-        assert '"chat-send"' in result
-        assert '"deploy-prod"' in result
-        # Already-quoted hyphenated term — no double quoting
-        assert s('"chat-send"') == '"chat-send"'
-        # Hyphenated inside a quoted phrase stays as-is
-        assert s('"my chat-send thing"') == '"my chat-send thing"'
+    def test_vault_search_hyphenated_terms(self, db):
+        db.create_session(session_id="s1", source="cli")
+        db.append_message("s1", role="user", content="Run chat-send and docker-compose-up")
+        assert len(db.search_messages("chat-send")) == 1
+        assert len(db.search_messages("docker-compose-up")) == 1
+        assert db.search_messages("chat_send") == []
 
-    def test_sanitize_fts5_quotes_dotted_terms(self):
-        """Dotted terms should be wrapped in quotes to avoid FTS5 query parse edge cases."""
-        from hermes_state import SessionDB
-        s = SessionDB._sanitize_fts5_query
+    def test_vault_search_dotted_terms(self, db):
+        db.create_session(session_id="s1", source="cli")
+        db.append_message("s1", role="user", content="P2.2 uses my-app.config.ts")
+        assert len(db.search_messages("P2.2")) == 1
+        assert len(db.search_messages("my-app.config.ts")) == 1
+        assert db.search_messages("P2-2") == []
 
-        assert s('P2.2') == '"P2.2"'
-        assert s('simulate.p2') == '"simulate.p2"'
-        assert s('simulate.p2.test.ts') == '"simulate.p2.test.ts"'
+    def test_vault_search_underscored_terms(self, db):
+        db.create_session(session_id="s1", source="cli")
+        db.append_message("s1", role="user", content="sp_new1 docker-compose_up")
+        assert len(db.search_messages("sp_new1")) == 1
+        assert len(db.search_messages("docker-compose_up")) == 1
+        assert db.search_messages("sp-new1") == []
 
-        # Already quoted — no double quoting
-        assert s('"P2.2"') == '"P2.2"'
-
-        # Works with boolean syntax
-        result = s('P2.2 OR simulate.p2')
-        assert '"P2.2"' in result
-        assert '"simulate.p2"' in result
-
-        # Mixed dots and hyphens — single pass avoids double-quoting
-        assert s('my-app.config') == '"my-app.config"'
-        assert s('my-app.config.ts') == '"my-app.config.ts"'
-
-    def test_sanitize_fts5_quotes_underscored_terms(self):
-        """Underscored terms should be wrapped in quotes for exact matching.
-
-        FTS5 default tokenizer splits 'sp_new1' into tokens 'sp' and 'new1'.
-        Without quoting, a search for 'sp_new' becomes an AND query
-        ('sp AND new') that fails to match rows indexed as 'sp_new1'.
-        """
-        from hermes_state import SessionDB
-        s = SessionDB._sanitize_fts5_query
-        # Simple underscored term
-        assert s('sp_new') == '"sp_new"'
-        # Multiple underscores
-        assert s('a_b_c') == '"a_b_c"'
-        # Mixed underscores and hyphens/dots — single pass avoids double-quoting
-        assert s('sp_new1') == '"sp_new1"'
-        assert s('docker-compose_up') == '"docker-compose_up"'
-        assert s('my.app_config.ts') == '"my.app_config.ts"'
-        # Already-quoted — no double quoting
-        assert s('"sp_new"') == '"sp_new"'
-        # Mixed with other words
-        result = s('sp_new and 血管瘤')
-        assert '"sp_new"' in result
-        assert '血管瘤' in result
+    def test_vault_search_or_union_and_casefold(self, db):
+        """Unquoted OR finds either phrase and matching is case-insensitive."""
+        db.create_session(session_id="s1", source="cli")
+        db.append_message("s1", role="user", content="HELLO WORLD")
+        db.append_message("s1", role="assistant", content="goodbye moon")
+        db.append_message("s1", role="user", content="unrelated")
+        results = db.search_messages("hello world OR goodbye moon")
+        assert {r["snippet"] for r in results} == {
+            "HELLO WORLD", "goodbye moon",
+        }
 
 
 # =========================================================================
@@ -880,31 +834,18 @@ class TestFTS5Search:
 # =========================================================================
 
 class TestCJKSearchFallback:
-    """Regression tests for CJK search (see #11511).
+    """Regression tests for CJK substring search using the SQLite-free Vault."""
 
-    SQLite FTS5's default tokenizer treats contiguous CJK runs as a single
-    token ("和其他agent的聊天记录" → one token), so substring queries like
-    "记忆断裂" return 0 rows despite the data being present. SessionDB falls
-    back to LIKE substring matching whenever FTS5 returns no results and
-    the query contains CJK characters.
-    """
-
-    def test_cjk_detection_covers_all_ranges(self):
-        from hermes_state import SessionDB
-        f = SessionDB._contains_cjk
-        # Chinese (CJK Unified Ideographs)
-        assert f("记忆断裂") is True
-        # Japanese Hiragana + Katakana
-        assert f("こんにちは") is True
-        assert f("カタカナ") is True
-        # Korean Hangul syllables (both early and late — guards against
-        # the \ud7a0-\ud7af typo seen in one of the duplicate PRs)
-        assert f("안녕하세요") is True
-        assert f("기억") is True
-        # Non-CJK
-        assert f("hello world") is False
-        assert f("日本語mixedwithenglish") is True
-        assert f("") is False
+    def test_vault_cjk_substrings_cover_all_scripts(self, db):
+        """Chinese, Japanese, Korean and mixed strings need no SQL fallback."""
+        db.create_session(session_id="s1", source="cli")
+        for content in ("昨天的记忆断裂问题", "こんにちは世界", "カタカナ",
+                        "안녕하세요", "日本語mixedwithenglish"):
+            db.append_message("s1", role="user", content=content)
+        for query in ("记忆断裂", "こんにちは", "カタカナ", "안녕",
+                      "日本語mixed"):
+            assert len(db.search_messages(query)) == 1, query
+        assert db.search_messages("") == []
 
     def test_chinese_multichar_query_returns_results(self, db):
         """The headline bug: multi-char Chinese query must not return []."""
