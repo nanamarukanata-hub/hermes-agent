@@ -1,5 +1,6 @@
 """Tests for hermes_state.py — SessionDB SQLite CRUD, FTS5 search, export."""
 
+import json
 import time
 import pytest
 from pathlib import Path
@@ -254,18 +255,22 @@ class TestMessageStorage:
         assert msgs[0]["content"] == content
 
     def test_string_content_unchanged_by_encoding(self, db):
-        """Plain strings must not be wrapped — FTS search and legacy
-        consumers depend on raw-string storage for text content.
+        """Plain strings remain strings in the canonical Obsidian Vault JSON.
+
+        This checks the persisted representation as well as the public
+        read API, without relying on removed SQLite connection internals.
         """
         db.create_session(session_id="s1", source="cli")
         db.append_message("s1", role="user", content="plain text")
 
-        # Peek at the raw column to confirm no encoding was applied
-        with db._lock:
-            row = db._conn.execute(
-                "SELECT content FROM messages WHERE session_id = ?", ("s1",)
-            ).fetchone()
-        assert row["content"] == "plain text"
+        messages = db.get_messages("s1")
+        assert len(messages) == 1
+        assert messages[0]["content"] == "plain text"
+
+        metadata = db.root / "s1" / "metadata.json"
+        assert metadata.is_file()
+        stored = json.loads(metadata.read_text(encoding="utf-8"))
+        assert stored["messages"][0]["content"] == "plain text"
 
     def test_replace_messages_handles_multimodal_content(self, db):
         """`replace_messages` (used by /retry, /undo, /compress) must also
