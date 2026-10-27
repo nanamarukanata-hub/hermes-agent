@@ -490,14 +490,17 @@ class SessionDB:
     def search_messages(self, query, source_filter=None, exclude_sources=None,
                         role_filter=None, limit=20, offset=0):
         if not query.strip(): return []
-        # FTS5 accepted a fully quoted phrase such as '"needle match"'.
-        # The Vault backend searches text directly: strip only a balanced
-        # pair of outer quotes so the phrase still matches verbatim.
+        # Preserve a fully quoted phrase, including a literal " OR " inside
+        # it. Unquoted OR-separated phrases retain the legacy search API's
+        # union behavior without using FTS5 or any database index.
         needle = query.strip()
         if len(needle) >= 2 and needle.startswith('"') and needle.endswith('"'):
-            needle = needle[1:-1]
-        if not needle: return []
-        folded_needle = needle.casefold()
+            phrases = [needle[1:-1]]
+        else:
+            phrases = [part.strip().strip('"')
+                       for part in re.split(r"\\s+OR\\s+", needle, flags=re.IGNORECASE)]
+        folded_phrases = [part.casefold() for part in phrases if part]
+        if not folded_phrases: return []
         found = []
         for item in self._items():
             if source_filter is not None and item["source"] not in source_filter: continue
@@ -505,9 +508,22 @@ class SessionDB:
             for idx, msg in enumerate(item["messages"]):
                 if role_filter and msg["role"] not in role_filter: continue
                 content = str(msg.get("content") or "")
-                if folded_needle not in (content + " " + str(msg.get("tool_name", ""))).casefold(): continue
+                folded_content = content.casefold()
+                haystack = (content + " " + str(msg.get("tool_name", ""))).casefold()
+                if not any(part in haystack for part in folded_phrases): continue
+                # Include the actual match in a bounded preview, including
+                # CJK substrings far beyond the first 120 characters.
+                positions = [folded_content.find(part) for part in folded_phrases]
+                positions = [pos for pos in positions if pos >= 0]
+                if positions:
+                    start = max(0, min(positions) - 50)
+                    end = min(len(content), start + 120)
+                    start = max(0, end - 120)
+                    snippet = content[start:end]
+                else:
+                    snippet = content[:120]  # matched tool_name only
                 found.append({"id": msg["id"], "session_id": item["id"],
-                              "role": msg["role"], "snippet": content[:120],
+                              "role": msg["role"], "snippet": snippet,
                               "timestamp": msg["timestamp"], "source": item["source"],
                               "model": item.get("model"), "session_started": item["started_at"],
                               "context": [{"role": m["role"], "content": str(m.get("content", ""))[:200]}
