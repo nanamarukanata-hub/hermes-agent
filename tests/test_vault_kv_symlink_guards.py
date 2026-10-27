@@ -61,3 +61,20 @@ def test_counter_survives_reopening_vault_directory(tmp_path):
     assert reopened.next_id("sequence") == 2
     assert reopened.next_id() == 1
     assert VaultDir(root, "06_Automation", "Hermes", "RetainQueue").next_id() == 2
+
+def test_counter_persists_last_allocated_id(tmp_path):
+    """Restarting a Vault must not skip IDs or reuse an existing allocation."""
+    root = tmp_path / "vault"
+    vault = VaultDir(root, "06_Automation", "Hermes", "RetainQueue")
+    assert vault.next_id("sequence") == 1
+    assert json.loads(vault.path("sequence").read_text(encoding="utf-8")) == {"next": 1}
+    assert VaultDir(root, "06_Automation", "Hermes", "RetainQueue").next_id("sequence") == 2
+    assert json.loads(vault.path("sequence").read_text(encoding="utf-8")) == {"next": 2}
+
+
+def test_legacy_counter_is_never_reissued(tmp_path):
+    """Old next+1 counters may leave a gap, but must never reuse an ID."""
+    vault = VaultDir(tmp_path / "vault", "06_Automation", "Hermes", "RetainQueue")
+    vault.path("sequence").write_text(json.dumps({"next": 8}) + "\n", encoding="utf-8")
+    assert vault.next_id("sequence") == 9
+    assert vault.next_id("sequence") == 10
