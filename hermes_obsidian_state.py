@@ -431,7 +431,15 @@ class SessionDB:
                 fields = ("role", "content", "tool_call_id", "tool_calls", "tool_name",
                           "finish_reason", "reasoning", "reasoning_content",
                           "reasoning_details", "codex_reasoning_items", "codex_message_items")
-                messages.append({key: msg[key] for key in fields if msg.get(key) is not None})
+                entry = {key: msg[key] for key in fields if msg.get(key) is not None}
+                # Resume/compaction may persist the same user prompt twice.
+                # Suppress only adjacent, identical user turns during replay;
+                # never change the canonical Vault transcript.
+                if (entry.get("role") == "user" and messages
+                        and messages[-1].get("role") == "user"
+                        and messages[-1] == entry):
+                    continue
+                messages.append(entry)
         return messages
 
     def search_sessions(self, source=None, limit=20, offset=0):
