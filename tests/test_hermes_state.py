@@ -396,22 +396,22 @@ class TestMessageStorage:
 
     def test_memory_context_cleanup_preserves_user_and_literal_assistant_text(self, db):
         db.create_session(session_id="s1", source="cli")
-        literal = "<memory-context>quoted text</memory-context>\\n\\nKeep this"
+        literal = "<memory-context>quoted text</memory-context>\n\nKeep this"
         db.append_message("s1", role="user", content=literal)
         db.append_message("s1", role="assistant", content=literal)
-        db.append_message("s1", role="assistant", content="Intro\\n" + literal)
+        db.append_message("s1", role="assistant", content="Intro\n" + literal)
         db.append_message(
             "s1", role="assistant",
-            content=("<memory-context>\\n"
-                     "[System note: The following is recalled memory context\\n"
+            content=("<memory-context>\n"
+                     "[System note: The following is recalled memory context\n"
                      "incomplete prefix without closing tag"),
         )
 
         conv = db.get_messages_as_conversation("s1")
         assert [message["content"] for message in conv] == [
-            literal, literal, "Intro\\n" + literal,
-            ("<memory-context>\\n"
-             "[System note: The following is recalled memory context\\n"
+            literal, literal, "Intro\n" + literal,
+            ("<memory-context>\n"
+             "[System note: The following is recalled memory context\n"
              "incomplete prefix without closing tag"),
         ]
 
