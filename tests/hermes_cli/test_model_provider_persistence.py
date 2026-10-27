@@ -307,7 +307,7 @@ class TestProviderPersistsAfterModelSave:
             _model_flow_api_key_provider(load_config(), "lmstudio", "old-model")
 
         assert mock_input.call_count == 2
-        assert "Keep" in mock_input.call_args_list[0].args[0]
+        assert "[K]eep" in mock_input.call_args_list[0].args[0]
         assert "Base URL" in mock_input.call_args_list[1].args[0]
 
         import yaml
