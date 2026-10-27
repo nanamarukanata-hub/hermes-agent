@@ -386,9 +386,41 @@ class SessionDB:
         return list(reversed(path))
 
     def resolve_resume_session_id(self, session_id):
-        if self.get_messages(session_id): return session_id
-        sid = self.get_compression_tip(session_id)
-        return sid if self.get_messages(sid) else session_id
+        """Resume the last message-bearing session on the newest compression path.
+
+        Compression can leave an empty tail after a descendant that contains
+        the actual conversation. Returning only the tip would lose that
+        conversation, so remember the deepest nonempty descendant instead.
+        """
+        if not session_id:
+            return session_id
+        if self.get_messages(session_id):
+            return session_id
+
+        children_by_parent = {}
+        for item in self._items():
+            if item.get("source") == "subagent":
+                continue
+            parent = item.get("parent_session_id")
+            if parent:
+                children_by_parent.setdefault(parent, []).append(item)
+
+        sid = session_id
+        seen = set()
+        last_with_messages = None
+        while sid not in seen:
+            seen.add(sid)
+            children = children_by_parent.get(sid, [])
+            if not children:
+                break
+            child = max(
+                children,
+                key=lambda item: (item.get("started_at") or 0, item["id"]),
+            )
+            sid = child["id"]
+            if child.get("messages"):
+                last_with_messages = sid
+        return last_with_messages or session_id
 
     def get_messages_as_conversation(self, session_id, include_ancestors=False):
         sessions = self._lineage(session_id) if include_ancestors else [session_id]
