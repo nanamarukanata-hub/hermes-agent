@@ -409,8 +409,12 @@ class TestBaseUrlValidation:
             return_value="step-3-agent-lite",
         ), patch(
             "hermes_cli.auth.deactivate_provider",
-        ):
+        ), patch("builtins.input", return_value="") as mock_input:
             _model_flow_stepfun(load_config(), "old-model")
+
+        # A configured key still asks whether to keep/replace/clear it.
+        mock_input.assert_called_once()
+        assert "[K]eep" in mock_input.call_args.args[0]
 
         import yaml
 
