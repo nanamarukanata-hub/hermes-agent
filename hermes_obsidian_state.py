@@ -432,6 +432,16 @@ class SessionDB:
                           "finish_reason", "reasoning", "reasoning_content",
                           "reasoning_details", "codex_reasoning_items", "codex_message_items")
                 entry = {key: msg[key] for key in fields if msg.get(key) is not None}
+                # A legacy memory injector sometimes persisted its internal
+                # context prefix as part of an assistant reply. Exclude only
+                # that recognized leading block from model replay; the Vault
+                # transcript itself must remain byte-for-byte unchanged.
+                if entry.get("role") == "assistant" and isinstance(entry.get("content"), str):
+                    content = entry["content"]
+                    if content.startswith("<memory-context>"):
+                        block, closing, visible = content.partition("</memory-context>")
+                        if closing and "[System note: The following is recalled memory context" in block:
+                            entry["content"] = visible.lstrip("\r\n")
                 # Resume/compaction may persist the same user prompt twice.
                 # Suppress only adjacent, identical user turns during replay;
                 # never change the canonical Vault transcript.
