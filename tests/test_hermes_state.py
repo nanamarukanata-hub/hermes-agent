@@ -333,6 +333,37 @@ class TestMessageStorage:
 
         assert [m["content"] for m in conv if m["role"] == "user"] == ["same prompt", "next prompt"]
 
+    def test_get_messages_as_conversation_deduplicates_across_session_boundary(self, db):
+        db.create_session("root", "tui")
+        db.append_message("root", role="user", content="resume prompt")
+        db.create_session("child", "tui", parent_session_id="root")
+        db.append_message("child", role="user", content="resume prompt")
+        db.append_message("child", role="assistant", content="ack")
+
+        conv = db.get_messages_as_conversation("child", include_ancestors=True)
+
+        assert [(m["role"], m["content"]) for m in conv] == [
+            ("user", "resume prompt"),
+            ("assistant", "ack"),
+        ]
+        # Replay deduplication must not delete or rewrite persisted messages.
+        assert len(db.get_messages("root")) == 1
+        assert len(db.get_messages("child")) == 2
+
+    def test_get_messages_as_conversation_preserves_repeat_after_assistant(self, db):
+        db.create_session("root", "tui")
+        db.append_message("root", role="user", content="repeat")
+        db.append_message("root", role="assistant", content="answer")
+        db.append_message("root", role="user", content="repeat")
+
+        conv = db.get_messages_as_conversation("root")
+
+        assert [(m["role"], m["content"]) for m in conv] == [
+            ("user", "repeat"),
+            ("assistant", "answer"),
+            ("user", "repeat"),
+        ]
+
     def test_finish_reason_stored(self, db):
         db.create_session(session_id="s1", source="cli")
         db.append_message("s1", role="assistant", content="Done", finish_reason="stop")
