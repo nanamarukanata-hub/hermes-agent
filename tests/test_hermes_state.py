@@ -693,6 +693,19 @@ class TestFTS5Search:
             "after needle",
         ]
 
+    def test_search_quoted_phrase_preserves_exact_sequence(self, db):
+        """Quoted FTS-style phrases still work with the SQLite-free Vault search."""
+        db.create_session(session_id="s1", source="cli")
+        db.append_message("s1", role="user", content="needle match")
+        db.append_message("s1", role="assistant", content="needle separated by a match")
+        db.append_message("s1", role="user", content="NEEDLE MATCH")
+
+        results = db.search_messages('"needle match"')
+        assert {result["snippet"] for result in results} == {
+            "needle match", "NEEDLE MATCH",
+        }
+        assert db.search_messages('""') == []
+
     def test_search_special_chars_do_not_crash(self, db):
         """FTS5 special characters in queries must not raise OperationalError."""
         db.create_session(session_id="s1", source="cli")
