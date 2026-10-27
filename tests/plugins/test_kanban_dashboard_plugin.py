@@ -559,10 +559,15 @@ def _add_run(task_id, **fields):
 
 
 def test_board_auto_initializes_missing_db(tmp_path, monkeypatch):
-    """If the board store doesn't exist yet, GET /board must create it, not 500."""
+    """A first board read initializes the Vault store, not legacy Hermes Home."""
     home = tmp_path / ".hermes"
     home.mkdir()
+    vault = tmp_path / "vault"
+    vault.mkdir()
     monkeypatch.setenv("HERMES_HOME", str(home))
+    monkeypatch.setenv("HERMES_OBSIDIAN_VAULT", str(vault))
+    monkeypatch.delenv("HERMES_KANBAN_BOARD", raising=False)
+    monkeypatch.delenv("HERMES_KANBAN_DB", raising=False)
     monkeypatch.setattr(Path, "home", lambda: tmp_path)
     # Deliberately DO NOT call kb.init_db().
 
@@ -571,7 +576,12 @@ def test_board_auto_initializes_missing_db(tmp_path, monkeypatch):
     c = TestClient(app)
     r = c.get("/api/plugins/kanban/board")
     assert r.status_code == 200
-    assert (home / "kanban" / "boards" / "default" / "links.json").exists(), "init_db wasn't invoked by /board"
+    store = vault / "06_Automation" / "Hermes" / "Kanban" / "default"
+    assert kb.kanban_store_dir(board="default") == store
+    assert (store / "links.json").exists(), "GET /board did not initialize the Vault store"
+    assert not (home / "kanban" / "boards" / "default" / "links.json").exists(), (
+        "GET /board unexpectedly wrote to legacy Hermes Home"
+    )
 
 
 # ---------------------------------------------------------------------------
