@@ -490,6 +490,14 @@ class SessionDB:
     def search_messages(self, query, source_filter=None, exclude_sources=None,
                         role_filter=None, limit=20, offset=0):
         if not query.strip(): return []
+        # FTS5 accepted a fully quoted phrase such as '"needle match"'.
+        # The Vault backend searches text directly: strip only a balanced
+        # pair of outer quotes so the phrase still matches verbatim.
+        needle = query.strip()
+        if len(needle) >= 2 and needle.startswith('"') and needle.endswith('"'):
+            needle = needle[1:-1]
+        if not needle: return []
+        folded_needle = needle.casefold()
         found = []
         for item in self._items():
             if source_filter is not None and item["source"] not in source_filter: continue
@@ -497,7 +505,7 @@ class SessionDB:
             for idx, msg in enumerate(item["messages"]):
                 if role_filter and msg["role"] not in role_filter: continue
                 content = str(msg.get("content") or "")
-                if query.casefold() not in (content + " " + str(msg.get("tool_name", ""))).casefold(): continue
+                if folded_needle not in (content + " " + str(msg.get("tool_name", ""))).casefold(): continue
                 found.append({"id": msg["id"], "session_id": item["id"],
                               "role": msg["role"], "snippet": content[:120],
                               "timestamp": msg["timestamp"], "source": item["source"],
