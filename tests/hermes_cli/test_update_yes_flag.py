@@ -10,7 +10,7 @@ Covers:
 
 import subprocess
 from types import SimpleNamespace
-from unittest.mock import patch
+from unittest.mock import MagicMock, patch
 
 from hermes_cli.main import cmd_update
 
@@ -135,11 +135,6 @@ class TestUpdateYesConfigMigration:
 class TestUpdateYesStashRestore:
     """--yes auto-restores the pre-update autostash without prompting."""
 
-    @patch("hermes_cli.main._restore_stashed_changes")
-    @patch(
-        "hermes_cli.main._stash_local_changes_if_needed",
-        return_value="stash@{0}",
-    )
     @patch("hermes_cli.config.check_config_version", return_value=(1, 1))
     @patch("hermes_cli.config.get_missing_config_fields", return_value=[])
     @patch("hermes_cli.config.get_missing_env_vars", return_value=[])
@@ -152,8 +147,6 @@ class TestUpdateYesStashRestore:
         _mock_missing_env,
         _mock_missing_cfg,
         _mock_version,
-        _mock_stash,
-        mock_restore,
         capsys,
     ):
         # Not on main → cmd_update switches to main → autostash fires.
@@ -169,15 +162,26 @@ class TestUpdateYesStashRestore:
         # — ``patch.object`` on the real streams is robust under xdist).
         import sys as _sys
 
-        with patch.object(_sys.stdin, "isatty", return_value=True), patch.object(
+        # Other tests reload hermes_cli.main. Patching the module by name
+        # can patch a different module object from the one whose cmd_update
+        # function was imported above. Patch the imported function's globals
+        # so the autostash hooks are intercepted reliably under pytest-xdist.
+        stash_sha = "a" * 40
+        mock_stash = MagicMock(return_value=stash_sha)
+        mock_restore = MagicMock(return_value=True)
+        with patch.dict(
+            cmd_update.__globals__,
+            {
+                "_stash_local_changes_if_needed": mock_stash,
+                "_restore_stashed_changes": mock_restore,
+            },
+        ), patch.object(_sys.stdin, "isatty", return_value=True), patch.object(
             _sys.stdout, "isatty", return_value=True
-        ):
+        ), patch("builtins.input") as mock_input:
             cmd_update(args)
 
-        # _restore_stashed_changes was called, and called with prompt_user=False
-        # every time (so the user never sees "Restore local changes now?").
-        assert mock_restore.called
-        for call in mock_restore.call_args_list:
-            assert call.kwargs.get("prompt_user") is False, (
-                f"Expected prompt_user=False under --yes, got {call.kwargs}"
-            )
+        mock_stash.assert_called_once()
+        mock_restore.assert_called_once()
+        assert mock_restore.call_args.args[2] == stash_sha
+        assert mock_restore.call_args.kwargs.get("prompt_user") is False
+        mock_input.assert_not_called()
