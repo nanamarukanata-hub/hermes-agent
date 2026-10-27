@@ -560,6 +560,28 @@ class TestMessageStorage:
         conv = db.get_messages_as_conversation("s1")
         assert "reasoning" not in conv[0]
 
+    def test_empty_reasoning_preserved_in_vault_but_not_replayed(self, db):
+        """Replay omits empty reasoning without changing stored provider fields."""
+        db.create_session(session_id="s1", source="cli")
+        db.append_message(
+            "s1",
+            role="assistant",
+            content="hi",
+            reasoning="",
+            reasoning_content="",
+        )
+
+        stored = db.get_messages("s1")
+        assert stored[0]["reasoning"] == ""
+        assert stored[0]["reasoning_content"] == ""
+
+        conv = db.get_messages_as_conversation("s1")
+        assert len(conv) == 1
+        assert "reasoning" not in conv[0]
+        assert conv[0]["reasoning_content"] == ""
+        # Reading the model-facing projection must not mutate the Vault record.
+        assert db.get_messages("s1")[0]["reasoning"] == ""
+
     def test_codex_reasoning_items_persisted_and_restored(self, db):
         """codex_reasoning_items (encrypted blobs for Codex Responses API) are
         round-tripped through JSON serialization in the DB."""
