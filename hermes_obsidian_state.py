@@ -498,7 +498,7 @@ class SessionDB:
             phrases = [needle[1:-1]]
         else:
             phrases = [part.strip().strip('"')
-                       for part in re.split(r"\\s+OR\\s+", needle, flags=re.IGNORECASE)]
+                       for part in re.split(r"\s+OR\s+", needle, flags=re.IGNORECASE)]
         folded_phrases = [part.casefold() for part in phrases if part]
         if not folded_phrases: return []
         found = []
