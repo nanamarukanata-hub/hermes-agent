@@ -564,7 +564,36 @@ class SessionDB:
         return len(ids)
 
     def finalize_orphaned_compression_sessions(self):
-        return 0
+        """Finalize stale compression continuations without deleting Vault data.
+
+        Preserve the legacy SessionDB criteria: the child is at least seven
+        days old, has messages but no API calls or end marker, and its parent
+        was explicitly ended by compression. Only the child's end metadata
+        changes; transcripts and message records remain intact.
+        """
+        with self._guard():
+            now = time.time()
+            cutoff = now - 7 * 86400
+            sessions = list(self._items())
+            by_id = {item["id"]: item for item in sessions}
+            finalized = 0
+            for item in sessions:
+                parent = by_id.get(item.get("parent_session_id"))
+                started_at = item.get("started_at")
+                if (parent is None or parent.get("end_reason") != "compression"
+                        or parent.get("ended_at") is None
+                        or not isinstance(started_at, (int, float))
+                        or started_at >= cutoff
+                        or item.get("ended_at") is not None
+                        or item.get("end_reason") is not None
+                        or item.get("api_call_count") != 0
+                        or not item.get("messages")):
+                    continue
+                item["ended_at"] = now
+                item["end_reason"] = "orphaned_compression"
+                self._save(item["id"], item)
+                finalized += 1
+            return finalized
 
     def _read_state_meta(self):
         path = self.root / "state_meta.json"
