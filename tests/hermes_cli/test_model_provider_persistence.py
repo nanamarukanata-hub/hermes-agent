@@ -301,8 +301,14 @@ class TestProviderPersistsAfterModelSave:
             lambda api_key=None, base_url=None, timeout=5.0: ["publisher/model-a"],
         )
 
-        with patch("builtins.input", side_effect=[""]):
+        # Existing keys prompt for Keep/Replace/Clear before the base URL.
+        # Mock both prompts so the test exercises the full persistence path.
+        with patch("builtins.input", side_effect=["", ""]) as mock_input:
             _model_flow_api_key_provider(load_config(), "lmstudio", "old-model")
+
+        assert mock_input.call_count == 2
+        assert "Keep" in mock_input.call_args_list[0].args[0]
+        assert "Base URL" in mock_input.call_args_list[1].args[0]
 
         import yaml
 
