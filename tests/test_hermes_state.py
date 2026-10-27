@@ -1135,12 +1135,8 @@ class TestPruneSessions:
         # Create and end an "old" session
         db.create_session(session_id="old", source="cli")
         db.end_session("old", end_reason="done")
-        # Manually backdate started_at
-        db._conn.execute(
-            "UPDATE sessions SET started_at = ? WHERE id = ?",
-            (time.time() - 100 * 86400, "old"),
-        )
-        db._conn.commit()
+        # Backdate only this temporary Vault fixture, without a SQL connection.
+        db._edit("old", lambda item: item.update(started_at=time.time() - 100 * 86400))
 
         # Create a recent session
         db.create_session(session_id="new", source="cli")
@@ -1154,12 +1150,8 @@ class TestPruneSessions:
 
     def test_prune_skips_active_sessions(self, db):
         db.create_session(session_id="active", source="cli")
-        # Backdate but don't end
-        db._conn.execute(
-            "UPDATE sessions SET started_at = ? WHERE id = ?",
-            (time.time() - 200 * 86400, "active"),
-        )
-        db._conn.commit()
+        # Active sessions must survive even when their Vault timestamp is old.
+        db._edit("active", lambda item: item.update(started_at=time.time() - 200 * 86400))
 
         pruned = db.prune_sessions(older_than_days=90)
         assert pruned == 0
@@ -1169,11 +1161,7 @@ class TestPruneSessions:
         for sid, src in [("old_cli", "cli"), ("old_tg", "telegram")]:
             db.create_session(session_id=sid, source=src)
             db.end_session(sid, end_reason="done")
-            db._conn.execute(
-                "UPDATE sessions SET started_at = ? WHERE id = ?",
-                (time.time() - 200 * 86400, sid),
-            )
-        db._conn.commit()
+            db._edit(sid, lambda item: item.update(started_at=time.time() - 200 * 86400))
 
         pruned = db.prune_sessions(older_than_days=90, source="cli")
         assert pruned == 1
@@ -1197,17 +1185,14 @@ class TestPruneSessions:
 
         # Backdate A and B to be old; C and D stay recent
         for sid, ts in [("A", old_ts), ("B", old_ts), ("C", recent_ts), ("D", recent_ts)]:
-            db._conn.execute(
-                "UPDATE sessions SET started_at = ? WHERE id = ?", (ts, sid)
-            )
-        db._conn.commit()
+            db._edit(sid, lambda item, ts=ts: item.update(started_at=ts))
 
-        # Should not raise IntegrityError
+        # Pruning must not leave a dangling parent link
         pruned = db.prune_sessions(older_than_days=90)
         assert pruned == 2  # only A and B
         assert db.get_session("A") is None
         assert db.get_session("B") is None
-        # C and D survive, C is orphaned (parent_session_id NULL)
+        # C and D survive, C is orphaned in the Vault
         c = db.get_session("C")
         assert c is not None
         assert c["parent_session_id"] is None
@@ -1227,15 +1212,32 @@ class TestPruneSessions:
         db.end_session("Z", end_reason="done")
 
         for sid in ("X", "Y", "Z"):
-            db._conn.execute(
-                "UPDATE sessions SET started_at = ? WHERE id = ?", (old_ts, sid)
-            )
-        db._conn.commit()
+            db._edit(sid, lambda item: item.update(started_at=old_ts))
 
         pruned = db.prune_sessions(older_than_days=90)
         assert pruned == 3
         for sid in ("X", "Y", "Z"):
             assert db.get_session(sid) is None
+
+
+    def test_prune_surviving_child_persists_without_sqlite(self, db):
+        """Pruning a parent preserves the child's transcript and orphan state."""
+        db.create_session(session_id="parent", source="cli")
+        db.end_session("parent", end_reason="compressed")
+        db._edit("parent", lambda item: item.update(started_at=time.time() - 200 * 86400))
+        db.create_session(session_id="child", source="cli", parent_session_id="parent")
+        db.append_message("child", role="user", content="Keep this message")
+
+        assert db.prune_sessions(older_than_days=90) == 1
+        reopened = SessionDB(vault_path=db.vault)
+        try:
+            assert reopened.get_session("parent") is None
+            assert reopened.get_session("child")["parent_session_id"] is None
+            assert reopened.get_messages("child")[0]["content"] == "Keep this message"
+            assert not list(db.vault.rglob("*.db"))
+            assert not list(db.vault.rglob("*.sqlite*"))
+        finally:
+            reopened.close()
 
 
 class TestDeleteSessionOrphansChildren:
