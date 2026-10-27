@@ -340,5 +340,77 @@ class ObsidianStateTests(unittest.TestCase):
         self.assertFalse(list(Path(self.temp.name).rglob("*.sqlite*")))
 
 
+    def test_finalize_orphaned_compression_preserves_messages_and_is_idempotent(self):
+        import time
+
+        self.db.create_session("parent", "cli")
+        self.db.end_session("parent", "compression")
+        self.db.create_session(
+            "stale_child", "cli", parent_session_id="parent"
+        )
+        self.db.append_message("stale_child", "user", "Keep this conversation")
+        self.db._edit(
+            "stale_child",
+            lambda item: item.update(started_at=time.time() - 8 * 86400),
+        )
+        original_messages = self.db.get_messages("stale_child")
+        transcript = (
+            self.db.root / "stale_child" / "Transcript.md"
+        ).read_text(encoding="utf-8")
+
+        self.assertEqual(self.db.finalize_orphaned_compression_sessions(), 1)
+        ended = self.db.get_session("stale_child")
+        self.assertEqual(ended["end_reason"], "orphaned_compression")
+        self.assertIsInstance(ended["ended_at"], float)
+        self.assertEqual(self.db.get_messages("stale_child"), original_messages)
+        self.assertEqual(
+            (self.db.root / "stale_child" / "Transcript.md").read_text(
+                encoding="utf-8"
+            ),
+            transcript,
+        )
+        self.assertEqual(SessionDB().finalize_orphaned_compression_sessions(), 0)
+
+    def test_finalize_orphaned_compression_excludes_nonmatching_sessions(self):
+        import time
+
+        self.db.create_session("compressed_parent", "cli")
+        self.db.end_session("compressed_parent", "compression")
+        self.db.create_session("normal_parent", "cli")
+        self.db.end_session("normal_parent", "user_exit")
+        self.db.create_session("open_parent", "cli")
+        self.db._edit(
+            "open_parent",
+            lambda item: item.update(end_reason="compression"),
+        )
+
+        cases = (
+            ("recent", "compressed_parent", True, False, False),
+            ("active", "compressed_parent", True, True, True),
+            ("empty", "compressed_parent", False, True, False),
+            ("wrong_parent", "normal_parent", True, True, False),
+            ("open_parent_child", "open_parent", True, True, False),
+            ("already_ended", "compressed_parent", True, True, False),
+        )
+        for sid, parent, has_message, old, api_called in cases:
+            self.db.create_session(sid, "cli", parent_session_id=parent)
+            if has_message:
+                self.db.append_message(sid, "user", sid)
+            if old:
+                self.db._edit(
+                    sid, lambda item: item.update(
+                        started_at=time.time() - 8 * 86400
+                    )
+                )
+            if api_called:
+                self.db.update_token_counts(sid, api_call_count=1)
+        self.db.end_session("already_ended", "user_exit")
+
+        self.assertEqual(self.db.finalize_orphaned_compression_sessions(), 0)
+        for sid, _, _, _, _ in cases:
+            session = self.db.get_session(sid)
+            self.assertNotEqual(session["end_reason"], "orphaned_compression")
+
+
 if __name__ == "__main__":
     unittest.main()
