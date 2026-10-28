@@ -22,6 +22,18 @@ Persistent session files are under
 `Transcript.md`. Gateway session routing and Discord thread participation
 go to `06_Automation/Hermes/GatewayRouting/`.
 
+
+Google Chat conversation-routing thread counters and the non-secret bot ID
+cache are stored under `06_Automation/Hermes/GoogleChat/`. Before enabling
+Google Chat on an existing installation, stop the gateway and copy
+`$HERMES_HOME/google_chat_thread_counts.json` to
+`$HERMES_OBSIDIAN_VAULT/06_Automation/Hermes/GoogleChat/google_chat_thread_counts.json`
+if the legacy file exists and the Vault copy does not. Preserve the original
+as a backup; do not overwrite an existing Vault copy. Startup refuses to
+silently reset legacy thread counters because that can mix formerly isolated
+conversations. Google Chat OAuth tokens and credentials are **not** copied
+to the Vault, since a synced Vault is not a credential store.
+
 ## Optional one-time migration of legacy history
 
 Stop Hermes CLI and the Discord gateway before the write step. Preserve a
