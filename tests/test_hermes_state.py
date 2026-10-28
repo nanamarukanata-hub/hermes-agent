@@ -1947,96 +1947,87 @@ class TestListSessionsRich:
         # No messages, so last_active falls back to started_at
         assert sessions[0]["last_active"] == sessions[0]["started_at"]
 
+    @staticmethod
+    def _pin_vault_times(db, sid, *, started_at=None, ended_at=None,
+                         end_reason=None, message_times=None):
+        """Adjust deterministic fixture timestamps through the Vault writer."""
+        def edit(item):
+            if started_at is not None:
+                item["started_at"] = started_at
+            if ended_at is not None:
+                item["ended_at"] = ended_at
+            if end_reason is not None:
+                item["end_reason"] = end_reason
+            for message in item["messages"]:
+                if message_times and message["content"] in message_times:
+                    message["timestamp"] = message_times[message["content"]]
+        db._edit(sid, edit)
+
     def test_order_by_last_active_surfaces_recently_touched_older_session_first(self, db):
         t0 = 1709500000.0
         db.create_session("old", "cli")
         db.create_session("new", "cli")
-
-        with db._lock:
-            db._conn.execute("UPDATE sessions SET started_at=? WHERE id=?", (t0, "old"))
-            db._conn.execute("UPDATE sessions SET started_at=? WHERE id=?", (t0 + 10, "new"))
-
         db.append_message("old", "user", "old first")
         db.append_message("new", "user", "new first")
         db.append_message("old", "assistant", "old touched later")
 
-        with db._lock:
-            db._conn.execute(
-                "UPDATE messages SET timestamp=? WHERE session_id=? AND role=? AND content=?",
-                (t0 + 1, "old", "user", "old first"),
-            )
-            db._conn.execute(
-                "UPDATE messages SET timestamp=? WHERE session_id=? AND role=? AND content=?",
-                (t0 + 11, "new", "user", "new first"),
-            )
-            db._conn.execute(
-                "UPDATE messages SET timestamp=? WHERE session_id=? AND role=? AND content=?",
-                (t0 + 20, "old", "assistant", "old touched later"),
-            )
-            db._conn.commit()
+        self._pin_vault_times(
+            db, "old", started_at=t0,
+            message_times={"old first": t0 + 1, "old touched later": t0 + 20},
+        )
+        self._pin_vault_times(
+            db, "new", started_at=t0 + 10,
+            message_times={"new first": t0 + 11},
+        )
 
         assert [s["id"] for s in db.list_sessions_rich(limit=5)] == ["new", "old"]
         assert [
             s["id"] for s in db.list_sessions_rich(limit=5, order_by_last_active=True)
         ] == ["old", "new"]
+        # Timestamp edits and ordering must survive a fresh Vault reader.
+        reopened = type(db)(vault_path=db.vault)
+        assert [
+            s["id"] for s in reopened.list_sessions_rich(limit=5, order_by_last_active=True)
+        ] == ["old", "new"]
+        assert not list(db.vault.rglob("*.db"))
 
     def test_order_by_last_active_uses_compression_tip_activity(self, db):
-        """A compression root whose tip was touched recently must rank above
-        a newer uncompressed session, even when that tip activity lives in a
-        different row and the outer LIMIT could otherwise cut it.
-
-        This is the case that forced SQL-level chain walking: a naive "cap
-        the SQL fetch at limit*K" optimization would drop the old root off
-        the SQL page before post-projection could promote it.
-        """
+        """An old root's recently active continuation wins even with limit=1."""
         t0 = 1709500000.0
         db.create_session("root1", "cli")
-        with db._lock:
-            db._conn.execute("UPDATE sessions SET started_at=? WHERE id=?", (t0, "root1"))
-            db._conn.execute(
-                "UPDATE sessions SET ended_at=?, end_reason=? WHERE id=?",
-                (t0 + 100, "compression", "root1"),
-            )
         db.append_message("root1", "user", "old ask")
+        db.end_session("root1", "compression")
+        self._pin_vault_times(
+            db, "root1", started_at=t0, ended_at=t0 + 100,
+            message_times={"old ask": t0 + 1},
+        )
 
-        # Continuation tip created after root ended; last activity much later.
         db.create_session("tip1", "cli", parent_session_id="root1")
-        with db._lock:
-            db._conn.execute("UPDATE sessions SET started_at=? WHERE id=?", (t0 + 101, "tip1"))
         db.append_message("tip1", "user", "latest message")
+        self._pin_vault_times(
+            db, "tip1", started_at=t0 + 101,
+            message_times={"latest message": t0 + 10_000},
+        )
 
-        # Bunch of newer, uncompressed sessions — fresher start_at but older
-        # last activity than the tip. Explicitly pin message timestamps so
-        # they don't pick up wall-clock from append_message.
         for i in range(5):
             sid = f"newer{i}"
             db.create_session(sid, "cli")
-            with db._lock:
-                db._conn.execute(
-                    "UPDATE sessions SET started_at=? WHERE id=?",
-                    (t0 + 500 + i, sid),
-                )
             db.append_message(sid, "user", f"msg {i}")
-            with db._lock:
-                db._conn.execute(
-                    "UPDATE messages SET timestamp=? WHERE session_id=? AND content=?",
-                    (t0 + 500 + i, sid, f"msg {i}"),
-                )
-
-        # Tip activity timestamp is the latest thing in the DB.
-        with db._lock:
-            db._conn.execute(
-                "UPDATE messages SET timestamp=? WHERE session_id=? AND content=?",
-                (t0 + 10_000, "tip1", "latest message"),
+            self._pin_vault_times(
+                db, sid, started_at=t0 + 500 + i,
+                message_times={f"msg {i}": t0 + 500 + i},
             )
-            db._conn.commit()
 
-        # limit=1 is the stress test: the old root must win the single slot.
         top = db.list_sessions_rich(limit=1, order_by_last_active=True)
         assert len(top) == 1
-        # Projection surfaces the tip's id in the root's slot.
         assert top[0]["id"] == "tip1"
         assert top[0]["_lineage_root_id"] == "root1"
+        assert top[0]["last_active"] == t0 + 10_000
+
+        reopened = type(db)(vault_path=db.vault)
+        persisted = reopened.list_sessions_rich(limit=1, order_by_last_active=True)
+        assert persisted[0]["id"] == "tip1"
+        assert persisted[0]["_lineage_root_id"] == "root1"
 
     def test_rich_list_includes_title(self, db):
         db.create_session("s1", "cli")
