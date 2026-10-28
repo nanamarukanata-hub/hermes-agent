@@ -2443,7 +2443,7 @@ class TestStateMeta:
 
 class TestVacuum:
     def test_vacuum_runs_without_error(self, db):
-        """VACUUM must succeed on a fresh DB (no rows to reclaim)."""
+        """Vault vacuum is a safe no-op; session files remain readable."""
         db.create_session(session_id="s1", source="cli")
         db.append_message(session_id="s1", role="user", content="hi")
         # Should not raise, even though there's nothing significant to reclaim.
@@ -2455,13 +2455,11 @@ class TestAutoMaintenance:
         """Create a session that is ended and was started `days_old` days ago."""
         db.create_session(session_id=sid, source="cli")
         db.end_session(sid, end_reason="done")
-        db._conn.execute(
-            "UPDATE sessions SET started_at = ? WHERE id = ?",
-            (time.time() - days_old * 86400, sid),
-        )
-        db._conn.commit()
+        db._edit(sid, lambda item: item.update(
+            started_at=time.time() - days_old * 86400
+        ))
 
-    def test_first_run_prunes_and_vacuums(self, db):
+    def test_first_run_prunes_vault_without_sqlite_vacuum(self, db):
         self._make_old_ended(db, "old1", days_old=100)
         self._make_old_ended(db, "old2", days_old=100)
         db.create_session(session_id="new", source="cli")  # active, must survive
@@ -2469,7 +2467,7 @@ class TestAutoMaintenance:
         result = db.maybe_auto_prune_and_vacuum(retention_days=90)
         assert result["skipped"] is False
         assert result["pruned"] == 2
-        assert result["vacuumed"] is True
+        assert result["vacuumed"] is False
         assert result.get("error") is None
         assert db.get_session("old1") is None
         assert db.get_session("old2") is None
@@ -2541,8 +2539,8 @@ class TestAutoMaintenance:
         # Should parse as a float timestamp close to now.
         assert abs(float(marker) - time.time()) < 60
 
-    def test_auto_prune_deletes_transcript_files(self, db, tmp_path):
-        """Issue #3015: auto-prune must also delete on-disk transcript files."""
+    def test_auto_prune_preserves_external_transcript_files(self, db, tmp_path):
+        """Vault-only cleanup must not delete legacy external transcript files."""
         sessions_dir = tmp_path / "sessions"
         sessions_dir.mkdir()
 
@@ -2562,16 +2560,17 @@ class TestAutoMaintenance:
         )
         assert result["pruned"] == 2
 
-        # Pruned transcript files are gone
-        assert not (sessions_dir / "old1.json").exists()
-        assert not (sessions_dir / "old1.jsonl").exists()
-        assert not (sessions_dir / "old2.jsonl").exists()
-        assert not (sessions_dir / "request_dump_old1_001.json").exists()
-        # Active session's transcript is untouched
-        assert (sessions_dir / "new.jsonl").exists()
+        # Only canonical Vault session records are pruned. External legacy
+        # files must remain untouched until an explicit, verified migration.
+        assert db.get_session("old1") is None
+        assert db.get_session("old2") is None
+        assert db.get_session("new") is not None
+        for filename in ("old1.json", "old1.jsonl", "old2.jsonl",
+                         "request_dump_old1_001.json", "new.jsonl"):
+            assert (sessions_dir / filename).exists()
 
     def test_auto_prune_without_sessions_dir_preserves_files(self, db, tmp_path):
-        """Backward-compat: no sessions_dir = DB-only cleanup (legacy behavior)."""
+        """Omitting sessions_dir never modifies external legacy files."""
         sessions_dir = tmp_path / "sessions"
         sessions_dir.mkdir()
         self._make_old_ended(db, "old", days_old=100)
@@ -2582,8 +2581,8 @@ class TestAutoMaintenance:
         # File stays — caller didn't opt in
         assert (sessions_dir / "old.jsonl").exists()
 
-    def test_prune_sessions_deletes_files_for_pruned_only(self, db, tmp_path):
-        """Active-session transcripts must never be deleted by prune."""
+    def test_prune_sessions_only_removes_vault_records(self, db, tmp_path):
+        """Prune only Vault records; preserve all external legacy transcripts."""
         sessions_dir = tmp_path / "sessions"
         sessions_dir.mkdir()
         self._make_old_ended(db, "old", days_old=100)
@@ -2593,7 +2592,9 @@ class TestAutoMaintenance:
 
         count = db.prune_sessions(older_than_days=90, sessions_dir=sessions_dir)
         assert count == 1
-        assert not (sessions_dir / "old.jsonl").exists()
+        assert db.get_session("old") is None
+        assert db.get_session("active") is not None
+        assert (sessions_dir / "old.jsonl").exists()
         assert (sessions_dir / "active.jsonl").exists()
 
 
