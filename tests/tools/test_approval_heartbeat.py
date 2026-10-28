@@ -175,6 +175,7 @@ class TestApprovalHeartbeat:
         """If tools.environments.base can't be imported, the wait still works."""
         from tools.approval import (
             check_all_command_guards,
+            has_blocking_approval,
             register_gateway_notify,
             resolve_gateway_approval,
         )
@@ -200,8 +201,18 @@ class TestApprovalHeartbeat:
         thread = threading.Thread(target=_run_check, daemon=True)
         thread.start()
 
-        time.sleep(0.2)
-        resolve_gateway_approval(self.SESSION_KEY, "once")
+        # Wait for the worker to enqueue its request before resolving it.
+        # A fixed sleep can resolve too early on loaded CI runners, leaving
+        # the worker blocked until its full approval timeout.
+        deadline = time.monotonic() + 10.0
+        while time.monotonic() < deadline:
+            if has_blocking_approval(self.SESSION_KEY):
+                break
+            time.sleep(0.01)
+        assert has_blocking_approval(self.SESSION_KEY), (
+            "approval request was not registered within 10s"
+        )
+        assert resolve_gateway_approval(self.SESSION_KEY, "once") == 1
         thread.join(timeout=5)
 
         assert not thread.is_alive()
