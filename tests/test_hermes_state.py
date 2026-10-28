@@ -2402,17 +2402,24 @@ class TestConcurrentWriteSafety:
         assert len(msgs) == 1
         assert msgs[0]["content"] == "hello after lock"
 
-    def test_sqlite_timeout_is_at_least_30s(self, db):
-        """Connection timeout should be >= 30s to survive CLI/gateway contention."""
-        # Access the underlying connection timeout via sqlite3 introspection.
-        # There is no public API, so we check the kwarg via the module default.
-        import sqlite3
-        import inspect
-        from hermes_state import SessionDB as _SessionDB
-        src = inspect.getsource(_SessionDB.__init__)
-        assert "30" in src, (
-            "SQLite timeout should be at least 30s to handle CLI/gateway lock contention"
-        )
+    def test_vault_writer_lock_serializes_concurrent_access(self, db):
+        """Vault writes are serialized by flock, not a SQLite busy timeout."""
+        import fcntl
+
+        assert db._lockfile.is_relative_to(db.vault)
+        # A distinct open file description must not acquire the same lock
+        # while the first writer holds it (including across processes).
+        with db._guard():
+            with db._lockfile.open("a+b") as competing_writer:
+                with pytest.raises(BlockingIOError):
+                    fcntl.flock(
+                        competing_writer, fcntl.LOCK_EX | fcntl.LOCK_NB
+                    )
+
+        # The lock must be released when the writer exits its guard.
+        with db._lockfile.open("a+b") as competing_writer:
+            fcntl.flock(competing_writer, fcntl.LOCK_EX | fcntl.LOCK_NB)
+            fcntl.flock(competing_writer, fcntl.LOCK_UN)
 
 
 # =========================================================================
