@@ -1628,9 +1628,11 @@ class TestDelegateHeartbeat(unittest.TestCase):
 
         child.run_conversation.side_effect = slow_run
 
-        # At interval 0.05s, idle threshold (5 cycles) trips at ~0.25s.
-        # We should see the heartbeat stop firing well before 0.6s.
-        with patch("tools.delegate_tool._HEARTBEAT_INTERVAL", 0.05):
+        # Accelerate the idle ceiling to five cycles for this regression test.
+        # Production uses 15 cycles (450s at the 30s heartbeat interval),
+        # so patching only the interval would not reach stale detection here.
+        with patch("tools.delegate_tool._HEARTBEAT_INTERVAL", 0.05), \\
+             patch("tools.delegate_tool._HEARTBEAT_STALE_CYCLES_IDLE", 5):
             _run_single_child(
                 task_index=0,
                 goal="Test wedged child",
@@ -1638,6 +1640,10 @@ class TestDelegateHeartbeat(unittest.TestCase):
                 parent_agent=parent,
             )
 
+        # Verify that the heartbeat actually ran; otherwise a missing
+        # heartbeat thread could incorrectly satisfy the upper-bound check.
+        self.assertGreater(len(touch_calls), 0)
+        self.assertGreaterEqual(child.get_activity_summary.call_count, 6)
         # With idle threshold=5 + interval=0.05s, touches should cap
         # around 5. Bound loosely to avoid timing flakes.
         self.assertLess(
