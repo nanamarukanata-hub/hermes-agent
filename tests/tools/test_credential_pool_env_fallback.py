@@ -3,8 +3,9 @@
 Covers the fix from #15914 / PR #15920:
 - _seed_from_env reads API keys from ~/.hermes/.env when not in os.environ
 - _resolve_api_key_provider_secret falls back to credential_pool when env vars are empty
-- env vars take priority over .env file (handled by get_env_value itself)
-- env vars take priority over credential pool (fallback only kicks in when env is empty)
+- credential-pool seeding prefers ~/.hermes/.env over inherited process env vars
+- generic auth resolution uses get_env_value's separate precedence rules
+- environment/.env credentials take priority over credential pool fallback
 """
 
 import os
