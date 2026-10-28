@@ -20,6 +20,18 @@ class ObsidianStateTests(unittest.TestCase):
         self.patch.stop()
         self.temp.cleanup()
 
+    def test_rich_session_preview_truncation_boundary(self):
+        for length in (60, 61, 100):
+            with self.subTest(length=length):
+                sid = f"preview_{length}"
+                self.db.create_session(sid, "cli")
+                self.db.append_message(sid, "user", "A" * length)
+                reopened = SessionDB()
+                sessions = reopened.list_sessions_rich(limit=20)
+                preview = next(row["preview"] for row in sessions if row["id"] == sid)
+                expected = "A" * 60 + ("..." if length > 60 else "")
+                self.assertEqual(preview, expected)
+
     def test_no_vault_environment_fails_closed(self):
         with patch.dict(os.environ, {"HERMES_OBSIDIAN_VAULT": ""}):
             with self.assertRaises(RuntimeError):
