@@ -508,7 +508,12 @@ class SessionDB:
         for s in self._items():
             if source and s["source"] != source: continue
             if exclude_sources and s["source"] in exclude_sources: continue
-            if not include_children and s.get("parent_session_id"): continue
+            if not include_children and s.get("parent_session_id"):
+                # A user-created branch is a separate conversation. Hide
+                # delegate and compression children, but keep branch roots.
+                parent = self._load(s["parent_session_id"])
+                if not parent or parent.get("end_reason") != "branched":
+                    continue
             root_id = s["id"]
             root_started_at = s["started_at"]
             if project_compression_tips:
