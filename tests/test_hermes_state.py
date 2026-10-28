@@ -1631,216 +1631,118 @@ class TestSchemaInit:
         assert sessions[0]["preview"] == "first prompt"
         db.close()
 
-    def test_migration_from_v2(self, tmp_path):
-        """Simulate a v2 database and verify migration adds title column."""
-        import sqlite3
+    def test_legacy_v2_sqlite_is_preserved_without_implicit_import(self, tmp_path):
+        """Opening the Vault backend must not mutate or silently import legacy SQLite.
 
-        db_path = tmp_path / "migrate_test.db"
-        conn = sqlite3.connect(str(db_path))
-        # Create v2 schema (without title column)
-        conn.executescript("""
-            CREATE TABLE schema_version (version INTEGER NOT NULL);
-            INSERT INTO schema_version (version) VALUES (2);
-
-            CREATE TABLE sessions (
-                id TEXT PRIMARY KEY,
-                source TEXT NOT NULL,
-                user_id TEXT,
-                model TEXT,
-                model_config TEXT,
-                system_prompt TEXT,
-                parent_session_id TEXT,
-                started_at REAL NOT NULL,
-                ended_at REAL,
-                end_reason TEXT,
-                message_count INTEGER DEFAULT 0,
-                tool_call_count INTEGER DEFAULT 0,
-                input_tokens INTEGER DEFAULT 0,
-                output_tokens INTEGER DEFAULT 0
-            );
-
-            CREATE TABLE messages (
-                id INTEGER PRIMARY KEY AUTOINCREMENT,
-                session_id TEXT NOT NULL,
-                role TEXT NOT NULL,
-                content TEXT,
-                tool_call_id TEXT,
-                tool_calls TEXT,
-                tool_name TEXT,
-                timestamp REAL NOT NULL,
-                token_count INTEGER,
-                finish_reason TEXT
-            );
-        """)
-        conn.execute(
-            "INSERT INTO sessions (id, source, started_at) VALUES (?, ?, ?)",
-            ("existing", "cli", 1000.0),
-        )
-        conn.commit()
-        conn.close()
-
-        # Open with SessionDB — should migrate to v9
-        migrated_db = SessionDB(db_path=db_path)
-
-        # Verify migration
-        cursor = migrated_db._conn.execute("SELECT version FROM schema_version")
-        assert cursor.fetchone()[0] == 11
-
-        # Verify title column exists and is NULL for existing sessions
-        session = migrated_db.get_session("existing")
-        assert session is not None
-        assert session["title"] is None
-
-        # Verify api_call_count column was added with default 0
-        cursor = migrated_db._conn.execute(
-            "SELECT api_call_count FROM sessions WHERE id = 'existing'"
-        )
-        assert cursor.fetchone()[0] == 0
-
-        # Verify we can set title on migrated session
-        assert migrated_db.set_session_title("existing", "Migrated Title") is True
-        session = migrated_db.get_session("existing")
-        assert session["title"] == "Migrated Title"
-
-        migrated_db.close()
-
-    def test_reconciliation_adds_missing_columns(self, tmp_path):
-        """Columns present in SCHEMA_SQL but missing from the live table
-        are added by _reconcile_columns regardless of schema_version.
-
-        Regression test: commit a7d78d3b inserted a new v7 migration
-        (reasoning_content) and renumbered the old v7 (api_call_count)
-        to v8.  Users already at the old v7 had schema_version >= 7,
-        so the new v7 block was skipped and reasoning_content was never
-        created — causing 'no such column' on /continue.
+        An explicit, separately validated migration is still required.
         """
         import sqlite3
 
-        db_path = tmp_path / "gap_test.db"
-        conn = sqlite3.connect(str(db_path))
-        # Simulate the old v7 state: api_call_count exists, reasoning_content does NOT
-        conn.executescript("""
-            CREATE TABLE schema_version (version INTEGER NOT NULL);
-            INSERT INTO schema_version (version) VALUES (7);
+        db_path = tmp_path / "legacy-v2.db"
+        with sqlite3.connect(db_path) as conn:
+            conn.executescript("""
+                CREATE TABLE schema_version (version INTEGER NOT NULL);
+                INSERT INTO schema_version VALUES (2);
+                CREATE TABLE sessions (
+                    id TEXT PRIMARY KEY, source TEXT NOT NULL, started_at REAL NOT NULL
+                );
+                INSERT INTO sessions VALUES ('existing', 'cli', 1000.0);
+            """)
+        original = db_path.read_bytes()
+        vault = tmp_path / "vault"
+        vault.mkdir()
 
-            CREATE TABLE sessions (
-                id TEXT PRIMARY KEY,
-                source TEXT NOT NULL,
-                user_id TEXT,
-                model TEXT,
-                model_config TEXT,
-                system_prompt TEXT,
-                parent_session_id TEXT,
-                started_at REAL NOT NULL,
-                ended_at REAL,
-                end_reason TEXT,
-                message_count INTEGER DEFAULT 0,
-                tool_call_count INTEGER DEFAULT 0,
-                input_tokens INTEGER DEFAULT 0,
-                output_tokens INTEGER DEFAULT 0,
-                cache_read_tokens INTEGER DEFAULT 0,
-                cache_write_tokens INTEGER DEFAULT 0,
-                reasoning_tokens INTEGER DEFAULT 0,
-                billing_provider TEXT,
-                billing_base_url TEXT,
-                billing_mode TEXT,
-                estimated_cost_usd REAL,
-                actual_cost_usd REAL,
-                cost_status TEXT,
-                cost_source TEXT,
-                pricing_version TEXT,
-                title TEXT,
-                api_call_count INTEGER DEFAULT 0
-            );
+        db = SessionDB(db_path=db_path, vault_path=vault)
+        assert db.get_session("existing") is None
+        db.create_session("vault-session", "cli")
+        assert db.set_session_title("vault-session", "Vault Title") is True
+        db.close()
 
-            CREATE TABLE messages (
-                id INTEGER PRIMARY KEY AUTOINCREMENT,
-                session_id TEXT NOT NULL,
-                role TEXT NOT NULL,
-                content TEXT,
-                tool_call_id TEXT,
-                tool_calls TEXT,
-                tool_name TEXT,
-                timestamp REAL NOT NULL,
-                token_count INTEGER,
-                finish_reason TEXT,
-                reasoning TEXT,
-                reasoning_details TEXT,
-                codex_reasoning_items TEXT
-            );
-        """)
-        conn.execute(
-            "INSERT INTO sessions (id, source, started_at) VALUES (?, ?, ?)",
-            ("s1", "cli", 1000.0),
+        assert db_path.read_bytes() == original
+        reopened = SessionDB(db_path=db_path, vault_path=vault)
+        assert reopened.get_session("existing") is None
+        assert reopened.get_session("vault-session")["title"] == "Vault Title"
+        reopened.close()
+
+    def test_legacy_v7_schema_gap_is_not_modified_by_vault(self, tmp_path):
+        """A legacy DB missing reasoning_content remains untouched on Vault open."""
+        import sqlite3
+
+        db_path = tmp_path / "legacy-v7.db"
+        with sqlite3.connect(db_path) as conn:
+            conn.executescript("""
+                CREATE TABLE schema_version (version INTEGER NOT NULL);
+                INSERT INTO schema_version VALUES (7);
+                CREATE TABLE messages (
+                    id INTEGER PRIMARY KEY,
+                    session_id TEXT NOT NULL,
+                    role TEXT NOT NULL,
+                    content TEXT,
+                    reasoning TEXT
+                );
+                INSERT INTO messages (session_id, role, content)
+                VALUES ('old', 'assistant', 'legacy message');
+            """)
+        original = db_path.read_bytes()
+        vault = tmp_path / "vault"
+        vault.mkdir()
+
+        db = SessionDB(db_path=db_path, vault_path=vault)
+        assert db.get_messages("old") == []
+        db.create_session("new", "cli")
+        db.append_message(
+            "new", "assistant", "new message", reasoning_content="preserved reasoning"
         )
-        conn.execute(
-            "INSERT INTO messages (session_id, role, content, timestamp) "
-            "VALUES (?, ?, ?, ?)",
-            ("s1", "assistant", "hello", 1001.0),
+        db.close()
+
+        assert db_path.read_bytes() == original
+        reopened = SessionDB(db_path=db_path, vault_path=vault)
+        messages = reopened.get_messages("new")
+        assert len(messages) == 1
+        assert messages[0]["reasoning_content"] == "preserved reasoning"
+        reopened.close()
+
+    def test_vault_reopen_is_idempotent(self, tmp_path):
+        """Reopening a Vault does not rewrite metadata or duplicate messages."""
+        vault = tmp_path / "vault"
+        vault.mkdir()
+        db = SessionDB(vault_path=vault)
+        db.create_session("s1", "cli")
+        db.append_message("s1", "user", "hello")
+        metadata = db.root / "s1" / "metadata.json"
+        transcript = db.root / "s1" / "Transcript.md"
+        before_metadata = metadata.read_bytes()
+        before_transcript = transcript.read_bytes()
+        db.close()
+
+        reopened = SessionDB(vault_path=vault)
+        assert [m["content"] for m in reopened.get_messages("s1")] == ["hello"]
+        assert metadata.read_bytes() == before_metadata
+        assert transcript.read_bytes() == before_transcript
+        reopened.close()
+
+    def test_vault_json_is_source_of_truth(self, tmp_path):
+        """Canonical JSON stores fields that Markdown only projects for inspection."""
+        vault = tmp_path / "vault"
+        vault.mkdir()
+        db = SessionDB(vault_path=vault)
+        db.create_session("s1", "discord", model="test-model")
+        db.append_message(
+            "s1", "assistant", "reply", reasoning_content="internal reasoning"
         )
-        conn.commit()
-        # Verify reasoning_content is absent
-        cols = {r[1] for r in conn.execute("PRAGMA table_info(messages)").fetchall()}
-        assert "reasoning_content" not in cols
-        conn.close()
+        metadata = db.root / "s1" / "metadata.json"
+        transcript = db.root / "s1" / "Transcript.md"
+        raw = json.loads(metadata.read_text(encoding="utf-8"))
+        assert raw["source"] == "discord"
+        assert raw["model"] == "test-model"
+        assert raw["messages"][0]["reasoning_content"] == "internal reasoning"
+        assert "reply" in transcript.read_text(encoding="utf-8")
+        db.close()
 
-        # Open with SessionDB — reconciliation should add the missing column
-        migrated_db = SessionDB(db_path=db_path)
-
-        msg_cols = {
-            r[1]
-            for r in migrated_db._conn.execute("PRAGMA table_info(messages)").fetchall()
-        }
-        assert "reasoning_content" in msg_cols
-
-        # The query that used to crash must now work
-        cursor = migrated_db._conn.execute(
-            "SELECT role, content, reasoning, reasoning_content, "
-            "reasoning_details, codex_reasoning_items "
-            "FROM messages WHERE session_id = ?",
-            ("s1",),
-        )
-        row = cursor.fetchone()
-        assert row is not None
-        assert row[0] == "assistant"
-        assert row[3] is None  # reasoning_content NULL for old rows
-
-        migrated_db.close()
-
-    def test_reconciliation_is_idempotent(self, tmp_path):
-        """Opening the same database twice doesn't error or duplicate columns."""
-        db_path = tmp_path / "idempotent.db"
-        db1 = SessionDB(db_path=db_path)
-        cols1 = {r[1] for r in db1._conn.execute("PRAGMA table_info(messages)").fetchall()}
-        db1.close()
-
-        db2 = SessionDB(db_path=db_path)
-        cols2 = {r[1] for r in db2._conn.execute("PRAGMA table_info(messages)").fetchall()}
-        db2.close()
-
-        assert cols1 == cols2
-
-    def test_schema_sql_is_source_of_truth(self, db):
-        """Every column in SCHEMA_SQL exists in the live database.
-
-        This is the architectural invariant: SCHEMA_SQL declares the
-        desired schema, _reconcile_columns ensures it matches reality.
-        """
-        from hermes_state import SCHEMA_SQL
-
-        expected = SessionDB._parse_schema_columns(SCHEMA_SQL)
-        for table_name, declared_cols in expected.items():
-            live_cols = {
-                r[1]
-                for r in db._conn.execute(
-                    f'PRAGMA table_info("{table_name}")'
-                ).fetchall()
-            }
-            for col_name in declared_cols:
-                assert col_name in live_cols, (
-                    f"Column {col_name} declared in SCHEMA_SQL for {table_name} "
-                    f"but missing from live DB. Live columns: {live_cols}"
-                )
+        reopened = SessionDB(vault_path=vault)
+        assert reopened.get_session("s1")["model"] == "test-model"
+        assert reopened.get_messages("s1")[0]["reasoning_content"] == "internal reasoning"
+        reopened.close()
 
 
 class TestTitleUniqueness:
