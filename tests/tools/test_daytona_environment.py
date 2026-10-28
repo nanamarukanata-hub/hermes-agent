@@ -299,8 +299,16 @@ class TestExecute:
         assert "print" in cmd
         assert "hi" in cmd
 
-    def test_custom_cwd_in_command_wrapper(self, make_env):
-        """CWD is handled by _wrap_command() in the command string, not as a kwarg."""
+    @pytest.mark.parametrize(
+        ("cwd", "expected_cd"),
+        [
+            ("/tmp", "builtin cd -- /tmp || exit 126"),
+            ("/tmp/my project", "builtin cd -- '/tmp/my project' || exit 126"),
+            ("~/my project", "builtin cd -- $HOME/'my project' || exit 126"),
+        ],
+    )
+    def test_custom_cwd_in_command_wrapper(self, make_env, cwd, expected_cd):
+        """CWD is shell-quoted in _wrap_command(), not passed as an SDK kwarg."""
         sb = _make_sandbox()
         sb.process.exec.side_effect = [
             _make_exec_response(result="/root"),
@@ -310,11 +318,11 @@ class TestExecute:
         sb.state = "started"
         env = make_env(sandbox=sb)
 
-        env.execute("pwd", cwd="/tmp")
-        # CWD should be embedded in the command string via _wrap_command
+        env.execute("pwd", cwd=cwd)
+        # Use the safe builtin form and preserve spaces/tilde expansion.
         call_args = sb.process.exec.call_args_list[-1]
         cmd = call_args[0][0]
-        assert "cd /tmp" in cmd
+        assert expected_cd in cmd
         # CWD should NOT be passed as a kwarg to exec
         assert "cwd" not in call_args[1]
 
