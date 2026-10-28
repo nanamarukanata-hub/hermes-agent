@@ -1,5 +1,6 @@
 """Unit tests for the Daytona cloud sandbox environment backend."""
 
+import shlex
 import threading
 from types import SimpleNamespace
 from unittest.mock import MagicMock, patch, PropertyMock
@@ -322,7 +323,11 @@ class TestExecute:
         # Use the safe builtin form and preserve spaces/tilde expansion.
         call_args = sb.process.exec.call_args_list[-1]
         cmd = call_args[0][0]
-        assert expected_cd in cmd
+        # Daytona wraps the script in bash -c and quotes it a second time.
+        # Inspect the decoded script, not its outer shell-escaped representation.
+        argv = shlex.split(cmd)
+        assert argv[:2] == ["bash", "-c"]
+        assert expected_cd in argv[2]
         # CWD should NOT be passed as a kwarg to exec
         assert "cwd" not in call_args[1]
 
