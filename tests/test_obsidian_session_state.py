@@ -32,6 +32,24 @@ class ObsidianStateTests(unittest.TestCase):
                 expected = "A" * 60 + ("..." if length > 60 else "")
                 self.assertEqual(preview, expected)
 
+    def test_rich_session_preview_collapses_whitespace_after_restart(self):
+        self.db.create_session("multiline", "cli")
+        self.db.append_message(
+            "multiline", "user", "Line one\\nLine two\\tLine three"
+        )
+        self.db.create_session("long_multiline", "cli")
+        self.db.append_message(
+            "long_multiline", "user", "A" * 58 + "\\n" + "BB"
+        )
+
+        reopened = SessionDB()
+        previews = {
+            row["id"]: row["preview"]
+            for row in reopened.list_sessions_rich(limit=20)
+        }
+        self.assertEqual(previews["multiline"], "Line one Line two Line three")
+        self.assertEqual(previews["long_multiline"], "A" * 58 + " B...")
+
     def test_no_vault_environment_fails_closed(self):
         with patch.dict(os.environ, {"HERMES_OBSIDIAN_VAULT": ""}):
             with self.assertRaises(RuntimeError):
