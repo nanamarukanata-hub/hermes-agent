@@ -2650,14 +2650,8 @@ class TestFTS5ToolCallIndexing:
         results = db.search_messages("UNIQUEFUNCNAME")
         assert len(results) == 1
 
-    def test_delete_message_row_does_not_crash(self, db):
-        """DELETE on messages must not raise when FTS rows reference tool fields.
-
-        Previously the messages_fts_delete trigger passed old.content to the
-        FTS5 delete-command but the inserted row was the concatenation of
-        content || tool_name || tool_calls, so FTS5 rejected the delete with
-        'SQL logic error' and every session delete path broke.
-        """
+    def test_clearing_tool_call_messages_removes_search_hits(self, db):
+        """Vault search reads current JSON; clearing messages leaves no stale index."""
         db.create_session(session_id="s1", source="cli")
         db.append_message(
             "s1", role="assistant", content="hello",
@@ -2668,129 +2662,61 @@ class TestFTS5ToolCallIndexing:
                 "function": {"name": "web_search", "arguments": '{"q": "x"}'},
             }],
         )
-        # end_session + end-time prune path would exercise DELETE; hit the
-        # row directly through the write helper to keep the regression focused.
-        def _delete(conn):
-            conn.execute("DELETE FROM messages WHERE session_id = ?", ("s1",))
-        db._execute_write(_delete)  # must not raise
-
+        assert len(db.search_messages("web_search")) == 1
+        db.clear_messages("s1")
         assert db.search_messages("hello") == []
         assert db.search_messages("web_search") == []
+        assert db.get_messages("s1") == []
 
-    def test_update_message_reindexes_tool_fields(self, db):
-        """UPDATE must refresh the FTS row so old tokens drop out and new tokens appear."""
+    def test_replacing_message_refreshes_tool_fields(self, db):
+        """Replacement updates the Vault JSON search corpus without an FTS table."""
         db.create_session(session_id="s1", source="cli")
         db.append_message(
-            "s1", role="assistant", content="",
-            tool_name="ORIGINALTOOL",
+            "s1", role="assistant", content="", tool_name="ORIGINALTOOL",
         )
         assert len(db.search_messages("ORIGINALTOOL")) == 1
 
-        def _update(conn):
-            conn.execute(
-                "UPDATE messages SET tool_name = ? WHERE session_id = ?",
-                ("RENAMEDTOOL", "s1"),
-            )
-        db._execute_write(_update)
+        db.replace_messages("s1", [{
+            "role": "assistant", "content": "", "tool_name": "RENAMEDTOOL",
+        }])
 
         assert db.search_messages("ORIGINALTOOL") == []
         assert len(db.search_messages("RENAMEDTOOL")) == 1
 
 
-class TestFTS5ToolCallMigration:
-    """v11 migration: pre-existing state.db with old external-content FTS tables
-    must be re-indexed so tool_name / tool_calls become searchable after upgrade."""
+class TestLegacySQLiteToolCallData:
+    """Legacy SQLite data must remain intact until explicit migration is built."""
 
-    def test_v10_to_v11_upgrade_backfills_tool_fields(self, tmp_path):
-        """Simulate an existing user: build a v10-shaped DB by hand, insert a
-        row with tool_calls, then open via SessionDB (which runs migrations).
-        After upgrade, the tool_calls token must be searchable."""
+    def test_legacy_sqlite_tool_calls_are_not_auto_imported(self, tmp_path):
         import sqlite3
 
         db_path = tmp_path / "legacy.db"
-
-        # Build the pre-v11 schema by hand: external-content FTS tables +
-        # old triggers that only reference new.content.
         conn = sqlite3.connect(str(db_path))
-        conn.executescript("""
-            CREATE TABLE schema_version (version INTEGER NOT NULL);
-            INSERT INTO schema_version (version) VALUES (10);
-
-            CREATE TABLE sessions (
-                id TEXT PRIMARY KEY,
-                source TEXT,
-                started_at REAL,
-                ended_at REAL,
-                title TEXT,
-                parent_session_id TEXT,
-                message_count INTEGER DEFAULT 0,
-                tool_call_count INTEGER DEFAULT 0,
-                api_call_count INTEGER DEFAULT 0
-            );
-            CREATE TABLE messages (
-                id INTEGER PRIMARY KEY,
-                session_id TEXT NOT NULL,
-                timestamp REAL NOT NULL,
-                role TEXT NOT NULL,
-                content TEXT,
-                tool_name TEXT,
-                tool_calls TEXT,
-                tool_call_id TEXT,
-                token_count INTEGER,
-                finish_reason TEXT,
-                reasoning TEXT,
-                reasoning_content TEXT,
-                reasoning_details TEXT,
-                codex_reasoning_items TEXT,
-                codex_message_items TEXT
-            );
-
-            CREATE VIRTUAL TABLE messages_fts USING fts5(
-                content, content=messages, content_rowid=id
-            );
-            CREATE TRIGGER messages_fts_insert AFTER INSERT ON messages BEGIN
-                INSERT INTO messages_fts(rowid, content) VALUES (new.id, new.content);
-            END;
-
-            CREATE VIRTUAL TABLE messages_fts_trigram USING fts5(
-                content, content=messages, content_rowid=id, tokenize='trigram'
-            );
-            CREATE TRIGGER messages_fts_trigram_insert AFTER INSERT ON messages BEGIN
-                INSERT INTO messages_fts_trigram(rowid, content) VALUES (new.id, new.content);
-            END;
-        """)
         conn.execute(
-            "INSERT INTO sessions (id, source, started_at) VALUES (?, ?, ?)",
-            ("s1", "cli", time.time()),
+            "CREATE TABLE messages (content TEXT, tool_name TEXT, tool_calls TEXT)"
         )
         conn.execute(
-            "INSERT INTO messages (session_id, timestamp, role, content, tool_name, tool_calls) "
-            "VALUES (?, ?, ?, ?, ?, ?)",
-            ("s1", time.time(), "assistant", "", "LEGACYTOOL",
-             '{"function":{"name":"web_search","arguments":"{\\"q\\":\\"LEGACYARG\\"}"}}'),
+            "INSERT INTO messages VALUES (?, ?, ?)",
+            ("", "LEGACYTOOL", '{"function":{"name":"LEGACYARG"}}'),
         )
         conn.commit()
-
-        # Verify the legacy FTS rows don't contain the tool tokens yet.
-        legacy_hits = conn.execute(
-            "SELECT rowid FROM messages_fts WHERE messages_fts MATCH 'LEGACYTOOL'"
-        ).fetchall()
-        assert legacy_hits == [], "sanity: legacy FTS must NOT contain tool_name"
         conn.close()
+        original_bytes = db_path.read_bytes()
 
-        # Now open via SessionDB — migration runs.
-        session_db = SessionDB(db_path=db_path)
+        vault = tmp_path / "vault"
+        session_db = SessionDB(db_path=db_path, vault_path=vault)
         try:
-            assert len(session_db.search_messages("LEGACYTOOL")) == 1, \
-                "v11 migration must backfill tool_name into FTS"
-            assert len(session_db.search_messages("LEGACYARG")) == 1, \
-                "v11 migration must backfill tool_calls JSON into FTS"
-            # schema_version bumped
-            row = session_db._conn.execute(
-                "SELECT version FROM schema_version LIMIT 1"
-            ).fetchone()
-            version = row["version"] if hasattr(row, "keys") else row[0]
-            assert version == 11
+            assert session_db.search_messages("LEGACYTOOL") == []
+            assert session_db.search_messages("LEGACYARG") == []
+            session_db.create_session(session_id="s1", source="cli")
+            session_db.append_message(
+                "s1", role="assistant", content="", tool_name="VAULTTOOL",
+                tool_calls=[{"function": {"name": "VAULTARG"}}],
+            )
+            assert len(session_db.search_messages("VAULTTOOL")) == 1
+            assert len(session_db.search_messages("VAULTARG")) == 1
         finally:
             session_db.close()
 
+        assert db_path.read_bytes() == original_bytes
+        assert not list(vault.rglob("*.db"))
