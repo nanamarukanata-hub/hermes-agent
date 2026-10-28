@@ -496,7 +496,8 @@ class SessionDB:
                 # conversation's chronology and lineage for stable ordering.
                 row["_lineage_root_id"] = root_id
                 row["started_at"] = root_started_at
-            row["preview"] = first[:60] + ("..." if len(first) > 60 else "")
+            preview_text = " ".join(first.split())
+            row["preview"] = preview_text[:60] + ("..." if len(preview_text) > 60 else "")
             row["last_active"] = max((m.get("timestamp", 0) for m in messages), default=s["started_at"])
             found.append(row)
         found.sort(key=lambda s: (s["last_active"] if order_by_last_active else s["started_at"]), reverse=True)
