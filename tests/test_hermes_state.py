@@ -2071,25 +2071,28 @@ class TestListSessionsRich:
         assert "root" in ids
 
     def test_compression_child_still_hidden(self, db):
-        """Compression continuation sessions remain hidden (parent ended with 'compression')."""
+        """A post-compression continuation is hidden without tip projection."""
         import time as _time
+
         t0 = _time.time()
         db.create_session("root", "cli")
-        db._conn.execute("UPDATE sessions SET started_at=? WHERE id=?", (t0, "root"))
-        db._conn.execute(
-            "UPDATE sessions SET ended_at=?, end_reason='compression' WHERE id=?",
-            (t0 + 1800, "root"),
-        )
-        db._conn.commit()
+        db._edit("root", lambda item: item.update(
+            started_at=t0, ended_at=t0 + 1800, end_reason="compression"
+        ))
         db.create_session("continuation", "cli", parent_session_id="root")
-        db._conn.execute(
-            "UPDATE sessions SET started_at=? WHERE id=?", (t0 + 1801, "continuation")
+        db._edit(
+            "continuation",
+            lambda item: item.update(started_at=t0 + 1801),
         )
-        db._conn.commit()
 
-        sessions = db.list_sessions_rich(project_compression_tips=False)
-        ids = [s["id"] for s in sessions]
-        assert "continuation" not in ids, "Compression continuation should stay hidden"
+        reopened = type(db)(vault_path=db.vault)
+        ids = [
+            s["id"] for s in reopened.list_sessions_rich(
+                project_compression_tips=False
+            )
+        ]
+        assert "continuation" not in ids
+        assert "root" in ids
 
 
 class TestCompressionChainProjection:
@@ -2098,55 +2101,46 @@ class TestCompressionChainProjection:
     """
 
     def _build_compression_chain(self, db, t0: float):
-        """Helper: builds root -> delegate -> compression-child -> tip chain.
-
-        Returns (root_id, delegate_id, mid_id, tip_id).
-        """
-        import time as _time
-        # Root that gets compressed
+        """Build root -> delegate and root -> mid -> tip in the Vault."""
         db.create_session("root1", "cli")
-        db._conn.execute("UPDATE sessions SET started_at=? WHERE id=?", (t0, "root1"))
+        db._edit("root1", lambda item: item.update(started_at=t0))
         db.append_message("root1", "user", "help me refactor auth")
 
-        # Delegate subagent spawned while root1 was live (before it ended)
+        # This delegate predates the parent's compression.
         db.create_session("delegate1", "cli", parent_session_id="root1")
-        db._conn.execute(
-            "UPDATE sessions SET started_at=?, ended_at=? WHERE id=?",
-            (t0 + 600, t0 + 650, "delegate1"),
+        db._edit(
+            "delegate1",
+            lambda item: item.update(started_at=t0 + 600, ended_at=t0 + 650),
         )
         db.append_message("delegate1", "user", "delegate task")
 
-        # root1 compressed at t0+1800
         t_compress_root = t0 + 1800
-        db._conn.execute(
-            "UPDATE sessions SET ended_at=?, end_reason=? WHERE id=?",
-            (t_compress_root, "compression", "root1"),
+        db._edit(
+            "root1",
+            lambda item: item.update(
+                ended_at=t_compress_root, end_reason="compression"
+            ),
         )
 
-        # Continuation mid created 1s after parent ended
         db.create_session("mid1", "cli", parent_session_id="root1")
-        db._conn.execute(
-            "UPDATE sessions SET started_at=? WHERE id=?",
-            (t_compress_root + 1, "mid1"),
+        db._edit(
+            "mid1", lambda item: item.update(started_at=t_compress_root + 1)
         )
         db.append_message("mid1", "user", "continuing")
 
-        # mid1 also compressed
         t_compress_mid = t_compress_root + 1800
-        db._conn.execute(
-            "UPDATE sessions SET ended_at=?, end_reason=? WHERE id=?",
-            (t_compress_mid, "compression", "mid1"),
+        db._edit(
+            "mid1",
+            lambda item: item.update(
+                ended_at=t_compress_mid, end_reason="compression"
+            ),
         )
 
-        # Tip — latest continuation
         db.create_session("tip1", "cli", parent_session_id="mid1")
-        db._conn.execute(
-            "UPDATE sessions SET started_at=? WHERE id=?",
-            (t_compress_mid + 1, "tip1"),
+        db._edit(
+            "tip1", lambda item: item.update(started_at=t_compress_mid + 1)
         )
         db.append_message("tip1", "user", "latest message")
-
-        db._conn.commit()
         return ("root1", "delegate1", "mid1", "tip1")
 
     def test_get_compression_tip_walks_full_chain(self, db):
@@ -2180,7 +2174,6 @@ class TestCompressionChainProjection:
         # Add an uncompressed root for comparison.
         db.create_session("solo", "cli")
         db.append_message("solo", "user", "standalone")
-        db._conn.commit()
 
         sessions = db.list_sessions_rich(source="cli", limit=20)
         ids = [s["id"] for s in sessions]
@@ -2230,9 +2223,8 @@ class TestCompressionChainProjection:
         # if we used tip.started_at, but below if we correctly use root.started_at.
         t_between = t0 + 120  # between root1 and its compression
         db.create_session("newer", "cli")
-        db._conn.execute("UPDATE sessions SET started_at=? WHERE id=?", (t_between, "newer"))
+        db._edit("newer", lambda item: item.update(started_at=t_between))
         db.append_message("newer", "user", "newer session started after root1")
-        db._conn.commit()
 
         sessions = db.list_sessions_rich(source="cli", limit=20)
         ids_in_order = [s["id"] for s in sessions]
@@ -2248,12 +2240,9 @@ class TestCompressionChainProjection:
         import time as _time
         t0 = _time.time() - 100
         db.create_session("orphan", "cli")
-        db._conn.execute("UPDATE sessions SET started_at=? WHERE id=?", (t0, "orphan"))
-        db._conn.execute(
-            "UPDATE sessions SET ended_at=?, end_reason=? WHERE id=?",
-            (t0 + 10, "compression", "orphan"),
-        )
-        db._conn.commit()
+        db._edit("orphan", lambda item: item.update(
+            started_at=t0, ended_at=t0 + 10, end_reason="compression"
+        ))
 
         sessions = db.list_sessions_rich(source="cli", limit=10)
         ids = [s["id"] for s in sessions]
