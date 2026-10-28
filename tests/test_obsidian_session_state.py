@@ -20,6 +20,47 @@ class ObsidianStateTests(unittest.TestCase):
         self.patch.stop()
         self.temp.cleanup()
 
+    def test_tool_call_arguments_and_function_names_search_after_restart(self):
+        self.db.create_session("tool_search", "discord")
+        self.db.append_message(
+            "tool_search", "assistant", "",
+            tool_calls=[{
+                "id": "call-1",
+                "type": "function",
+                "function": {
+                    "name": "VAULTFUNCTIONTOKEN",
+                    "arguments": '{"query": "VAULTARGTOKEN", "place": "東京検索語"}',
+                },
+            }],
+        )
+
+        reopened = SessionDB()
+        for token in ("VAULTFUNCTIONTOKEN", "VAULTARGTOKEN", "東京検索語"):
+            with self.subTest(token=token):
+                hits = reopened.search_messages(token)
+                self.assertEqual(len(hits), 1)
+                self.assertEqual(hits[0]["session_id"], "tool_search")
+
+    def test_replaced_tool_calls_do_not_leave_stale_search_hits(self):
+        self.db.create_session("replace_tools", "cli")
+        self.db.append_message(
+            "replace_tools", "assistant", "",
+            tool_calls=[{"function": {"name": "OLDVAULTTOOL", "arguments": "{}"}}],
+        )
+        self.assertEqual(len(self.db.search_messages("OLDVAULTTOOL")), 1)
+
+        self.db.replace_messages("replace_tools", [{
+            "role": "assistant",
+            "content": "",
+            "tool_calls": [{"function": {
+                "name": "NEWVAULTTOOL", "arguments": '{"q":"NEWVAULTARG"}',
+            }}],
+        }])
+        reopened = SessionDB()
+        self.assertEqual(reopened.search_messages("OLDVAULTTOOL"), [])
+        self.assertEqual(len(reopened.search_messages("NEWVAULTTOOL")), 1)
+        self.assertEqual(len(reopened.search_messages("NEWVAULTARG")), 1)
+
     def test_rich_session_preview_truncation_boundary(self):
         for length in (60, 61, 100):
             with self.subTest(length=length):
