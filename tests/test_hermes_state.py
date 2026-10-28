@@ -2704,6 +2704,7 @@ class TestLegacySQLiteToolCallData:
         original_bytes = db_path.read_bytes()
 
         vault = tmp_path / "vault"
+        vault.mkdir()  # The backend requires an existing Obsidian Vault root.
         session_db = SessionDB(db_path=db_path, vault_path=vault)
         try:
             assert session_db.search_messages("LEGACYTOOL") == []
