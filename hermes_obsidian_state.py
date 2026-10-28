@@ -335,14 +335,40 @@ class SessionDB:
         raise RuntimeError("No available lineage title")
 
     def get_compression_tip(self, session_id):
+        """Follow only genuine post-compression continuations, not delegates.
+
+        A child created while its parent is active is a delegate, even when
+        its source is "cli". Branched children are separate conversations.
+        """
+        sessions = {s["id"]: s for s in self._items()}
+        children_by_parent = {}
+        for item in sessions.values():
+            parent_id = item.get("parent_session_id")
+            if parent_id:
+                children_by_parent.setdefault(parent_id, []).append(item)
+
         seen = set()
         sid = session_id
         while sid not in seen:
             seen.add(sid)
-            children = [s for s in self._items() if s.get("parent_session_id") == sid
-                        and s.get("source") != "subagent"]
-            if not children: return sid
-            sid = max(children, key=lambda s: s["started_at"])["id"]
+            parent = sessions.get(sid)
+            if not parent or parent.get("end_reason") != "compression":
+                break
+            ended_at = parent.get("ended_at")
+            if ended_at is None:
+                break
+            children = [
+                child for child in children_by_parent.get(sid, [])
+                if child.get("source") != "subagent"
+                and child.get("started_at") is not None
+                and child["started_at"] >= ended_at
+                and child["id"] not in seen
+            ]
+            if not children:
+                break
+            sid = max(children, key=lambda child: (
+                child["started_at"], child["id"]
+            ))["id"]
         return sid
 
     def append_message(self, session_id, role, content=None, tool_name=None,
