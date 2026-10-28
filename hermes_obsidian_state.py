@@ -483,12 +483,19 @@ class SessionDB:
             if source and s["source"] != source: continue
             if exclude_sources and s["source"] in exclude_sources: continue
             if not include_children and s.get("parent_session_id"): continue
+            root_id = s["id"]
+            root_started_at = s["started_at"]
             if project_compression_tips:
-                tip = self.get_compression_tip(s["id"])
+                tip = self.get_compression_tip(root_id)
                 s = self._load(tip) or s
             messages = s["messages"]
             first = next((str(m.get("content", "")) for m in messages if m["role"] == "user"), "")
             row = {k: v for k, v in s.items() if k != "messages"}
+            if s["id"] != root_id:
+                # Display the live continuation but retain the original
+                # conversation's chronology and lineage for stable ordering.
+                row["_lineage_root_id"] = root_id
+                row["started_at"] = root_started_at
             row["preview"] = first[:60] + ("..." if len(first) > 60 else "")
             row["last_active"] = max((m.get("timestamp", 0) for m in messages), default=s["started_at"])
             found.append(row)
