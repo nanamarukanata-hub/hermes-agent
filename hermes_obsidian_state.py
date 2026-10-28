@@ -557,7 +557,16 @@ class SessionDB:
                 if role_filter and msg["role"] not in role_filter: continue
                 content = str(msg.get("content") or "")
                 folded_content = content.casefold()
-                haystack = (content + " " + str(msg.get("tool_name", ""))).casefold()
+                # Search persisted tool-call arguments and function names as well
+                # as visible content; no SQLite/FTS index is needed.
+                tool_calls = msg.get("tool_calls")
+                serialized_calls = (
+                    json.dumps(tool_calls, ensure_ascii=False, default=str)
+                    if tool_calls is not None else ""
+                )
+                haystack = " ".join((
+                    content, str(msg.get("tool_name") or ""), serialized_calls,
+                )).casefold()
                 if not any(part in haystack for part in folded_phrases): continue
                 # Include the actual match in a bounded preview, including
                 # CJK substrings far beyond the first 120 characters.
