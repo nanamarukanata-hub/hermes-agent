@@ -1484,154 +1484,58 @@ class TestSchemaInit:
         assert "## user" in transcript
         assert "Japanese: 日本語" in transcript
 
-    def test_topic_mode_schema_is_not_auto_migrated_on_open(self, tmp_path):
-        """Opening an old DB should not add topic-mode columns until /topic opts in.
+    def test_legacy_sqlite_path_is_not_opened_or_migrated(self, tmp_path):
+        """A legacy db_path must never trigger SQLite I/O or mutate old data."""
+        legacy_db = tmp_path / "legacy.db"
+        legacy_bytes = b"legacy SQLite fixture - must stay untouched"
+        legacy_db.write_bytes(legacy_bytes)
+        vault = tmp_path / "vault"
+        vault.mkdir()
 
-        The gateway must remain rollback-safe: simply upgrading Hermes and starting
-        the old bot should not eagerly mutate the state DB for this feature.
-        """
-        old_db = tmp_path / "old.db"
-        import sqlite3
-
-        conn = sqlite3.connect(old_db)
-        conn.executescript(
-            """
-            CREATE TABLE schema_version (version INTEGER NOT NULL);
-            INSERT INTO schema_version VALUES (11);
-            CREATE TABLE sessions (
-                id TEXT PRIMARY KEY,
-                source TEXT NOT NULL,
-                user_id TEXT,
-                model TEXT,
-                model_config TEXT,
-                system_prompt TEXT,
-                parent_session_id TEXT,
-                started_at REAL NOT NULL,
-                ended_at REAL,
-                end_reason TEXT,
-                message_count INTEGER DEFAULT 0,
-                tool_call_count INTEGER DEFAULT 0,
-                input_tokens INTEGER DEFAULT 0,
-                output_tokens INTEGER DEFAULT 0,
-                cache_read_tokens INTEGER DEFAULT 0,
-                cache_write_tokens INTEGER DEFAULT 0,
-                reasoning_tokens INTEGER DEFAULT 0,
-                billing_provider TEXT,
-                billing_base_url TEXT,
-                billing_mode TEXT,
-                estimated_cost_usd REAL,
-                actual_cost_usd REAL,
-                cost_status TEXT,
-                cost_source TEXT,
-                pricing_version TEXT,
-                title TEXT,
-                api_call_count INTEGER DEFAULT 0,
-                FOREIGN KEY (parent_session_id) REFERENCES sessions(id)
-            );
-            CREATE TABLE messages (
-                id INTEGER PRIMARY KEY AUTOINCREMENT,
-                session_id TEXT NOT NULL REFERENCES sessions(id),
-                role TEXT NOT NULL,
-                content TEXT,
-                tool_call_id TEXT,
-                tool_calls TEXT,
-                tool_name TEXT,
-                timestamp REAL NOT NULL,
-                token_count INTEGER,
-                finish_reason TEXT,
-                reasoning TEXT,
-                reasoning_content TEXT,
-                reasoning_details TEXT,
-                codex_reasoning_items TEXT,
-                codex_message_items TEXT
-            );
-            """
-        )
-        conn.close()
-
-        db = SessionDB(db_path=old_db)
-        cursor = db._conn.execute("PRAGMA table_info(sessions)")
-        columns = {row[1] for row in cursor.fetchall()}
-        assert {"chat_id", "chat_type", "thread_id", "session_key"}.isdisjoint(columns)
+        db = SessionDB(db_path=legacy_db, vault_path=vault)
+        assert db.db_path == db.root
+        assert db.root.is_relative_to(vault)
+        assert not (db.root / "state_meta.json").exists()
+        assert db.get_telegram_topic_binding("208214988", "17585") is None
+        assert not (db.root / "state_meta.json").exists()
+        db.create_session("vault-only", "telegram", user_id="208214988")
         db.close()
 
-    def test_apply_telegram_topic_migration_creates_topic_tables_explicitly(self, tmp_path):
-        """The /topic opt-in path owns the DB migration for Telegram topic mode."""
-        old_db = tmp_path / "old.db"
-        import sqlite3
+        reopened = SessionDB(db_path=legacy_db, vault_path=vault)
+        assert reopened.get_session("vault-only")["user_id"] == "208214988"
+        assert legacy_db.read_bytes() == legacy_bytes
+        reopened.close()
 
-        conn = sqlite3.connect(old_db)
-        conn.executescript(
-            """
-            CREATE TABLE schema_version (version INTEGER NOT NULL);
-            INSERT INTO schema_version VALUES (11);
-            CREATE TABLE sessions (
-                id TEXT PRIMARY KEY,
-                source TEXT NOT NULL,
-                user_id TEXT,
-                model TEXT,
-                model_config TEXT,
-                system_prompt TEXT,
-                parent_session_id TEXT,
-                started_at REAL NOT NULL,
-                ended_at REAL,
-                end_reason TEXT,
-                message_count INTEGER DEFAULT 0,
-                tool_call_count INTEGER DEFAULT 0,
-                input_tokens INTEGER DEFAULT 0,
-                output_tokens INTEGER DEFAULT 0,
-                cache_read_tokens INTEGER DEFAULT 0,
-                cache_write_tokens INTEGER DEFAULT 0,
-                reasoning_tokens INTEGER DEFAULT 0,
-                billing_provider TEXT,
-                billing_base_url TEXT,
-                billing_mode TEXT,
-                estimated_cost_usd REAL,
-                actual_cost_usd REAL,
-                cost_status TEXT,
-                cost_source TEXT,
-                pricing_version TEXT,
-                title TEXT,
-                api_call_count INTEGER DEFAULT 0,
-                FOREIGN KEY (parent_session_id) REFERENCES sessions(id)
-            );
-            CREATE TABLE messages (
-                id INTEGER PRIMARY KEY AUTOINCREMENT,
-                session_id TEXT NOT NULL REFERENCES sessions(id),
-                role TEXT NOT NULL,
-                content TEXT,
-                tool_call_id TEXT,
-                tool_calls TEXT,
-                tool_name TEXT,
-                timestamp REAL NOT NULL,
-                token_count INTEGER,
-                finish_reason TEXT,
-                reasoning TEXT,
-                reasoning_content TEXT,
-                reasoning_details TEXT,
-                codex_reasoning_items TEXT,
-                codex_message_items TEXT
-            );
-            """
+    def test_apply_telegram_topic_migration_is_vault_noop(self, tmp_path):
+        """The legacy migration API must not rewrite existing Vault state."""
+        vault = tmp_path / "vault"
+        vault.mkdir()
+        db = SessionDB(vault_path=vault)
+        db.create_session("topic-session", "telegram", user_id="208214988")
+        db.enable_telegram_topic_mode("208214988", "208214988")
+        db.bind_telegram_topic(
+            chat_id="208214988",
+            thread_id="17585",
+            user_id="208214988",
+            session_key="telegram:dm:208214988:thread:17585",
+            session_id="topic-session",
         )
-        conn.close()
-
-        db = SessionDB(db_path=old_db)
-        db.apply_telegram_topic_migration()
-
-        tables = {
-            row[0]
-            for row in db._conn.execute(
-                "SELECT name FROM sqlite_master WHERE type = 'table'"
-            ).fetchall()
-        }
-        assert "telegram_dm_topic_mode" in tables
-        assert "telegram_dm_topic_bindings" in tables
-        assert db.get_meta("telegram_dm_topic_schema_version") == "2"
+        state_file = db.root / "state_meta.json"
+        before = state_file.read_bytes()
+        assert db.apply_telegram_topic_migration() is None
+        assert state_file.read_bytes() == before
         db.close()
 
-    def test_telegram_topic_binding_roundtrip_requires_explicit_schema(self, tmp_path):
-        db = SessionDB(db_path=tmp_path / "state.db")
+        reopened = SessionDB(vault_path=vault)
+        assert reopened.is_telegram_topic_mode_enabled("208214988", "208214988")
+        assert reopened.get_telegram_topic_binding("208214988", "17585")["session_id"] == "topic-session"
+        reopened.close()
+
+    def test_telegram_topic_binding_roundtrip_persists_vault_metadata(self, tmp_path):
+        """Bindings are stored and restored in Vault JSON, not SQL tables."""
+        vault = tmp_path / "vault"
+        vault.mkdir()
+        db = SessionDB(vault_path=vault)
         db.create_session(
             session_id="topic-session",
             source="telegram",
@@ -1655,8 +1559,15 @@ class TestSchemaInit:
         assert binding["user_id"] == "208214988"
         assert binding["session_key"] == "telegram:dm:208214988:thread:17585"
         assert binding["session_id"] == "topic-session"
-        assert db.get_meta("telegram_dm_topic_schema_version") == "2"
+        state_file = db.root / "state_meta.json"
+        state = json.loads(state_file.read_text(encoding="utf-8"))
+        assert state["telegram_topic_bindings"]["208214988"]["17585"]["session_id"] == "topic-session"
+        assert not any(p.suffix in (".db", ".sqlite", ".sqlite3") for p in vault.rglob("*"))
         db.close()
+
+        reopened = SessionDB(vault_path=vault)
+        assert reopened.get_telegram_topic_binding("208214988", "17585") == binding
+        reopened.close()
 
     def test_telegram_topic_binding_refuses_to_relink_session_to_another_topic(self, tmp_path):
         db = SessionDB(db_path=tmp_path / "state.db")
