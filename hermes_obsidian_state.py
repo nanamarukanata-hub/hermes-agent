@@ -8,6 +8,7 @@ from __future__ import annotations
 
 import fcntl
 import json
+import math
 import os
 import re
 import shutil
@@ -826,7 +827,14 @@ class SessionDB:
 
     def maybe_auto_prune_and_vacuum(self, retention_days=90, min_interval_hours=24,
                                     vacuum=True, sessions_dir=None):
-        last = float(self.get_meta("last_auto_prune") or 0)
+        # A corrupt or non-finite Vault marker must not disable maintenance.
+        # Treat it as an absent marker and replace it after a successful pass.
+        try:
+            last = float(self.get_meta("last_auto_prune") or 0)
+        except (TypeError, ValueError, OverflowError):
+            last = 0.0
+        if not math.isfinite(last):
+            last = 0.0
         if time.time() - last < min_interval_hours * 3600:
             return {"skipped": True, "pruned": 0, "vacuumed": False}
         count = self.prune_sessions(retention_days, sessions_dir=sessions_dir)
