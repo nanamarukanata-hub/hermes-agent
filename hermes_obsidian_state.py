@@ -489,7 +489,7 @@ class SessionDB:
             messages = s["messages"]
             first = next((str(m.get("content", "")) for m in messages if m["role"] == "user"), "")
             row = {k: v for k, v in s.items() if k != "messages"}
-            row["preview"] = first[:60]
+            row["preview"] = first[:60] + ("..." if len(first) > 60 else "")
             row["last_active"] = max((m.get("timestamp", 0) for m in messages), default=s["started_at"])
             found.append(row)
         found.sort(key=lambda s: (s["last_active"] if order_by_last_active else s["started_at"]), reverse=True)
