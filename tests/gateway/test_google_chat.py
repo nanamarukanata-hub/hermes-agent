@@ -155,8 +155,7 @@ def adapter(tmp_path):
     """Build an adapter with its loop captured and Chat client mocked.
 
     Redirects the persistent thread-count store to a tmp file so tests
-    don't pollute (or read state from) the developer's real
-    ~/.hermes/google_chat_thread_counts.json.
+    can round-trip independently of the per-test Vault.
     """
     from plugins.platforms.google_chat.adapter import _ThreadCountStore
     a = GoogleChatAdapter(_base_config())
@@ -168,8 +167,7 @@ def adapter(tmp_path):
     a._subscription_path = "projects/test-project/subscriptions/test-sub"
     a._new_authed_http = MagicMock(return_value=MagicMock())
     a.handle_message = AsyncMock()
-    # Replace the production store (which would write to ~/.hermes/...)
-    # with a tmp-path one so tests can roundtrip without side effects.
+    # Replace the production Vault store with a dedicated tmp-path store.
     a._thread_count_store = _ThreadCountStore(
         tmp_path / "google_chat_thread_counts.json"
     )
@@ -178,6 +176,66 @@ def adapter(tmp_path):
         a._loop.close()
     except Exception:
         pass
+
+
+def test_google_chat_state_defaults_to_vault(tmp_path, monkeypatch):
+    """Thread routing and non-secret bot ID caches must not use HERMES_HOME."""
+    vault = tmp_path / "vault"
+    vault.mkdir()
+    legacy_home = tmp_path / "legacy"
+    legacy_home.mkdir()
+    monkeypatch.setenv("HERMES_OBSIDIAN_VAULT", str(vault))
+    monkeypatch.setenv("HERMES_HOME", str(legacy_home))
+
+    chat = GoogleChatAdapter(_base_config())
+    state_dir = vault / "06_Automation" / "Hermes" / "GoogleChat"
+    assert chat._thread_count_store._path == state_dir / "google_chat_thread_counts.json"
+    assert chat._bot_id_cache_path() == state_dir / "google_chat_bot_id.json"
+    chat._thread_count_store.load()
+    assert chat._thread_count_store.incr("spaces/S", "spaces/S/threads/T") == 0
+    chat._save_cached_bot_id("users/BOT")
+    assert chat._load_cached_bot_id() == "users/BOT"
+    assert (state_dir / "google_chat_thread_counts.json").exists()
+    assert not list(legacy_home.iterdir())
+
+
+def test_google_chat_state_requires_vault(monkeypatch):
+    monkeypatch.delenv("HERMES_OBSIDIAN_VAULT", raising=False)
+    with pytest.raises(RuntimeError, match="HERMES_OBSIDIAN_VAULT"):
+        GoogleChatAdapter(_base_config())
+
+
+def test_google_chat_legacy_counters_require_non_destructive_migration(tmp_path, monkeypatch):
+    vault = tmp_path / "vault"
+    vault.mkdir()
+    legacy_home = tmp_path / "legacy"
+    legacy_home.mkdir()
+    old = legacy_home / "google_chat_thread_counts.json"
+    old.write_text('{"spaces/S":{"spaces/S/threads/T":2}}')
+    monkeypatch.setenv("HERMES_OBSIDIAN_VAULT", str(vault))
+    monkeypatch.setenv("HERMES_HOME", str(legacy_home))
+
+    with pytest.raises(RuntimeError, match="Legacy Google Chat thread counters"):
+        GoogleChatAdapter(_base_config())
+    assert old.exists()  # No migration or deletion is performed implicitly.
+
+    state_dir = vault / "06_Automation" / "Hermes" / "GoogleChat"
+    state_dir.mkdir(parents=True)
+    (state_dir / old.name).write_bytes(old.read_bytes())
+    chat = GoogleChatAdapter(_base_config())
+    chat._thread_count_store.load()
+    assert chat._thread_count_store.get("spaces/S", "spaces/S/threads/T") == 2
+
+
+def test_google_chat_state_rejects_vault_symlink(tmp_path, monkeypatch):
+    vault = tmp_path / "vault"
+    vault.mkdir()
+    outside = tmp_path / "outside"
+    outside.mkdir()
+    (vault / "06_Automation").symlink_to(outside, target_is_directory=True)
+    monkeypatch.setenv("HERMES_OBSIDIAN_VAULT", str(vault))
+    with pytest.raises(RuntimeError, match="symlink"):
+        GoogleChatAdapter(_base_config())
 
 
 def _make_pubsub_message(data: dict, *, attributes=None):
