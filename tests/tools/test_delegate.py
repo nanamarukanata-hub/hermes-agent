@@ -1631,8 +1631,10 @@ class TestDelegateHeartbeat(unittest.TestCase):
         # Accelerate the idle ceiling to five cycles for this regression test.
         # Production uses 15 cycles (450s at the 30s heartbeat interval),
         # so patching only the interval would not reach stale detection here.
-        with patch("tools.delegate_tool._HEARTBEAT_INTERVAL", 0.05), \\
-             patch("tools.delegate_tool._HEARTBEAT_STALE_CYCLES_IDLE", 5):
+        with (
+            patch("tools.delegate_tool._HEARTBEAT_INTERVAL", 0.05),
+            patch("tools.delegate_tool._HEARTBEAT_STALE_CYCLES_IDLE", 5),
+        ):
             _run_single_child(
                 task_index=0,
                 goal="Test wedged child",
