@@ -35,11 +35,11 @@ class ObsidianStateTests(unittest.TestCase):
     def test_rich_session_preview_collapses_whitespace_after_restart(self):
         self.db.create_session("multiline", "cli")
         self.db.append_message(
-            "multiline", "user", "Line one\\nLine two\\tLine three"
+            "multiline", "user", "Line one\nLine two\tLine three"
         )
         self.db.create_session("long_multiline", "cli")
         self.db.append_message(
-            "long_multiline", "user", "A" * 58 + "\\n" + "BB"
+            "long_multiline", "user", "A" * 58 + "\n" + "BB"
         )
 
         reopened = SessionDB()
