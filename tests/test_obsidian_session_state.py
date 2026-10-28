@@ -50,6 +50,60 @@ class ObsidianStateTests(unittest.TestCase):
         self.assertEqual(previews["multiline"], "Line one Line two Line three")
         self.assertEqual(previews["long_multiline"], "A" * 58 + " B...")
 
+    def test_active_delegate_is_not_projected_as_parent_after_restart(self):
+        self.db.create_session("root", "cli")
+        self.db.append_message("root", "user", "Root conversation")
+        self.db.create_session("delegate", "cli", parent_session_id="root")
+        self.db.append_message("delegate", "user", "Internal delegate task")
+
+        reopened = SessionDB()
+        self.assertEqual(reopened.get_compression_tip("root"), "root")
+        rows = reopened.list_sessions_rich()
+        self.assertEqual([row["id"] for row in rows], ["root"])
+        self.assertEqual(rows[0]["preview"], "Root conversation")
+        self.assertEqual(
+            {row["id"] for row in reopened.list_sessions_rich(include_children=True)},
+            {"root", "delegate"},
+        )
+
+    def test_compression_tip_skips_delegate_created_before_parent_ended(self):
+        self.db.create_session("root", "cli")
+        self.db.create_session("delegate", "cli", parent_session_id="root")
+        self.db.append_message("delegate", "user", "Delegated work")
+        self.db.end_session("root", "compression")
+        self.db.create_session("continuation", "cli", parent_session_id="root")
+        self.db.append_message("continuation", "user", "Resume the conversation")
+
+        reopened = SessionDB()
+        self.assertEqual(reopened.get_compression_tip("root"), "continuation")
+        rows = reopened.list_sessions_rich()
+        self.assertEqual([row["id"] for row in rows], ["continuation"])
+        self.assertEqual(rows[0]["_lineage_root_id"], "root")
+        self.assertEqual(rows[0]["preview"], "Resume the conversation")
+
+    def test_compression_without_post_end_child_keeps_root_visible(self):
+        self.db.create_session("root", "cli")
+        self.db.create_session("delegate", "cli", parent_session_id="root")
+        self.db.end_session("root", "compression")
+
+        reopened = SessionDB()
+        self.assertEqual(reopened.get_compression_tip("root"), "root")
+        self.assertEqual(
+            [row["id"] for row in reopened.list_sessions_rich()], ["root"]
+        )
+
+    def test_branched_child_is_separate_conversation(self):
+        self.db.create_session("root", "cli")
+        self.db.end_session("root", "branched")
+        self.db.create_session("branch", "cli", parent_session_id="root")
+
+        reopened = SessionDB()
+        self.assertEqual(reopened.get_compression_tip("root"), "root")
+        self.assertEqual(
+            {row["id"] for row in reopened.list_sessions_rich()},
+            {"root", "branch"},
+        )
+
     def test_no_vault_environment_fails_closed(self):
         with patch.dict(os.environ, {"HERMES_OBSIDIAN_VAULT": ""}):
             with self.assertRaises(RuntimeError):
