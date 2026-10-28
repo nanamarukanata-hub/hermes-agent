@@ -2522,13 +2522,15 @@ class TestAutoMaintenance:
         assert result["pruned"] == 1
         assert result["vacuumed"] is False
 
-    def test_corrupt_last_run_marker_treated_as_no_prior_run(self, db):
-        """A non-numeric marker must not break maintenance."""
-        db.set_meta("last_auto_prune", "not-a-timestamp")
+    @pytest.mark.parametrize("marker", ("not-a-timestamp", "nan", "inf", "-inf"))
+    def test_corrupt_last_run_marker_treated_as_no_prior_run(self, db, marker):
+        """Malformed and non-finite markers must not disable Vault maintenance."""
+        db.set_meta("last_auto_prune", marker)
         self._make_old_ended(db, "old", days_old=100)
         result = db.maybe_auto_prune_and_vacuum(retention_days=90)
         assert result["skipped"] is False
         assert result["pruned"] == 1
+        assert abs(float(db.get_meta("last_auto_prune")) - time.time()) < 60
 
     def test_state_meta_survives_vacuum(self, db):
         """Marker written just before VACUUM must still be readable after."""
