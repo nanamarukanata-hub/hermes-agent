@@ -152,37 +152,37 @@ class VaultStore:
             return None
         return json.loads(path.read_text(encoding="utf-8"))
 
-    def save_session_data(self, session_id: str, data: dict[str, Any]) -> Path:
-        # Session folders are shared by all users. Never allow a caller to
-        # replace an existing session with another user's (or ownerless)
-        # payload, including via save_document("Sessions", ...).
+    def _save_session_data_unlocked(self, session_id: str, data: dict[str, Any]) -> Path:
+        """Write a session while the caller holds the Vault writer lock."""
         incoming_owner = data.get("user_id")
         if incoming_owner is not None:
             validate_id(incoming_owner)
+        existing = self.load_session(session_id)
+        if existing is not None and existing.get("user_id") != incoming_owner:
+            raise PermissionError("session is not owned by this user")
+        item = {"id": session_id, "source": data.get("source", "gateway"),
+                "started_at": data.get("started_at", time.time()),
+                "ended_at": data.get("ended_at"),
+                "title": data.get("title"),
+                "model": data.get("model"),
+                "user_id": data.get("user_id"),
+                "parent_session_id": data.get("parent_session_id"),
+                "message_count": len(data.get("messages", []) or []),
+                "messages": list(data.get("messages", []) or []),
+                **{k: v for k, v in data.items()
+                   if k not in ("id", "source", "started_at", "ended_at",
+                                "title", "model", "user_id",
+                                "parent_session_id", "messages")}}
+        item["message_count"] = len(item["messages"])
+        path = self.session_path(session_id)
+        self._atomic_write(path, json.dumps(item, ensure_ascii=False, indent=2) + "\n")
+        self._atomic_write(self.transcript_path(session_id), self._render_transcript(item))
+        return path
 
-        def _do():
-            existing = self.load_session(session_id)
-            if existing is not None and existing.get("user_id") != incoming_owner:
-                raise PermissionError("session is not owned by this user")
-            item = {"id": session_id, "source": data.get("source", "gateway"),
-                    "started_at": data.get("started_at", time.time()),
-                    "ended_at": data.get("ended_at"),
-                    "title": data.get("title"),
-                    "model": data.get("model"),
-                    "user_id": data.get("user_id"),
-                    "parent_session_id": data.get("parent_session_id"),
-                    "message_count": len(data.get("messages", []) or []),
-                    "messages": list(data.get("messages", []) or []),
-                    **{k: v for k, v in data.items()
-                       if k not in ("id", "source", "started_at", "ended_at",
-                                    "title", "model", "user_id",
-                                    "parent_session_id", "messages")}}
-            item["message_count"] = len(item["messages"])
-            path = self.session_path(session_id)
-            self._atomic_write(path, json.dumps(item, ensure_ascii=False, indent=2) + "\n")
-            self._atomic_write(self.transcript_path(session_id), self._render_transcript(item))
-            return path
-        return self._locked(_do)
+    def save_session_data(self, session_id: str, data: dict[str, Any]) -> Path:
+        # Session folders are shared by all users. Never allow a caller to
+        # replace another user's session, including with an ownerless payload.
+        return self._locked(lambda: self._save_session_data_unlocked(session_id, data))
 
     def get_messages(self, session_id: str) -> list[dict[str, Any]]:
         item = self.load_session(session_id)
@@ -391,25 +391,60 @@ class VaultStore:
 
     def compress_conversation(self, user_id: str, session_id: str, keep_last: int = 20,
                               summary: str = "") -> dict[str, Any]:
-        """Keep the last N messages verbatim, archive older ones to a
-        sibling session folder. The summary text is supplied by the
-        caller; this function does not generate text."""
-        session = self.load_session(session_id)
-        if not session:
-            raise KeyError(f"session not found: {session_id}")
-        if session.get("user_id") != validate_id(user_id):
-            raise PermissionError("session is not owned by this user")
-        messages = list(session.get("messages") or [])
-        if len(messages) <= keep_last:
-            return session
-        archived, kept = messages[:-keep_last], messages[-keep_last:]
-        compressed = {**session, "messages": kept, "message_count": len(kept),
-                      "archived_message_count": len(archived),
-                      "archive_summary": summary}
-        self.save_session_data(session_id, compressed)
-        archive_id = f"{session_id}-archive"
-        self.save_session_data(archive_id, {
-            "id": archive_id, "source": session.get("source", "gateway"),
-            "started_at": session.get("started_at"), "user_id": session.get("user_id"),
-            "messages": archived, "summary": summary})
-        return compressed
+        """Archive old messages without losing earlier compression history.
+
+        The archive is written before trimming the active session. A generation
+        checkpoint makes a retry safe if the process stops between the writes.
+        Both operations hold the same Vault writer lock as normal appends.
+        """
+        if isinstance(keep_last, bool) or not isinstance(keep_last, int) or keep_last < 0:
+            raise ValueError("keep_last must be a non-negative integer")
+        user_id = validate_id(user_id)
+
+        def _do():
+            session = self.load_session(session_id)
+            if not session:
+                raise KeyError(f"session not found: {session_id}")
+            if session.get("user_id") != user_id:
+                raise PermissionError("session is not owned by this user")
+            messages = list(session.get("messages") or [])
+            if len(messages) <= keep_last:
+                return session
+
+            archived = messages[:-keep_last] if keep_last else messages
+            kept = messages[-keep_last:] if keep_last else []
+            archive_id = f"{session_id}-archive"
+            previous = self.load_session(archive_id)
+            if previous is not None and previous.get("user_id") != user_id:
+                raise PermissionError("archive is not owned by this user")
+            prior_messages = list(previous.get("messages") or []) if previous else []
+            generation = int(session.get("compression_generation", 0)) + 1
+            applied = previous.get("last_applied_generation") if previous else None
+
+            if applied == generation:
+                # Archive write succeeded but the active session update did not.
+                # Reuse the checkpoint instead of duplicating the same messages.
+                if len(prior_messages) < len(archived) or prior_messages[-len(archived):] != archived:
+                    raise ValueError("archive checkpoint does not match active session")
+                all_archived = prior_messages
+            else:
+                if applied is not None and applied > generation:
+                    raise ValueError("archive checkpoint is ahead of active session")
+                all_archived = prior_messages + archived
+
+            archive = {**(previous or {}),
+                       "id": archive_id, "source": session.get("source", "gateway"),
+                       "started_at": session.get("started_at"), "user_id": user_id,
+                       "messages": all_archived, "summary": summary,
+                       "last_applied_generation": generation}
+            compressed = {**session, "messages": kept,
+                          "message_count": len(kept),
+                          "archived_message_count": len(all_archived),
+                          "archive_summary": summary,
+                          "compression_generation": generation}
+
+            self._save_session_data_unlocked(archive_id, archive)
+            self._save_session_data_unlocked(session_id, compressed)
+            return compressed
+
+        return self._locked(_do)
