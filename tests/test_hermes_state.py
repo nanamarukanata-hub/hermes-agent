@@ -1854,6 +1854,25 @@ class TestTitleLineage:
         # Even when called with "my project #2", it should return #3
         assert db.get_next_title_in_lineage("my project #2") == "my project #3"
 
+    def test_next_title_strips_legacy_number(self, db):
+        """A legacy '(2)' title continues the same #N lineage."""
+        db.create_session("s1", "cli")
+        db.set_session_title("s1", "my project")
+        db.create_session("s2", "cli")
+        db.set_session_title("s2", "my project (2)")
+        assert db.get_next_title_in_lineage("my project (2)") == "my project #3"
+
+    def test_next_title_when_only_numbered_session_remains(self, db):
+        """Pruning the original session must not restart an existing lineage."""
+        db.create_session("s2", "cli")
+        db.set_session_title("s2", "my project #2")
+        assert db.get_next_title_in_lineage("my project #2") == "my project #3"
+        assert db.get_next_title_in_lineage("my project") == "my project #3"
+
+    def test_next_title_numbered_without_any_existing_lineage(self, db):
+        """An unused numbered input starts with its unnumbered base title."""
+        assert db.get_next_title_in_lineage("new project #2") == "new project"
+
 
 class TestTitleSqlWildcards:
     """Titles containing SQL LIKE wildcards (%, _) must not cause false matches."""
