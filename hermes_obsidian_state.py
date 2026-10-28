@@ -317,8 +317,16 @@ class SessionDB:
         Treat the older Vault "(2)" suffix as occupied too, so sessions
         migrated from earlier versions cannot acquire duplicate branch numbers.
         """
+        # Continuing a numbered session must advance the original lineage,
+        # rather than producing nested titles such as "project #2 #2".
+        base_title = re.sub(r"(?: #\d+| \(\d+\))$", "", base_title)
         titles = {s.get("title") for s in self.search_sessions(limit=100000)}
-        if base_title not in titles:
+        has_lineage = base_title in titles or any(
+            isinstance(title, str)
+            and re.fullmatch(re.escape(base_title) + r"(?: #\d+| \(\d+\))", title)
+            for title in titles
+        )
+        if not has_lineage:
             return base_title
         for n in range(2, 100001):
             choice = f"{base_title} #{n}"
