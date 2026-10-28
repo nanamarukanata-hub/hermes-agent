@@ -7,10 +7,27 @@ import pytest
 
 def test_default_origin_is_foreground():
     from tools.skill_provenance import get_current_write_origin
-    # In a fresh ContextVar context, default kicks in.
-    ctx = contextvars.copy_context()
+
+    # copy_context() inherits the current worker's values, including any
+    # origin left by another test. A new Context() tests the actual default.
+    ctx = contextvars.Context()
     origin = ctx.run(get_current_write_origin)
     assert origin == "foreground"
+
+
+def test_copy_context_inherits_active_origin():
+    from tools.skill_provenance import (
+        get_current_write_origin,
+        reset_current_write_origin,
+        set_current_write_origin,
+    )
+
+    token = set_current_write_origin("assistant_tool")
+    try:
+        inherited = contextvars.copy_context()
+        assert inherited.run(get_current_write_origin) == "assistant_tool"
+    finally:
+        reset_current_write_origin(token)
 
 
 def test_set_and_get_origin():
