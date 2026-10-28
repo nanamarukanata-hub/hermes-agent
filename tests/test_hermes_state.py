@@ -1433,34 +1433,56 @@ class TestSanitizeTitle:
 
 
 class TestSchemaInit:
-    def test_wal_mode(self, db):
-        cursor = db._conn.execute("PRAGMA journal_mode")
-        mode = cursor.fetchone()[0]
-        assert mode == "wal"
+    """Vault persistence invariants replacing obsolete SQLite schema checks."""
 
-    def test_foreign_keys_enabled(self, db):
-        cursor = db._conn.execute("PRAGMA foreign_keys")
-        assert cursor.fetchone()[0] == 1
-
-    def test_tables_exist(self, db):
-        cursor = db._conn.execute(
-            "SELECT name FROM sqlite_master WHERE type='table' ORDER BY name"
+    def test_vault_only_backend_does_not_create_sqlite(self, db):
+        assert db.db_path == db.root
+        assert db.root.is_relative_to(db.vault)
+        db.create_session("vault-only", "cli")
+        db.append_message("vault-only", "user", "hello")
+        assert (db.root / "vault-only" / "metadata.json").is_file()
+        assert (db.root / "vault-only" / "Transcript.md").is_file()
+        assert not any(
+            path.name.endswith((".db", ".db-wal", ".db-shm", ".sqlite", ".sqlite3"))
+            for path in db.vault.rglob("*")
+            if path.is_file()
         )
-        tables = {row[0] for row in cursor.fetchall()}
-        assert "sessions" in tables
-        assert "messages" in tables
-        assert "schema_version" in tables
 
-    def test_schema_version(self, db):
-        cursor = db._conn.execute("SELECT version FROM schema_version")
-        version = cursor.fetchone()[0]
-        assert version == 11
+    def test_vault_session_survives_reopen(self, db):
+        db.create_session("reopen", "cli", model="test-model")
+        db.append_message("reopen", "user", "persist me")
+        reopened = SessionDB(vault_path=db.vault)
+        assert reopened.get_session("reopen")["model"] == "test-model"
+        assert reopened.get_messages("reopen")[0]["content"] == "persist me"
+        reopened.close()
 
-    def test_title_column_exists(self, db):
-        """Verify the title column was created in the sessions table."""
-        cursor = db._conn.execute("PRAGMA table_info(sessions)")
-        columns = {row[1] for row in cursor.fetchall()}
-        assert "title" in columns
+    def test_vault_parent_reference_survives_reopen(self, db):
+        db.create_session("parent", "cli")
+        db.create_session("child", "cli", parent_session_id="parent")
+        reopened = SessionDB(vault_path=db.vault)
+        assert reopened.get_session("child")["parent_session_id"] == "parent"
+        assert reopened.get_session("parent") is not None
+        reopened.close()
+
+    def test_vault_metadata_fields_are_persisted(self, db):
+        db.create_session("metadata", "cli")
+        db.set_session_title("metadata", "Vault Title")
+        metadata_path = db.root / "metadata" / "metadata.json"
+        payload = json.loads(metadata_path.read_text(encoding="utf-8"))
+        assert payload["id"] == "metadata"
+        assert payload["title"] == "Vault Title"
+        assert payload["messages"] == []
+        assert db.get_session("metadata")["title"] == "Vault Title"
+
+    def test_vault_transcript_is_readable_projection(self, db):
+        db.create_session("transcript", "cli")
+        db.append_message("transcript", "user", "Japanese: 日本語")
+        folder = db.root / "transcript"
+        canonical = json.loads((folder / "metadata.json").read_text(encoding="utf-8"))
+        transcript = (folder / "Transcript.md").read_text(encoding="utf-8")
+        assert canonical["messages"][0]["content"] == "Japanese: 日本語"
+        assert "## user" in transcript
+        assert "Japanese: 日本語" in transcript
 
     def test_topic_mode_schema_is_not_auto_migrated_on_open(self, tmp_path):
         """Opening an old DB should not add topic-mode columns until /topic opts in.
