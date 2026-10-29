@@ -22,30 +22,61 @@ import argparse
 import base64
 import json
 import os
+import re
 import sqlite3
-import sys
 from pathlib import Path
 
 
-def _read_table(conn: sqlite3.Connection, name: str) -> list[dict]:
-    try:
-        cur = conn.execute(f"SELECT * FROM {name}")
-    except sqlite3.Error:
+def _read_table(conn: sqlite3.Connection, name: str, *, optional: bool = False) -> list[dict]:
+    # Missing required tables and malformed schemas must not become silent empty exports.
+    if optional and conn.execute(
+        "SELECT 1 FROM sqlite_master WHERE type='table' AND name=?", (name,)
+    ).fetchone() is None:
         return []
+    cur = conn.execute(f"SELECT * FROM {name}")  # All names are fixed literals.
     cols = [d[0] for d in cur.description]
     return [dict(zip(cols, row)) for row in cur.fetchall()]
 
 
-def _write_json(dest: Path, data: dict, dry: bool, force: bool) -> bool:
+def _safe_id(value: object) -> str:
+    if isinstance(value, bool) or not isinstance(value, (str, int)):
+        raise ValueError(f"invalid legacy record identifier: {value!r}")
+    name = str(value)
+    if name in (".", "..") or re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9_.-]*", name) is None:
+        raise ValueError(f"unsafe legacy record identifier: {value!r}")
+    return name
+
+
+def _check_destination(vault: Path, dest: Path) -> None:
+    # Reject both traversal and symlink redirection, including existing files.
+    try:
+        parts = dest.relative_to(vault).parts
+    except ValueError as exc:
+        raise ValueError(f"destination escapes Vault: {dest}") from exc
+    current = vault
+    if current.is_symlink():
+        raise ValueError(f"symlinked Vault root: {current}")
+    for part in parts:
+        current = current / part
+        if current.is_symlink():
+            raise ValueError(f"symlinked Vault destination: {current}")
+
+
+def _write_json(vault: Path, dest: Path, data: dict, *, force: bool) -> None:
+    _check_destination(vault, dest)
     if dest.exists() and not force:
-        return False
-    if dry:
-        return True
+        raise FileExistsError(f"Vault destination already exists: {dest}")
     dest.parent.mkdir(parents=True, exist_ok=True)
     tmp = dest.with_name(f".{dest.name}.tmp-{os.getpid()}")
-    tmp.write_text(json.dumps(data, indent=2, ensure_ascii=False, default=str) + "\n", encoding="utf-8")
-    os.replace(tmp, dest)
-    return True
+    try:
+        tmp.write_text(json.dumps(data, indent=2, ensure_ascii=False, default=str) + "\n", encoding="utf-8")
+        if force:
+            os.replace(tmp, dest)
+        else:
+            # Atomic no-clobber publish: a concurrent writer cannot be overwritten.
+            os.link(tmp, dest)
+    finally:
+        tmp.unlink(missing_ok=True)
 
 
 def main() -> int:
@@ -60,31 +91,41 @@ def main() -> int:
     vault = Path(args.vault).expanduser()
     tree = vault / "06_Automation" / "Hermes"
     counts: dict[str, int] = {}
+    planned: list[tuple[Path, dict]] = []
+    seen: set[Path] = set()
+
+    def stage(dest: Path, data: dict) -> None:
+        _check_destination(vault, dest)
+        if dest in seen:
+            raise ValueError(f"duplicate Vault destination: {dest}")
+        if dest.exists() and not args.force:
+            raise FileExistsError(f"Vault destination already exists: {dest}")
+        seen.add(dest)
+        planned.append((dest, data))
 
     # RetainDB queue
     db = home / "retaindb_queue.db"
     if db.exists():
-        conn = sqlite3.connect(f"file:{db}?mode=ro", uri=True)
+        conn = sqlite3.connect(db.resolve().as_uri() + "?mode=ro", uri=True)
         try:
             rows = _read_table(conn, "pending")
         finally:
             conn.close()
         n = 0
         for row in rows:
-            try:
-                messages = json.loads(row.get("messages_json") or "[]")
-            except json.JSONDecodeError:
-                messages = []
+            messages = json.loads(row.get("messages_json") or "[]")
+            if not isinstance(messages, list):
+                raise ValueError("RetainDB pending.messages_json must be a JSON array")
             data = {"user_id": row.get("user_id"), "session_id": row.get("session_id"), "messages": messages,
                     "created_at": row.get("created_at"), "last_error": row.get("last_error")}
-            if _write_json(tree / "RetainQueue" / f"{row.get('id')}.json", data, args.dry_run, args.force):
-                n += 1
+            stage(tree / "RetainQueue" / f"{_safe_id(row.get('id'))}.json", data)
+            n += 1
         counts["retaindb_queue"] = n
 
     # Holographic facts
     db = home / "memory_store.db"
     if db.exists():
-        conn = sqlite3.connect(f"file:{db}?mode=ro", uri=True)
+        conn = sqlite3.connect(db.resolve().as_uri() + "?mode=ro", uri=True)
         try:
             rows = _read_table(conn, "facts")
         finally:
@@ -95,35 +136,34 @@ def main() -> int:
             data = dict(row)
             data["hrr_vector_b64"] = base64.b64encode(vec).decode("ascii") if isinstance(vec, (bytes, bytearray)) else None
             data.pop("hrr_vector", None)
-            if _write_json(tree / "HolographicMemory" / "facts" / f"{row.get('fact_id')}.json", data, args.dry_run, args.force):
-                n += 1
+            stage(tree / "HolographicMemory" / "facts" / f"{_safe_id(row.get('fact_id'))}.json", data)
+            n += 1
         counts["holographic_facts"] = n
 
     # API responses
     db = home / "response_store.db"
     if db.exists():
-        conn = sqlite3.connect(f"file:{db}?mode=ro", uri=True)
+        conn = sqlite3.connect(db.resolve().as_uri() + "?mode=ro", uri=True)
         try:
             rows = _read_table(conn, "responses")
-            conv = _read_table(conn, "conversations")
+            conv = _read_table(conn, "conversations", optional=True)
         finally:
             conn.close()
         n = 0
         for row in rows:
-            try:
-                data = json.loads(row.get("data") or "null")
-            except json.JSONDecodeError:
-                data = None
+            data = json.loads(row.get("data") or "null")
             record = {"response_id": row.get("response_id"), "data": data, "accessed_at": row.get("accessed_at")}
-            if _write_json(tree / "ApiResponses" / f"{row.get('response_id')}.json", record, args.dry_run, args.force):
-                n += 1
+            stage(tree / "ApiResponses" / f"{_safe_id(row.get('response_id'))}.json", record)
+            n += 1
         counts["api_responses"] = n
-        if conv and not args.dry_run:
+        if conv:
             mapping = {r.get("name"): r.get("response_id") for r in conv if r.get("name")}
-            dest = tree / "ApiResponses" / "conversations.json"
-            if not dest.exists() or args.force:
-                dest.parent.mkdir(parents=True, exist_ok=True)
-                dest.write_text(json.dumps(mapping, indent=2) + "\n", encoding="utf-8")
+            stage(tree / "ApiResponses" / "conversations.json", mapping)
+
+    # Complete validation of every source row and destination before any write.
+    if not args.dry_run:
+        for dest, data in planned:
+            _write_json(vault, dest, data, force=args.force)
 
     print(json.dumps(counts, indent=2))
     return 0
