@@ -69,3 +69,59 @@ def test_explicit_directory_inside_vault_is_allowed(vault):
     assert store.db_path == root
     assert (root / "facts").is_dir()
     store.close()
+
+
+def test_default_store_rejects_symlinked_vault_parent(vault, tmp_path):
+    """Default storage must not follow 06_Automation outside the Vault."""
+    vault.mkdir()
+    outside = tmp_path / "outside"
+    outside.mkdir()
+    (vault / "06_Automation").symlink_to(outside, target_is_directory=True)
+
+    with pytest.raises(ValueError, match="inside HERMES_OBSIDIAN_VAULT"):
+        MemoryStore()
+
+    assert not (outside / "Hermes").exists()
+
+
+@pytest.mark.parametrize("child_name", ["facts", "banks"])
+def test_store_rejects_symlinked_data_directory(vault, tmp_path, child_name):
+    """Pre-existing facts/banks links must not redirect durable memory."""
+    root = vault / "06_Automation" / "Hermes" / "HolographicMemory"
+    root.mkdir(parents=True)
+    outside = tmp_path / "outside"
+    outside.mkdir()
+    (root / child_name).symlink_to(outside, target_is_directory=True)
+
+    with pytest.raises(ValueError, match="path escapes its Vault directory"):
+        MemoryStore()
+
+    assert list(outside.iterdir()) == []
+
+
+def test_store_rejects_symlinked_lock_file(vault, tmp_path):
+    """A lock-file link must not open and modify an unrelated file."""
+    root = vault / "06_Automation" / "Hermes" / "HolographicMemory"
+    root.mkdir(parents=True)
+    external_lock = tmp_path / "external.lock"
+    external_lock.write_text("original", encoding="utf-8")
+    (root / ".vault-writer.lock").symlink_to(external_lock)
+
+    with pytest.raises(ValueError, match="path escapes its Vault directory"):
+        MemoryStore()
+
+    assert external_lock.read_text(encoding="utf-8") == "original"
+
+
+def test_store_rejects_symlinked_entity_index(vault, tmp_path):
+    """Entity reads must not follow a pre-existing link outside the Vault."""
+    root = vault / "06_Automation" / "Hermes" / "HolographicMemory"
+    root.mkdir(parents=True)
+    external_index = tmp_path / "external.json"
+    external_index.write_text('{"by_name": {}}', encoding="utf-8")
+    (root / "entities.json").symlink_to(external_index)
+
+    with pytest.raises(ValueError, match="path escapes its Vault directory"):
+        MemoryStore()
+
+    assert external_index.read_text(encoding="utf-8") == '{"by_name": {}}'
