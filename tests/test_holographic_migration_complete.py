@@ -221,3 +221,15 @@ def test_verify_rejects_mutating_or_dry_run_flags(tmp_path):
         assert result.returncode != 0
         assert "--verify cannot be combined" in result.stderr
     assert not vault.exists()
+
+
+def test_verify_rejects_missing_legacy_sources(tmp_path):
+    home = tmp_path / "empty-home"
+    home.mkdir()
+    vault = tmp_path / "vault"
+
+    result = _run(home, vault, "--verify")
+
+    assert result.returncode != 0
+    assert "no legacy SQLite sources found" in result.stderr
+    assert not vault.exists()
