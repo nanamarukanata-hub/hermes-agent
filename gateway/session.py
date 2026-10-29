@@ -1282,8 +1282,9 @@ class SessionStore:
                     codex_reasoning_items=message.get("codex_reasoning_items") if message.get("role") == "assistant" else None,
                     codex_message_items=message.get("codex_message_items") if message.get("role") == "assistant" else None,
                 )
-            except Exception as e:
-                logger.debug("Session DB operation failed: %s", e)
+            except Exception:
+                logger.exception("Failed to append transcript to Obsidian SessionDB")
+                raise
             return
 
         # No SessionDB (standalone/test doubles only): legacy JSONL is the
@@ -1306,8 +1307,9 @@ class SessionStore:
         if self._db:
             try:
                 self._db.replace_messages(session_id, messages)
-            except Exception as e:
-                logger.debug("Failed to rewrite transcript in DB: %s", e)
+            except Exception:
+                logger.exception("Failed to rewrite transcript in Obsidian SessionDB")
+                raise
             return
 
         # No SessionDB: legacy JSONL is the sole store.
