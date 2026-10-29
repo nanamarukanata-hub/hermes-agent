@@ -13,6 +13,7 @@ jobs:
           python-version: "3.12"
       - run: pip install pytest pytest-xdist PyYAML
       - run: python3 -m py_compile hermes_hybrid/*.py tests/*.py
+      - run: python3 -m pytest tests/test_vault_kv_symlink_guards.py -q
       # Hybrid smoke tests are scoped here; the repository-wide suite runs in tests.yml.
       - run: python3 -m pytest tests/test_hybrid.py tests/test_hybrid_user_isolation.py -q
       - run: python3 -m pytest tests/hermes_hybrid/test_drive_vault.py tests/hermes_hybrid/test_drive_integration_ops.py -q
