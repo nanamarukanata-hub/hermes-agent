@@ -115,6 +115,26 @@ class SessionMigrationVerificationTests(unittest.TestCase):
             (self.vault / "06_Automation/Hermes/Sessions/legacy1/metadata.json").exists()
         )
         self.assertEqual(self.source.read_bytes(), original)
+        self.assertFalse((self.vault / "06_Automation").exists())
+
+    def test_invalid_source_id_does_not_initialize_vault(self):
+        with sqlite3.connect(self.source) as conn:
+            conn.execute("UPDATE sessions SET id = ?", ("../escape",))
+            conn.execute("UPDATE messages SET session_id = ?", ("../escape",))
+        original = self.source.read_bytes()
+        with self.assertRaisesRegex(ValueError, "Invalid session ID"):
+            migrate(self.source, commit=True)
+        self.assertFalse((self.vault / "06_Automation").exists())
+        self.assertEqual(self.source.read_bytes(), original)
+
+    def test_orphan_messages_do_not_initialize_vault(self):
+        with sqlite3.connect(self.source) as conn:
+            conn.execute("UPDATE messages SET session_id = ?", ("missing-session",))
+        original = self.source.read_bytes()
+        with self.assertRaisesRegex(RuntimeError, "Orphan message session IDs"):
+            migrate(self.source, commit=True)
+        self.assertFalse((self.vault / "06_Automation").exists())
+        self.assertEqual(self.source.read_bytes(), original)
 
     def test_postwrite_verification_detects_metadata_corruption(self):
         original_save = SessionDB._save
