@@ -103,7 +103,10 @@ def main() -> int:
     ap.add_argument("--home", default=None, help="HERMES_HOME (default: env or ~/.hermes)")
     ap.add_argument("--dry-run", action="store_true")
     ap.add_argument("--force", action="store_true")
+    ap.add_argument("--verify", action="store_true", help="Compare Vault export with legacy SQLite without writing")
     args = ap.parse_args()
+    if args.verify and (args.dry_run or args.force):
+        ap.error("--verify cannot be combined with --dry-run or --force")
 
     home = Path(args.home).expanduser() if args.home else Path(os.environ.get("HERMES_HOME", Path.home() / ".hermes")).expanduser()
     vault = Path(args.vault).expanduser()
@@ -116,7 +119,7 @@ def main() -> int:
         _check_destination(vault, dest)
         if dest in seen:
             raise ValueError(f"duplicate Vault destination: {dest}")
-        if dest.exists() and not args.force:
+        if dest.exists() and not (args.force or args.verify):
             raise FileExistsError(f"Vault destination already exists: {dest}")
         seen.add(dest)
         planned.append((dest, data))
@@ -247,8 +250,32 @@ def main() -> int:
             mapping = {r.get("name"): r.get("response_id") for r in conv if r.get("name")}
             stage(tree / "ApiResponses" / "conversations.json", mapping)
 
-    # Complete validation of every source row and destination before any write.
-    if not args.dry_run:
+    # Validate every legacy record against its published Vault JSON without writes.
+    # Compare complete records, including base64 vectors, entity links and metadata.
+    if args.verify:
+        for dest, data in planned:
+            if not dest.is_file():
+                raise FileNotFoundError(f"missing Vault export: {dest}")
+            with dest.open(encoding="utf-8") as stream:
+                actual = json.load(stream)
+            expected = json.loads(json.dumps(data, ensure_ascii=False, default=str))
+            if actual != expected:
+                raise ValueError(f"Vault export mismatch: {dest}")
+
+        # Also detect unexpected HolographicMemory facts or banks: checking
+        # only expected files could miss stale or duplicated records.
+        if (home / "memory_store.db").exists():
+            root = tree / "HolographicMemory"
+            for sub in ("facts", "banks"):
+                directory = root / sub
+                _check_destination(vault, directory)
+                expected_names = {dest.name for dest, _ in planned if dest.parent == directory}
+                actual_names = {p.name for p in directory.glob("*.json")} if directory.is_dir() else set()
+                if actual_names != expected_names:
+                    raise ValueError(f"Vault export file set mismatch: {directory}")
+            if counts["holographic_entities"] == 0 and (root / "entities.json").exists():
+                raise ValueError(f"unexpected Vault entity index: {root / 'entities.json'}")
+    elif not args.dry_run:
         for dest, data in planned:
             _write_json(vault, dest, data, force=args.force)
 
