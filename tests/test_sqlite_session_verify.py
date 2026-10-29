@@ -99,6 +99,23 @@ class SessionMigrationVerificationTests(unittest.TestCase):
             migrate(self.source, verify=True)
         self.assertFalse((self.vault / "06_Automation").exists())
 
+    def test_duplicate_source_session_ids_fail_before_writing(self):
+        # Even a malformed legacy database must never cause a partial import.
+        # The first duplicate would otherwise be written before the second
+        # triggers a destination conflict during the commit loop.
+        with sqlite3.connect(self.source) as conn:
+            conn.execute(
+                "INSERT INTO sessions VALUES (?, ?, ?, ?)",
+                ("legacy1", "discord", 200, "duplicate-model"),
+            )
+        original = self.source.read_bytes()
+        with self.assertRaisesRegex(RuntimeError, "Duplicate SQLite session ID"):
+            migrate(self.source, commit=True)
+        self.assertFalse(
+            (self.vault / "06_Automation/Hermes/Sessions/legacy1/metadata.json").exists()
+        )
+        self.assertEqual(self.source.read_bytes(), original)
+
     def test_postwrite_verification_detects_metadata_corruption(self):
         original_save = SessionDB._save
 
