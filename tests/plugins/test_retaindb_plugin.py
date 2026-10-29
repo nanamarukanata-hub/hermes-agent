@@ -161,6 +161,26 @@ def _read_queue_files(queue_dir):
 class TestWriteQueue:
     """Test the Vault-backed write queue with real JSON files."""
 
+    def test_symlinked_vault_parent_rejected_before_queue_creation(self, tmp_path):
+        root = tmp_path / "vault"
+        root.mkdir()
+        outside = tmp_path / "outside"
+        outside.mkdir()
+        (root / "06_Automation").symlink_to(outside, target_is_directory=True)
+        queue_dir = root / "06_Automation" / "Hermes" / "RetainQueue"
+
+        with pytest.raises(ValueError, match="symlink"):
+            _WriteQueue(MagicMock(), queue_dir, vault_root=root)
+        assert list(outside.iterdir()) == []
+
+    def test_vault_queue_root_mismatch_rejected(self, tmp_path):
+        root = tmp_path / "vault"
+        root.mkdir()
+        wrong_dir = tmp_path / "unrelated"
+        with pytest.raises(ValueError, match="inside the configured Vault"):
+            _WriteQueue(MagicMock(), wrong_dir, vault_root=root)
+        assert not wrong_dir.exists()
+
     def _make_queue(self, tmp_path, client=None):
         if client is None:
             client = MagicMock()
