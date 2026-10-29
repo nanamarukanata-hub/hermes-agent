@@ -247,7 +247,17 @@ def main() -> int:
             n += 1
         counts["api_responses"] = n
         if conv:
-            mapping = {r.get("name"): r.get("response_id") for r in conv if r.get("name")}
+            # A dict comprehension silently drops NULL/empty names and
+            # overwrites earlier rows when names are duplicated. Reject
+            # lossy exports before any Vault file is published.
+            mapping: dict[str, object] = {}
+            for row in conv:
+                name = row.get("name")
+                if not isinstance(name, str) or not name:
+                    raise ValueError("invalid legacy conversation name")
+                if name in mapping:
+                    raise ValueError(f"duplicate legacy conversation name: {name!r}")
+                mapping[name] = row.get("response_id")
             stage(tree / "ApiResponses" / "conversations.json", mapping)
 
     if args.verify and not counts:
