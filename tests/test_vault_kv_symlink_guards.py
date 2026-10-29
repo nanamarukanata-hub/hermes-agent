@@ -78,3 +78,53 @@ def test_legacy_counter_is_never_reissued(tmp_path):
     vault.path("sequence").write_text(json.dumps({"next": 8}) + "\n", encoding="utf-8")
     assert vault.next_id("sequence") == 9
     assert vault.next_id("sequence") == 10
+
+
+@pytest.mark.parametrize("subpath", ["", ".", "..", "../outside", "nested/escape", "/absolute"])
+def test_invalid_subpath_rejected_before_directory_creation(tmp_path, subpath):
+    root = tmp_path / "vault"
+    with pytest.raises(ValueError, match="invalid vault subpath"):
+        VaultDir(root, subpath)
+    assert not root.exists()
+
+
+def test_preexisting_symlinked_parent_cannot_redirect_vault_creation(tmp_path):
+    root = tmp_path / "vault"
+    root.mkdir()
+    outside = tmp_path / "outside"
+    outside.mkdir()
+    (root / "06_Automation").symlink_to(outside, target_is_directory=True)
+
+    with pytest.raises(ValueError, match="symlink"):
+        VaultDir(root, "06_Automation", "Hermes", "RetainQueue")
+    assert list(outside.iterdir()) == []
+
+
+def test_parent_replaced_by_symlink_after_init_blocks_all_io(tmp_path):
+    root = tmp_path / "vault"
+    vault = VaultDir(root, "06_Automation", "Hermes", "RetainQueue")
+    outside = tmp_path / "outside"
+    outside.mkdir()
+    (root / "06_Automation").rename(tmp_path / "original-automation")
+    (root / "06_Automation").symlink_to(outside, target_is_directory=True)
+
+    for operation in (
+        lambda: vault.write("item", {"value": 1}),
+        lambda: vault.read("item"),
+        lambda: vault.list_ids(),
+        lambda: vault.next_id("sequence"),
+        lambda: vault.delete("item"),
+    ):
+        with pytest.raises(ValueError, match="symlink"):
+            operation()
+    assert list(outside.iterdir()) == []
+
+
+def test_symlinked_root_is_rejected_before_any_write(tmp_path):
+    outside = tmp_path / "outside"
+    outside.mkdir()
+    alias = tmp_path / "vault-alias"
+    alias.symlink_to(outside, target_is_directory=True)
+    with pytest.raises(ValueError, match="symlink"):
+        VaultDir(alias, "06_Automation", "Hermes", "RetainQueue")
+    assert list(outside.iterdir()) == []
