@@ -99,17 +99,12 @@ def _write_json(vault: Path, dest: Path, data: dict, *, force: bool) -> None:
 
 
 def _write_batch(vault: Path, planned: list[tuple[Path, dict]], *, force: bool) -> None:
-    """Stage every non-force export before publishing; roll back on errors.
+    """Stage all exports before publishing, even with --force.
 
-    No-clobber links make it possible to remove only files created by this
-    invocation. This is best-effort rollback, not a crash-safe multi-file
-    transaction. --force retains its explicit overwrite behavior.
+    Staging failures cannot partially overwrite existing Vault records.
+    Non-force publishes are rolled back on errors. Force-mode publication
+    failures may still leave partial overwrites; this is not a transaction.
     """
-    if force:
-        for dest, data in planned:
-            _write_json(vault, dest, data, force=True)
-        return
-
     prepared: list[tuple[Path, Path]] = []
     published: list[tuple[Path, Path]] = []
     try:
@@ -129,9 +124,13 @@ def _write_batch(vault: Path, planned: list[tuple[Path, dict]], *, force: bool) 
 
         for tmp, dest in prepared:
             _check_destination(vault, dest)
-            # Never overwrite a file created by another writer since preflight.
-            os.link(tmp, dest)
-            published.append((tmp, dest))
+            if force:
+                # Replace only after *every* record has been staged and fsynced.
+                os.replace(tmp, dest)
+            else:
+                # Never overwrite a file created by another writer since preflight.
+                os.link(tmp, dest)
+                published.append((tmp, dest))
     except BaseException as exc:
         rollback_errors = []
         for tmp, dest in reversed(published):
