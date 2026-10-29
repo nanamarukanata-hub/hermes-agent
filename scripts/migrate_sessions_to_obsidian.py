@@ -14,6 +14,7 @@ The only sqlite3 import in this feature is in this explicit offline migration to
 from __future__ import annotations
 import argparse
 import json
+import os
 import sqlite3
 import sys
 from pathlib import Path
@@ -75,6 +76,18 @@ def migrate(dbfile, commit=False, verify=False):
     if commit and verify:
         raise ValueError('commit and verify are mutually exclusive')
     sessions, messages = _fetch_source(dbfile)
+    if verify:
+        # SessionDB creates its storage directories on initialization.
+        # Verification must never create even empty directories in the Vault.
+        configured = os.environ.get("HERMES_OBSIDIAN_VAULT")
+        if not configured:
+            raise RuntimeError("HERMES_OBSIDIAN_VAULT is required for verification")
+        existing = (
+            Path(configured).expanduser().resolve()
+            / "06_Automation" / "Hermes" / "Sessions"
+        )
+        if not existing.is_dir():
+            raise RuntimeError("Existing Vault Sessions directory required for verification")
     target = SessionDB()
     # Preflight the entire dataset BEFORE writing any session. Reject invalid
     # session identifiers and conflicting destinations.
