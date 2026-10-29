@@ -5,6 +5,8 @@ Usage:
     python scripts/migrate_sessions_to_obsidian.py --source ~/.hermes/state.db
   HERMES_OBSIDIAN_VAULT=/local/path/to/Vault \
     python scripts/migrate_sessions_to_obsidian.py --source ~/.hermes/state.db --commit
+  HERMES_OBSIDIAN_VAULT=/local/path/to/Vault \
+    python scripts/migrate_sessions_to_obsidian.py --source ~/.hermes/state.db --verify-only
 
 Stop Hermes gateway and CLI before --commit. Default is dry-run.
 The only sqlite3 import in this feature is in this explicit offline migration tool.
@@ -45,7 +47,7 @@ def _fetch_source(dbfile):
         raise ValueError("SQLite source must be a file")
     # Open immutable? No: allow WAL replay so migrated data includes latest
     # committed transactions. URI mode=ro never creates or changes source.
-    con = sqlite3.connect(f"file:{source.as_posix()}?mode=ro", uri=True)
+    con = sqlite3.connect(source.as_uri() + "?mode=ro", uri=True)
     con.row_factory = sqlite3.Row
     try:
         with con:
@@ -69,7 +71,9 @@ def _fetch_source(dbfile):
         con.close()
 
 
-def migrate(dbfile, commit=False):
+def migrate(dbfile, commit=False, verify=False):
+    if commit and verify:
+        raise ValueError('commit and verify are mutually exclusive')
     sessions, messages = _fetch_source(dbfile)
     target = SessionDB()
     # Preflight the entire dataset BEFORE writing any session. Reject invalid
@@ -92,12 +96,22 @@ def migrate(dbfile, commit=False):
     if unknown:
         raise RuntimeError(f"Orphan message session IDs: {unknown[:10]}")
     result = {
-        "mode": "commit" if commit else "dry-run", "legacy_source": str(Path(dbfile).resolve()),
+        "mode": "verify" if verify else ("commit" if commit else "dry-run"),
+        "legacy_source": str(Path(dbfile).resolve()),
         "vault_destination": str(target.root), "sessions": len(prepared),
         "messages": sum(len(rec["messages"]) for _, rec, _ in prepared),
         "already_migrated": sum(already for _, _, already in prepared),
         "written": 0,
+        "verified": 0,
     }
+    if verify:
+        missing = [sid for sid, _, already in prepared if not already]
+        if missing:
+            raise RuntimeError(f"Missing Vault sessions: {missing[:10]}")
+        # Preflight above compares every source session and its entire message
+        # list with the Vault, rather than relying on aggregate counts.
+        result["verified"] = len(prepared)
+        return result
     if not commit:
         return result
     with target._guard():
@@ -114,7 +128,7 @@ def migrate(dbfile, commit=False):
                 raise RuntimeError(f"Destination created during migration: {sid}")
             target._save(sid, record)
             loaded = target._load(sid)
-            if loaded is None or loaded.get("messages") != record["messages"]:
+            if loaded != record:
                 raise RuntimeError(f"Post-write verification failed: {sid}")
             result["written"] += 1
     if target.message_count() < result["messages"]:
@@ -125,9 +139,11 @@ def migrate(dbfile, commit=False):
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--source", required=True, help="Path to the legacy state.db")
-    parser.add_argument("--commit", action="store_true", help="Write into Vault; default is read-only dry-run")
+    modes = parser.add_mutually_exclusive_group()
+    modes.add_argument("--commit", action="store_true", help="Write into Vault; default is read-only dry-run")
+    modes.add_argument("--verify-only", action="store_true", help="Compare every legacy session and message with existing Vault data without writing")
     args = parser.parse_args()
-    print(json.dumps(migrate(args.source, args.commit), ensure_ascii=False, indent=2))
+    print(json.dumps(migrate(args.source, commit=args.commit, verify=args.verify_only), ensure_ascii=False, indent=2))
 
 
 if __name__ == "__main__":
