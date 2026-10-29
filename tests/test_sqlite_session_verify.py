@@ -36,7 +36,7 @@ class SessionMigrationVerificationTests(unittest.TestCase):
                 "INSERT INTO sessions VALUES (?, ?, ?, ?)",
                 ("legacy1", "discord", 100, "original-model"),
             )
-            content = "\\x00json:" + json.dumps(
+            content = "\x00json:" + json.dumps(
                 [{"type": "text", "text": "日本語の会話"}], ensure_ascii=False
             )
             conn.execute(
