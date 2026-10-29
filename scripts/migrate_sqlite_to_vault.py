@@ -7,7 +7,8 @@ Usage:
 Exports, when the legacy file exists and the Vault target is empty
 (unless --force):
   - <hermes_home>/retaindb_queue.db  -> Vault/06_Automation/Hermes/RetainQueue/<id>.json
-  - <hermes_home>/memory_store.db    -> Vault/06_Automation/Hermes/HolographicMemory/facts/<id>.json
+  - <hermes_home>/memory_store.db    -> Vault/06_Automation/Hermes/HolographicMemory/
+                                       (facts/, banks/, entities.json)
   - <hermes_home>/response_store.db  -> Vault/06_Automation/Hermes/ApiResponses/<id>.json
   - <hermes_home>/kanban.db          -> see migrate_kanban_to_vault.py (board-aware)
 
@@ -26,6 +27,7 @@ import re
 import sqlite3
 import tempfile
 from pathlib import Path
+from urllib.parse import quote
 
 
 def _read_table(conn: sqlite3.Connection, name: str, *, optional: bool = False) -> list[dict]:
@@ -129,23 +131,92 @@ def main() -> int:
             n += 1
         counts["retaindb_queue"] = n
 
-    # Holographic facts
+    # Holographic memory: preserve entity IDs, fact links, and HRR banks.
+    # The runtime reads entities.json and each fact's entity_ids; records
+    # additionally retain legacy entity metadata not used by the runtime.
     db = home / "memory_store.db"
     if db.exists():
         conn = sqlite3.connect(db.resolve().as_uri() + "?mode=ro", uri=True)
         try:
+            conn.execute("BEGIN")  # One consistent read-only SQLite snapshot.
             rows = _read_table(conn, "facts")
+            entities = _read_table(conn, "entities", optional=True)
+            links = _read_table(conn, "fact_entities", optional=True)
+            banks = _read_table(conn, "memory_banks", optional=True)
         finally:
             conn.close()
-        n = 0
+
+        fact_ids = {int(row["fact_id"]) for row in rows}
+        entity_ids = {int(row["entity_id"]) for row in entities}
+        if len(fact_ids) != len(rows) or len(entity_ids) != len(entities):
+            raise ValueError("duplicate legacy holographic identifiers")
+
+        by_name: dict[str, int] = {}
+        records: dict[str, dict] = {}
+        folded_names: set[str] = set()
+        for row in entities:
+            name = row.get("name")
+            if not isinstance(name, str) or not name.strip():
+                raise ValueError("invalid legacy entity name")
+            # The Vault runtime resolves entity names case-insensitively.
+            # Fail rather than silently collapse two distinct legacy IDs.
+            if name.casefold() in folded_names:
+                raise ValueError(f"ambiguous legacy entity name: {name!r}")
+            folded_names.add(name.casefold())
+            entity_id = int(row["entity_id"])
+            by_name[name] = entity_id
+            records[str(entity_id)] = dict(row)
+
+        fact_links: dict[int, list[int]] = {fact_id: [] for fact_id in fact_ids}
+        for row in links:
+            fact_id, entity_id = int(row["fact_id"]), int(row["entity_id"])
+            if fact_id not in fact_ids or entity_id not in entity_ids:
+                raise ValueError("orphan legacy fact_entities reference")
+            if entity_id in fact_links[fact_id]:
+                raise ValueError("duplicate legacy fact_entities reference")
+            fact_links[fact_id].append(entity_id)
+
+        if entities:
+            stage(tree / "HolographicMemory" / "entities.json", {
+                "next_id": max(entity_ids) + 1,
+                "by_name": by_name,
+                "records": records,
+            })
+        counts["holographic_entities"] = len(entities)
+        counts["holographic_links"] = len(links)
+
         for row in rows:
             vec = row.get("hrr_vector")
+            if vec is not None and not isinstance(vec, (bytes, bytearray)):
+                raise ValueError("invalid legacy fact HRR vector")
             data = dict(row)
-            data["hrr_vector_b64"] = base64.b64encode(vec).decode("ascii") if isinstance(vec, (bytes, bytearray)) else None
+            data["hrr_vector_b64"] = (
+                base64.b64encode(vec).decode("ascii") if vec is not None else None
+            )
             data.pop("hrr_vector", None)
-            stage(tree / "HolographicMemory" / "facts" / f"{_safe_id(row.get('fact_id'))}.json", data)
-            n += 1
-        counts["holographic_facts"] = n
+            data["entity_ids"] = fact_links[int(row["fact_id"])]
+            stage(
+                tree / "HolographicMemory" / "facts"
+                / f"{_safe_id(row.get('fact_id'))}.json",
+                data,
+            )
+        counts["holographic_facts"] = len(rows)
+
+        for row in banks:
+            name = row.get("bank_name")
+            vector = row.get("vector")
+            if not isinstance(name, str) or not name:
+                raise ValueError("invalid legacy memory bank name")
+            if not isinstance(vector, (bytes, bytearray)):
+                raise ValueError("invalid legacy memory bank vector")
+            # Match MemoryStore._bank_path exactly; stage() rejects
+            # collisions (e.g. names differing only by ':' and '_').
+            filename = quote(name.replace(":", "_"), safe="") + ".json"
+            data = dict(row)
+            data["vector_b64"] = base64.b64encode(vector).decode("ascii")
+            data.pop("vector", None)
+            stage(tree / "HolographicMemory" / "banks" / filename, data)
+        counts["holographic_banks"] = len(banks)
 
     # API responses
     db = home / "response_store.db"
