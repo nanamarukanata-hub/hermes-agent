@@ -97,6 +97,64 @@ def _write_json(vault: Path, dest: Path, data: dict, *, force: bool) -> None:
         tmp.unlink(missing_ok=True)
 
 
+
+def _write_batch(vault: Path, planned: list[tuple[Path, dict]], *, force: bool) -> None:
+    """Stage every non-force export before publishing; roll back on errors.
+
+    No-clobber links make it possible to remove only files created by this
+    invocation. This is best-effort rollback, not a crash-safe multi-file
+    transaction. --force retains its explicit overwrite behavior.
+    """
+    if force:
+        for dest, data in planned:
+            _write_json(vault, dest, data, force=True)
+        return
+
+    prepared: list[tuple[Path, Path]] = []
+    published: list[tuple[Path, Path]] = []
+    try:
+        # Serialization and fsync failures cannot leave published records.
+        for dest, data in planned:
+            _check_destination(vault, dest)
+            if dest.exists():
+                raise FileExistsError(f"Vault destination already exists: {dest}")
+            dest.parent.mkdir(parents=True, exist_ok=True)
+            fd, tmp_name = tempfile.mkstemp(prefix=f".{dest.name}.tmp-", dir=dest.parent)
+            tmp = Path(tmp_name)
+            prepared.append((tmp, dest))
+            with os.fdopen(fd, "w", encoding="utf-8") as stream:
+                stream.write(json.dumps(data, indent=2, ensure_ascii=False, default=str) + "\n")
+                stream.flush()
+                os.fsync(stream.fileno())
+
+        for tmp, dest in prepared:
+            _check_destination(vault, dest)
+            # Never overwrite a file created by another writer since preflight.
+            os.link(tmp, dest)
+            published.append((tmp, dest))
+    except BaseException as exc:
+        rollback_errors = []
+        for tmp, dest in reversed(published):
+            try:
+                source_stat = tmp.stat(follow_symlinks=False)
+                target_stat = dest.stat(follow_symlinks=False)
+                # Do not remove a path replaced by a concurrent Vault writer.
+                if (source_stat.st_dev, source_stat.st_ino) == (
+                    target_stat.st_dev, target_stat.st_ino
+                ):
+                    dest.unlink()
+            except FileNotFoundError:
+                pass
+            except OSError as error:
+                rollback_errors.append(f"{dest}: {error}")
+        if rollback_errors:
+            exc.add_note("Vault export rollback incomplete: " + "; ".join(rollback_errors))
+        raise
+    finally:
+        for tmp, _ in prepared:
+            tmp.unlink(missing_ok=True)
+
+
 def main() -> int:
     ap = argparse.ArgumentParser(description="Export legacy SQLite stores to Vault JSON (read-only).")
     ap.add_argument("--vault", required=True, help="Obsidian Vault root")
@@ -305,8 +363,7 @@ def main() -> int:
             if actual_names != expected_names:
                 raise ValueError(f"Vault export file set mismatch: {directory}")
     elif not args.dry_run:
-        for dest, data in planned:
-            _write_json(vault, dest, data, force=args.force)
+        _write_batch(vault, planned, force=args.force)
 
     print(json.dumps(counts, indent=2))
     return 0
