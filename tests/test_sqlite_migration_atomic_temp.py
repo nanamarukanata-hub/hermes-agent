@@ -103,3 +103,40 @@ def test_batch_rollback_preserves_concurrent_destination(tmp_path):
     assert not first.exists()
     assert second.read_text(encoding="utf-8") == "CONCURRENT"
     assert list(first.parent.glob(".*.tmp-*")) == []
+
+
+def test_force_batch_fsync_failure_preserves_existing_records(tmp_path):
+    vault, first, second, planned = _batch_paths(tmp_path)
+    first.parent.mkdir(parents=True)
+    first.write_text("ORIGINAL-1", encoding="utf-8")
+    second.write_text("ORIGINAL-2", encoding="utf-8")
+    real_fsync = os.fsync
+    calls = 0
+
+    def fail_second(fd):
+        nonlocal calls
+        calls += 1
+        if calls == 2:
+            raise OSError("force staging fsync failed")
+        return real_fsync(fd)
+
+    with patch.object(migration.os, "fsync", side_effect=fail_second):
+        with pytest.raises(OSError, match="force staging fsync failed"):
+            migration._write_batch(vault, planned, force=True)
+
+    assert first.read_text(encoding="utf-8") == "ORIGINAL-1"
+    assert second.read_text(encoding="utf-8") == "ORIGINAL-2"
+    assert list(first.parent.glob(".*.tmp-*")) == []
+
+
+def test_force_batch_replaces_existing_records_after_staging(tmp_path):
+    vault, first, second, planned = _batch_paths(tmp_path)
+    first.parent.mkdir(parents=True)
+    first.write_text("ORIGINAL-1", encoding="utf-8")
+    second.write_text("ORIGINAL-2", encoding="utf-8")
+
+    migration._write_batch(vault, planned, force=True)
+
+    assert json.loads(first.read_text(encoding="utf-8")) == {"user_id": "u1"}
+    assert json.loads(second.read_text(encoding="utf-8")) == {"user_id": "u2"}
+    assert list(first.parent.glob(".*.tmp-*")) == []
