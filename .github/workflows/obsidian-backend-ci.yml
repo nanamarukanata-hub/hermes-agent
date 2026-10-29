@@ -18,6 +18,7 @@ on:
       - 'tests/test_sqlite_migration_atomic_temp.py'
       - 'tests/test_sqlite_migration_preflight.py'
       - 'tests/test_holographic_migration_complete.py'
+      - 'tests/test_sqlite_migration_verify_file_sets.py'
       - 'tests/test_kanban_migration_guards.py'
       - 'hermes_cli/kanban_db.py'
       - 'tests/test_kanban_vault_metadata.py'
@@ -40,6 +41,7 @@ on:
       - 'tests/test_sqlite_migration_atomic_temp.py'
       - 'tests/test_sqlite_migration_preflight.py'
       - 'tests/test_holographic_migration_complete.py'
+      - 'tests/test_sqlite_migration_verify_file_sets.py'
       - 'tests/test_kanban_migration_guards.py'
       - 'hermes_cli/kanban_db.py'
       - 'tests/test_kanban_vault_metadata.py'
@@ -61,7 +63,7 @@ jobs:
       - name: Session migration dry-run and verification regression
         run: python -m unittest discover -s tests -t . -p 'test_sqlite_session_verify.py' -v
       - name: SQLite to Vault migration regression
-        run: python -m pytest tests/test_sqlite_migration.py tests/test_sqlite_migration_atomic_temp.py tests/test_sqlite_migration_preflight.py tests/test_holographic_migration_complete.py -q
+        run: python -m pytest tests/test_sqlite_migration.py tests/test_sqlite_migration_atomic_temp.py tests/test_sqlite_migration_preflight.py tests/test_holographic_migration_complete.py tests/test_sqlite_migration_verify_file_sets.py -q
       - name: Kanban read-only migration safety regression
         run: python -m unittest discover -s tests -t . -p 'test_kanban_migration_guards.py' -v
       - name: Kanban Vault metadata regression
