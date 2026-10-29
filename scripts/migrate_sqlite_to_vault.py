@@ -203,7 +203,7 @@ def main() -> int:
                 base64.b64encode(vec).decode("ascii") if vec is not None else None
             )
             data.pop("hrr_vector", None)
-            data["entity_ids"] = fact_links[_legacy_int_id(row["fact_id"])
+            data["entity_ids"] = fact_links[_legacy_int_id(row["fact_id"])]
             stage(
                 tree / "HolographicMemory" / "facts"
                 / f"{_safe_id(row.get('fact_id'))}.json",
