@@ -60,9 +60,9 @@ class SessionMigrationVerificationTests(unittest.TestCase):
 
         committed = migrate(self.source, commit=True)
         self.assertEqual(committed["written"], 1)
-        session = SessionDB().get_session("legacy1")
-        self.assertEqual(session["messages"][0]["content"][0]["text"], "日本語の会話")
-        self.assertEqual(session["messages"][0]["tool_calls"][0]["id"], "call-1")
+        messages = SessionDB().get_messages("legacy1")
+        self.assertEqual(messages[0]["content"][0]["text"], "日本語の会話")
+        self.assertEqual(messages[0]["tool_calls"][0]["id"], "call-1")
 
         before_verify = (
             self.vault / "06_Automation/Hermes/Sessions/legacy1/metadata.json"
