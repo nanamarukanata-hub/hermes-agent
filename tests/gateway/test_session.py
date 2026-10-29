@@ -1296,7 +1296,10 @@ class TestRewriteTranscriptPreservesReasoning:
             {"role": "assistant", "content": "after assistant"},
         ]
 
-        store.rewrite_transcript(session_id, replacement)
+        # The gateway must surface persistence errors to the caller instead
+        # of reporting a successful /retry, /undo, or /compress operation.
+        with pytest.raises(RuntimeError, match="simulated storage failure"):
+            store.rewrite_transcript(session_id, replacement)
 
         # The rewrite must roll back atomically — original messages preserved.
         after = db.get_messages_as_conversation(session_id)
