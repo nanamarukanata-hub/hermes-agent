@@ -12,11 +12,10 @@ overlap scoring (same public API, same ordering contract: most
 relevant first, then trust descending); HRR vectors are stored as
 base64 in the fact file instead of a BLOB column.
 
-``db_path`` is kept as a compatibility argument: a directory is used
-as the store root, a legacy ``*.db`` file path is interpreted as
-its parent + stem, and ``None`` resolves to the Vault
-(``HERMES_OBSIDIAN_VAULT``) or ``<hermes_home>/06_Automation/Hermes/
-HolographicMemory`` in the same format.
+``HERMES_OBSIDIAN_VAULT`` is required. ``db_path=None`` uses the
+Vault's standard HolographicMemory directory. Explicit paths must stay
+inside that Vault; legacy ``*.db`` paths are rejected rather than
+silently creating a second persistence location.
 """
 
 import base64
@@ -76,20 +75,28 @@ class MemoryStore:
         default_trust: float = 0.5,
         hrr_dim: int = 1024,
     ) -> None:
+        vault_env = os.environ.get("HERMES_OBSIDIAN_VAULT", "").strip()
+        if not vault_env:
+            raise RuntimeError(
+                "HERMES_OBSIDIAN_VAULT is required for holographic memory; "
+                "refusing to persist outside the Vault"
+            )
+        vault = Path(vault_env).expanduser().resolve(strict=False)
         if db_path is None:
-            vault = os.environ.get("HERMES_OBSIDIAN_VAULT", "").strip()
-            if vault:
-                root = Path(vault).expanduser() / "06_Automation" / "Hermes" / "HolographicMemory"
-            else:
-                from hermes_constants import get_hermes_home
-
-                root = get_hermes_home() / "06_Automation" / "Hermes" / "HolographicMemory"
+            root = vault / "06_Automation" / "Hermes" / "HolographicMemory"
         else:
-            p = Path(db_path).expanduser()
-            root = p if p.suffix != ".db" else p.parent / p.stem
-            if p.suffix == ".db":
-                # Legacy file path: the directory form is the new store.
-                pass
+            configured = Path(db_path).expanduser()
+            if configured.suffix.lower() == ".db":
+                raise ValueError(
+                    "Legacy SQLite db_path is not supported; configure a "
+                    "directory inside HERMES_OBSIDIAN_VAULT instead"
+                )
+            root = configured.resolve(strict=False)
+            if root == vault or not root.is_relative_to(vault):
+                raise ValueError(
+                    "Holographic memory db_path must be a directory inside "
+                    "HERMES_OBSIDIAN_VAULT"
+                )
         self.db_path = Path(root)
         self.db_path.mkdir(parents=True, exist_ok=True)
         self.facts_dir = self.db_path / "facts"
