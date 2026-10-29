@@ -24,6 +24,7 @@ import json
 import os
 import re
 import threading
+from contextlib import contextmanager
 from datetime import datetime, timezone
 from pathlib import Path
 
@@ -107,16 +108,34 @@ class MemoryStore:
         self.hrr_dim = hrr_dim
         self._hrr_available = hrr._HAS_NUMPY
         self._lock = threading.RLock()
+        self._lock_depth = 0
         self._lock_file = self.db_path / ".vault-writer.lock"
 
     # -- internal file helpers ---------------------------------------
-    def _locked(self, fn):
-        with open(self._lock_file, "a+", encoding="utf-8") as lock:
-            fcntl.flock(lock.fileno(), fcntl.LOCK_EX)
-            try:
-                return fn()
-            finally:
-                fcntl.flock(lock.fileno(), fcntl.LOCK_UN)
+    @contextmanager
+    def _locked(self):
+        """Serialize read-modify-write transactions across threads and processes.
+
+        Nested calls reuse the outer flock, avoiding a deadlock when add_fact
+        rebuilds HRR vectors and category banks.
+        """
+        with self._lock:
+            if self._lock_depth:
+                self._lock_depth += 1
+                try:
+                    yield
+                finally:
+                    self._lock_depth -= 1
+                return
+
+            with open(self._lock_file, "a+", encoding="utf-8") as lock:
+                fcntl.flock(lock.fileno(), fcntl.LOCK_EX)
+                self._lock_depth = 1
+                try:
+                    yield
+                finally:
+                    self._lock_depth = 0
+                    fcntl.flock(lock.fileno(), fcntl.LOCK_UN)
 
     def _fact_path(self, fact_id: int) -> Path:
         return self.facts_dir / f"{int(fact_id)}.json"
@@ -202,7 +221,7 @@ class MemoryStore:
         fact_id without modifying the row. Extracts entities from
         the content and links them to the fact.
         """
-        with self._lock:
+        with self._locked():
             content = content.strip()
             if not content:
                 raise ValueError("content must not be empty")
@@ -251,7 +270,7 @@ class MemoryStore:
         relevance then trust_score descending. Also increments
         retrieval_count for matched facts.
         """
-        with self._lock:
+        with self._locked():
             query = query.strip()
             if not query:
                 return []
@@ -351,7 +370,7 @@ class MemoryStore:
 
         Returns True if the fact existed, False otherwise.
         """
-        with self._lock:
+        with self._locked():
             fact = self._read_fact(fact_id)
             if fact is None:
                 return False
@@ -374,7 +393,7 @@ class MemoryStore:
 
     def remove_fact(self, fact_id: int) -> bool:
         """Delete a fact and its entity links. Returns True if it existed."""
-        with self._lock:
+        with self._locked():
             fact = self._read_fact(fact_id)
             if fact is None:
                 return False
@@ -390,7 +409,7 @@ class MemoryStore:
         limit: int = 50,
     ) -> list[dict]:
         """Browse facts ordered by trust_score descending."""
-        with self._lock:
+        with self._locked():
             facts = [
                 f for f in self._all_facts()
                 if f.get("trust_score", 0) >= min_trust
@@ -408,7 +427,7 @@ class MemoryStore:
         Returns a dict with fact_id, old_trust, new_trust, helpful_count.
         Raises KeyError if fact_id does not exist.
         """
-        with self._lock:
+        with self._locked():
             fact = self._read_fact(fact_id)
             if fact is None:
                 raise KeyError(f"fact_id {fact_id} not found")
@@ -493,7 +512,7 @@ class MemoryStore:
 
     def _compute_hrr_vector(self, fact_id: int, content: str) -> None:
         """Compute and store HRR vector for a fact. No-op if numpy unavailable."""
-        with self._lock:
+        with self._locked():
             if not self._hrr_available:
                 return
             entities = self.fact_entity_names(fact_id)
@@ -506,7 +525,7 @@ class MemoryStore:
 
     def _rebuild_bank(self, category: str) -> None:
         """Full rebuild of a category's memory bank from all its fact vectors."""
-        with self._lock:
+        with self._locked():
             if not self._hrr_available:
                 return
             bank_name = f"cat:{category}"
@@ -539,7 +558,7 @@ class MemoryStore:
 
         Returns the number of facts processed.
         """
-        with self._lock:
+        with self._locked():
             if not self._hrr_available:
                 return 0
             if dim is not None:
