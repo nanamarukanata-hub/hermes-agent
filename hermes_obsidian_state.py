@@ -25,7 +25,7 @@ _VALID_ID = re.compile(r"^[\w.-]{1,180}$", flags=re.ASCII)
 class SessionDB:
     """Hermes SessionDB-compatible file backend for the Discord/CLI core."""
 
-    def __init__(self, db_path=None, vault_path=None):
+    def __init__(self, db_path=None, vault_path=None, create_dirs=True):
         # vault_path is an explicit override for tests and embedders;
         # otherwise HERMES_OBSIDIAN_VAULT is required.  db_path is a
         # legacy compatibility argument and is ignored (it used to
@@ -47,7 +47,8 @@ class SessionDB:
             if root.exists() and not root.is_dir():
                 raise RuntimeError("Vault session path component is not a directory")
         self.root = root
-        self.root.mkdir(parents=True, exist_ok=True)
+        if create_dirs:
+            self.root.mkdir(parents=True, exist_ok=True)
         if self.root.is_symlink() or not self.root.resolve().is_relative_to(self.vault):
             raise RuntimeError("Sessions directory must remain inside the Vault")
         self.db_path = self.root    # Compatibility: points to a directory, never a .db.
