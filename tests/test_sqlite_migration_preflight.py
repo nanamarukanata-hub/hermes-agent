@@ -55,6 +55,30 @@ class SQLiteVaultMigrationPreflightTests(unittest.TestCase):
         self.assertFalse((self.vault / "06_Automation/Hermes/RetainQueue/1.json").exists())
         self.assertEqual(source.read_bytes(), before)
 
+    def test_non_numeric_entity_id_rejected_before_any_export(self):
+        source = self.queue()
+        with sqlite3.connect(self.home / "memory_store.db") as conn:
+            conn.execute("CREATE TABLE facts (fact_id INTEGER PRIMARY KEY, hrr_vector BLOB)")
+            conn.execute("INSERT INTO facts VALUES (1, NULL)")
+            conn.execute("CREATE TABLE entities (entity_id TEXT, name TEXT)")
+            conn.execute("INSERT INTO entities VALUES ('not-an-id', 'Alice')")
+        before = source.read_bytes()
+        result = self.run_cli()
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIn("unsafe legacy record identifier", result.stderr)
+        self.assertFalse((self.vault / "06_Automation/Hermes/RetainQueue/1.json").exists())
+        self.assertEqual(source.read_bytes(), before)
+
+    def test_noncanonical_numeric_fact_id_rejected_before_any_export(self):
+        self.queue()
+        with sqlite3.connect(self.home / "memory_store.db") as conn:
+            conn.execute("CREATE TABLE facts (fact_id TEXT, hrr_vector BLOB)")
+            conn.execute("INSERT INTO facts VALUES ('01', NULL)")
+        result = self.run_cli()
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIn("unsafe legacy record identifier", result.stderr)
+        self.assertFalse((self.vault / "06_Automation/Hermes/RetainQueue/1.json").exists())
+
     def test_existing_destination_blocks_entire_export(self):
         self.queue(((1, "[]"), (2, "[]")))
         out = self.vault / "06_Automation/Hermes/RetainQueue"
