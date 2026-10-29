@@ -54,6 +54,9 @@ class SessionMigrationVerificationTests(unittest.TestCase):
         self.assertEqual(dry["mode"], "dry-run")
         self.assertEqual(dry["messages"], 1)
 
+        # Dry-run no longer initializes the Sessions directory. Create it
+        # explicitly to exercise missing-record verification separately.
+        (self.vault / "06_Automation/Hermes/Sessions").mkdir(parents=True)
         with self.assertRaisesRegex(RuntimeError, "Missing Vault sessions"):
             migrate(self.source, verify=True)
         self.assertFalse((self.vault / "06_Automation/Hermes/Sessions/legacy1").exists())
