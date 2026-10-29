@@ -2,6 +2,8 @@
 
 import base64
 import json
+
+import pytest
 import sqlite3
 import subprocess
 import sys
@@ -135,3 +137,87 @@ def test_full_holographic_dry_run_writes_nothing(tmp_path):
     assert result.returncode == 0, result.stderr
     assert json.loads(result.stdout)["holographic_links"] == 1
     assert not (vault / "06_Automation").exists()
+
+
+def test_verify_complete_holographic_export_is_read_only(tmp_path):
+    home = tmp_path / "home"
+    db = _legacy_database(home)
+    vault = tmp_path / "vault"
+    assert _run(home, vault).returncode == 0
+    before_db = db.read_bytes()
+    root = vault / "06_Automation" / "Hermes" / "HolographicMemory"
+    before_files = {str(p): p.read_bytes() for p in root.rglob("*.json")}
+
+    result = _run(home, vault, "--verify")
+
+    assert result.returncode == 0, result.stderr
+    assert json.loads(result.stdout)["holographic_links"] == 1
+    assert db.read_bytes() == before_db
+    assert {str(p): p.read_bytes() for p in root.rglob("*.json")} == before_files
+
+
+@pytest.mark.parametrize(
+    ("relative_path", "field", "replacement"),
+    [
+        ("facts/1.json", "content", "tampered fact"),
+        ("facts/1.json", "entity_ids", []),
+        ("entities.json", "records", {"7": {"name": "tampered"}}),
+        ("banks/cat_notes.json", "vector_b64", "AAAA"),
+    ],
+)
+def test_verify_detects_record_mismatch_without_writing(
+    tmp_path, relative_path, field, replacement
+):
+    home = tmp_path / "home"
+    db = _legacy_database(home)
+    vault = tmp_path / "vault"
+    assert _run(home, vault).returncode == 0
+    target = vault / "06_Automation" / "Hermes" / "HolographicMemory" / relative_path
+    record = json.loads(target.read_text(encoding="utf-8"))
+    record[field] = replacement
+    target.write_text(json.dumps(record), encoding="utf-8")
+    before_target = target.read_bytes()
+    before_db = db.read_bytes()
+
+    result = _run(home, vault, "--verify")
+
+    assert result.returncode != 0
+    assert "Vault export mismatch" in result.stderr
+    assert target.read_bytes() == before_target
+    assert db.read_bytes() == before_db
+
+
+def test_verify_detects_unexpected_fact_file(tmp_path):
+    home = tmp_path / "home"
+    _legacy_database(home)
+    vault = tmp_path / "vault"
+    assert _run(home, vault).returncode == 0
+    extra = vault / "06_Automation" / "Hermes" / "HolographicMemory" / "facts" / "999.json"
+    extra.write_text('{"fact_id":999}', encoding="utf-8")
+
+    result = _run(home, vault, "--verify")
+
+    assert result.returncode != 0
+    assert "Vault export file set mismatch" in result.stderr
+    assert extra.exists()
+
+
+def test_verify_missing_export_fails_without_creating_files(tmp_path):
+    home = tmp_path / "home"
+    _legacy_database(home)
+    vault = tmp_path / "vault"
+    result = _run(home, vault, "--verify")
+    assert result.returncode != 0
+    assert "missing Vault export" in result.stderr
+    assert not vault.exists()
+
+
+def test_verify_rejects_mutating_or_dry_run_flags(tmp_path):
+    home = tmp_path / "home"
+    _legacy_database(home)
+    vault = tmp_path / "vault"
+    for flag in ("--force", "--dry-run"):
+        result = _run(home, vault, "--verify", flag)
+        assert result.returncode != 0
+        assert "--verify cannot be combined" in result.stderr
+    assert not vault.exists()
