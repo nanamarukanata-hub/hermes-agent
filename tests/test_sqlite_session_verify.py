@@ -82,6 +82,11 @@ class SessionMigrationVerificationTests(unittest.TestCase):
             migrate(self.source, verify=True)
         self.assertEqual(self.source.read_bytes(), original)
 
+    def test_verify_only_never_initializes_missing_vault_directories(self):
+        with self.assertRaisesRegex(RuntimeError, "Existing Vault Sessions directory"):
+            migrate(self.source, verify=True)
+        self.assertFalse((self.vault / "06_Automation").exists())
+
     def test_postwrite_verification_detects_metadata_corruption(self):
         original_save = SessionDB._save
 
