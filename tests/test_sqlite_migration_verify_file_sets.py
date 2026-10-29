@@ -80,3 +80,32 @@ def test_verify_rejects_unexpected_json_without_mutation(tmp_path, subdir, extra
     assert "Vault export file set mismatch" in result.stderr
     assert [p.read_bytes() for p in sources] == before_sources
     assert extra.read_bytes() == before_extra
+
+
+@pytest.mark.parametrize(
+    ("names", "expected_error"),
+    [
+        (("chat", "chat"), "duplicate legacy conversation name"),
+        ((None,), "invalid legacy conversation name"),
+        (("",), "invalid legacy conversation name"),
+    ],
+)
+def test_conversation_alias_export_rejects_lossy_rows_before_writes(
+    tmp_path, names, expected_error
+):
+    home, vault = tmp_path / "home", tmp_path / "vault"
+    sources = _seed(home)
+    with sqlite3.connect(sources[1]) as conn:
+        conn.executemany(
+            "INSERT INTO conversations (name, response_id) VALUES (?, ?)",
+            [(name, "resp-1") for name in names],
+        )
+    before_sources = [p.read_bytes() for p in sources]
+
+    result = _run(home, vault)
+
+    assert result.returncode != 0
+    assert expected_error in result.stderr
+    # The earlier RetainQueue and response records are staged, not written.
+    assert not (vault / "06_Automation" / "Hermes").exists()
+    assert [p.read_bytes() for p in sources] == before_sources
