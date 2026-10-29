@@ -10,6 +10,8 @@ on:
       - 'gateway/platforms/helpers.py'
       - 'tests/gateway/test_discord_thread_persistence.py'
       - 'tests/test_obsidian_session_state.py'
+      - 'scripts/migrate_sessions_to_obsidian.py'
+      - 'tests/test_sqlite_session_verify.py'
       - 'scripts/migrate_kanban_to_vault.py'
       - 'tests/test_kanban_migration_guards.py'
       - 'hermes_cli/kanban_db.py'
@@ -25,6 +27,8 @@ on:
       - 'gateway/platforms/helpers.py'
       - 'tests/gateway/test_discord_thread_persistence.py'
       - 'tests/test_obsidian_session_state.py'
+      - 'scripts/migrate_sessions_to_obsidian.py'
+      - 'tests/test_sqlite_session_verify.py'
       - 'scripts/migrate_kanban_to_vault.py'
       - 'tests/test_kanban_migration_guards.py'
       - 'hermes_cli/kanban_db.py'
@@ -44,6 +48,8 @@ jobs:
       - name: SQLite-free backend regression
         # -t . keeps tests/gateway from shadowing the real gateway package.
         run: python -m unittest discover -s tests -t . -p 'test_obsidian_session_state.py' -v
+      - name: Session migration dry-run and verification regression
+        run: python -m unittest discover -s tests -t . -p 'test_sqlite_session_verify.py' -v
       - name: Kanban read-only migration safety regression
         run: python -m unittest discover -s tests -t . -p 'test_kanban_migration_guards.py' -v
       - name: Kanban Vault metadata regression
