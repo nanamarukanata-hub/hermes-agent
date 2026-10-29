@@ -24,6 +24,7 @@ import json
 import os
 import re
 import sqlite3
+import tempfile
 from pathlib import Path
 
 
@@ -67,9 +68,15 @@ def _write_json(vault: Path, dest: Path, data: dict, *, force: bool) -> None:
     if dest.exists() and not force:
         raise FileExistsError(f"Vault destination already exists: {dest}")
     dest.parent.mkdir(parents=True, exist_ok=True)
-    tmp = dest.with_name(f".{dest.name}.tmp-{os.getpid()}")
+    # A PID-derived name could be pre-planted as a symlink to a file outside
+    # the Vault. Exclusive creation prevents following that link.
+    fd, tmp_name = tempfile.mkstemp(prefix=f".{dest.name}.tmp-", dir=dest.parent)
+    tmp = Path(tmp_name)
     try:
-        tmp.write_text(json.dumps(data, indent=2, ensure_ascii=False, default=str) + "\n", encoding="utf-8")
+        with os.fdopen(fd, "w", encoding="utf-8") as stream:
+            stream.write(json.dumps(data, indent=2, ensure_ascii=False, default=str) + "\n")
+            stream.flush()
+            os.fsync(stream.fileno())
         if force:
             os.replace(tmp, dest)
         else:
