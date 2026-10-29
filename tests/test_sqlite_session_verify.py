@@ -82,6 +82,15 @@ class SessionMigrationVerificationTests(unittest.TestCase):
             migrate(self.source, verify=True)
         self.assertEqual(self.source.read_bytes(), original)
 
+    def test_dry_run_never_initializes_missing_vault_directories(self):
+        source_before = self.source.read_bytes()
+        result = migrate(self.source)
+        self.assertEqual(result["mode"], "dry-run")
+        self.assertEqual(result["sessions"], 1)
+        self.assertEqual(result["written"], 0)
+        self.assertFalse((self.vault / "06_Automation").exists())
+        self.assertEqual(self.source.read_bytes(), source_before)
+
     def test_verify_only_never_initializes_missing_vault_directories(self):
         with self.assertRaisesRegex(RuntimeError, "Existing Vault Sessions directory"):
             migrate(self.source, verify=True)
