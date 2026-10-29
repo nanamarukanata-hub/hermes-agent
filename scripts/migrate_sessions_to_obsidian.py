@@ -93,8 +93,15 @@ def migrate(dbfile, commit=False, verify=False):
     # Preflight the entire dataset BEFORE writing any session. Reject invalid
     # session identifiers and conflicting destinations.
     prepared = []
+    seen_ids = set()
     for session in sessions:
         sid = session["id"]
+        # Validate duplicate IDs before any writes: a duplicate otherwise
+        # passes the initial preflight, then fails after earlier records have
+        # already been committed to the Vault.
+        if sid in seen_ids:
+            raise RuntimeError(f"Duplicate SQLite session ID: {sid}")
+        seen_ids.add(sid)
         target._folder(sid)
         record = {k: _decode(k, v) for k, v in session.items()}
         record["messages"] = messages.get(sid, [])
