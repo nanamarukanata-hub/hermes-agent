@@ -250,6 +250,9 @@ def main() -> int:
             mapping = {r.get("name"): r.get("response_id") for r in conv if r.get("name")}
             stage(tree / "ApiResponses" / "conversations.json", mapping)
 
+    if args.verify and not counts:
+        raise FileNotFoundError("no legacy SQLite sources found for verification")
+
     # Validate every legacy record against its published Vault JSON without writes.
     # Compare complete records, including base64 vectors, entity links and metadata.
     if args.verify:
