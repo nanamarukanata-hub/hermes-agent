@@ -24,9 +24,11 @@ import json
 import os
 import re
 import threading
+import tempfile
 from contextlib import contextmanager
 from datetime import datetime, timezone
 from pathlib import Path
+from urllib.parse import quote
 
 try:
     from . import holographic as hrr
@@ -59,12 +61,18 @@ def _now_iso() -> str:
 
 def _atomic_write_json(path: Path, data: dict) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
-    tmp = path.with_name(f".{path.name}.tmp-{os.getpid()}")
-    with open(tmp, "w", encoding="utf-8") as f:
-        f.write(json.dumps(data, indent=2, ensure_ascii=False) + "\n")
-        f.flush()
-        os.fsync(f.fileno())
-    os.replace(tmp, path)
+    # A predictable PID-only temp name can be pre-planted as a symlink.
+    # mkstemp uses an exclusive create and a unique name in the target dir.
+    fd, tmp_name = tempfile.mkstemp(prefix=f".{path.name}.tmp-", dir=path.parent)
+    tmp = Path(tmp_name)
+    try:
+        with os.fdopen(fd, "w", encoding="utf-8") as f:
+            f.write(json.dumps(data, indent=2, ensure_ascii=False) + "\n")
+            f.flush()
+            os.fsync(f.fileno())
+        os.replace(tmp, path)
+    finally:
+        tmp.unlink(missing_ok=True)
 
 
 class MemoryStore:
@@ -344,10 +352,15 @@ class MemoryStore:
             out.append(self._public(fact, include_vector=True))
         return out
 
+    def _bank_path(self, bank_name: str) -> Path:
+        """Encode a bank key as one filename, never a directory path."""
+        safe_name = quote(bank_name.replace(":", "_"), safe="")
+        return self.banks_dir / f"{safe_name}.json"
+
     def get_bank_vector(self, bank_name: str) -> bytes | None:
         """Return a memory bank's vector bytes, or None."""
-        p = self.banks_dir / f"{bank_name.replace(':', '_')}.json"
-        if not p.exists():
+        p = self._bank_path(bank_name)
+        if p.is_symlink() or not p.exists():
             return None
         try:
             data = json.loads(p.read_text(encoding="utf-8"))
@@ -541,7 +554,7 @@ class MemoryStore:
             if not self._hrr_available:
                 return
             bank_name = f"cat:{category}"
-            bank_path = self.banks_dir / f"{bank_name.replace(':', '_')}.json"
+            bank_path = self._bank_path(bank_name)
             vectors = []
             for fact in self._all_facts():
                 if fact.get("category") != category:
