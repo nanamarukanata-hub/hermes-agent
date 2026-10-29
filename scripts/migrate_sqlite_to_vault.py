@@ -50,6 +50,15 @@ def _safe_id(value: object) -> str:
     return name
 
 
+def _legacy_int_id(value: object) -> int:
+    """Validate integer legacy IDs before using them for links or filenames."""
+    name = _safe_id(value)
+    # Reject noncanonical spellings that could alias the same numeric ID.
+    if re.fullmatch(r"(?:0|[1-9][0-9]*)", name) is None:
+        raise ValueError(f"unsafe legacy record identifier: {value!r}")
+    return int(name)
+
+
 def _check_destination(vault: Path, dest: Path) -> None:
     # Reject both traversal and symlink redirection, including existing files.
     try:
@@ -146,8 +155,8 @@ def main() -> int:
         finally:
             conn.close()
 
-        fact_ids = {int(row["fact_id"]) for row in rows}
-        entity_ids = {int(row["entity_id"]) for row in entities}
+        fact_ids = {_legacy_int_id(row["fact_id"]) for row in rows}
+        entity_ids = {_legacy_int_id(row["entity_id"]) for row in entities}
         if len(fact_ids) != len(rows) or len(entity_ids) != len(entities):
             raise ValueError("duplicate legacy holographic identifiers")
 
@@ -163,13 +172,13 @@ def main() -> int:
             if name.casefold() in folded_names:
                 raise ValueError(f"ambiguous legacy entity name: {name!r}")
             folded_names.add(name.casefold())
-            entity_id = int(row["entity_id"])
+            entity_id = _legacy_int_id(row["entity_id"])
             by_name[name] = entity_id
             records[str(entity_id)] = dict(row)
 
         fact_links: dict[int, list[int]] = {fact_id: [] for fact_id in fact_ids}
         for row in links:
-            fact_id, entity_id = int(row["fact_id"]), int(row["entity_id"])
+            fact_id, entity_id = _legacy_int_id(row["fact_id"]), _legacy_int_id(row["entity_id"])
             if fact_id not in fact_ids or entity_id not in entity_ids:
                 raise ValueError("orphan legacy fact_entities reference")
             if entity_id in fact_links[fact_id]:
@@ -194,7 +203,7 @@ def main() -> int:
                 base64.b64encode(vec).decode("ascii") if vec is not None else None
             )
             data.pop("hrr_vector", None)
-            data["entity_ids"] = fact_links[int(row["fact_id"])]
+            data["entity_ids"] = fact_links[_legacy_int_id(row["fact_id"])
             stage(
                 tree / "HolographicMemory" / "facts"
                 / f"{_safe_id(row.get('fact_id'))}.json",
