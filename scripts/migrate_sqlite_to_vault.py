@@ -278,6 +278,22 @@ def main() -> int:
                     raise ValueError(f"Vault export file set mismatch: {directory}")
             if counts["holographic_entities"] == 0 and (root / "entities.json").exists():
                 raise ValueError(f"unexpected Vault entity index: {root / 'entities.json'}")
+        # The record-by-record comparison above does not detect extra files.
+        # Check the complete file set for the other two SQLite-backed stores,
+        # just as for HolographicMemory. Only inspect a store if its legacy
+        # source exists; unrelated live Vault stores are not migration inputs.
+        for source_name, subdir in (
+            ("retaindb_queue.db", "RetainQueue"),
+            ("response_store.db", "ApiResponses"),
+        ):
+            if not (home / source_name).exists():
+                continue
+            directory = tree / subdir
+            _check_destination(vault, directory)
+            expected_names = {dest.name for dest, _ in planned if dest.parent == directory}
+            actual_names = {p.name for p in directory.glob("*.json")} if directory.is_dir() else set()
+            if actual_names != expected_names:
+                raise ValueError(f"Vault export file set mismatch: {directory}")
     elif not args.dry_run:
         for dest, data in planned:
             _write_json(vault, dest, data, force=args.force)
