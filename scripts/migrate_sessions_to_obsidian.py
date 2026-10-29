@@ -88,8 +88,10 @@ def migrate(dbfile, commit=False, verify=False):
         )
         if not existing.is_dir():
             raise RuntimeError("Existing Vault Sessions directory required for verification")
-    # Dry-run and verification must not create directories in the Vault.
-    target = SessionDB(create_dirs=commit)
+    # No mode may create Vault directories until the entire SQLite dataset
+    # has passed preflight. In particular, --commit must fail without touching
+    # an empty Vault when duplicate/invalid IDs or orphan messages are found.
+    target = SessionDB(create_dirs=False)
     # Preflight the entire dataset BEFORE writing any session. Reject invalid
     # session identifiers and conflicting destinations.
     prepared = []
@@ -135,6 +137,9 @@ def migrate(dbfile, commit=False, verify=False):
         return result
     if not commit:
         return result
+    # Preflight is complete. Initialize the writer only now; the locked loop
+    # below rechecks every destination against concurrent changes.
+    target = SessionDB(create_dirs=True)
     with target._guard():
         for sid, record, already in prepared:
             # Recheck ALL destinations under the writer lock, including ones
