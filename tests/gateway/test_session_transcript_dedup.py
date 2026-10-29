@@ -79,6 +79,38 @@ class TestSingleCanonicalWrite:
         assert legacy.read_text() == legacy_before
 
 
+    def test_append_vault_failure_is_not_silently_ignored(self, store, monkeypatch):
+        """An unwritten message must not be reported as successfully persisted."""
+        sid = "failed_append"
+        store._db.create_session(sid, source="test")
+
+        def fail_append(*args, **kwargs):
+            raise OSError("simulated vault write failure")
+
+        monkeypatch.setattr(store._db, "append_message", fail_append)
+        with pytest.raises(OSError, match="simulated vault write failure"):
+            store.append_to_transcript(sid, {"role": "user", "content": "must persist"})
+
+        assert store._db.get_messages_as_conversation(sid) == []
+        assert not store.get_transcript_path(sid).exists()
+
+    def test_rewrite_vault_failure_is_not_silently_ignored(self, store, monkeypatch):
+        """A failed retry/undo/compress rewrite must reach its caller."""
+        sid = "failed_rewrite"
+        store._db.create_session(sid, source="test")
+        store._db.append_message(sid, role="user", content="original")
+
+        def fail_rewrite(*args, **kwargs):
+            raise OSError("simulated vault rewrite failure")
+
+        monkeypatch.setattr(store._db, "replace_messages", fail_rewrite)
+        with pytest.raises(OSError, match="simulated vault rewrite failure"):
+            store.rewrite_transcript(sid, [{"role": "user", "content": "replacement"}])
+
+        assert [m["content"] for m in store._db.get_messages_as_conversation(sid)] == ["original"]
+        assert not store.get_transcript_path(sid).exists()
+
+
 class TestDeduplicatedLoad:
     def test_identical_sources_return_each_message_once(self, store):
         sid = "dedup_identical"
