@@ -51,19 +51,44 @@ class VaultDir:
     """One directory of JSON records under a Vault tree."""
 
     def __init__(self, root: str | Path, *subpath: str):
+        # The root is supplied by the caller; every child component must stay
+        # inside it.  Check *before* mkdir, which otherwise follows symlinks.
         self.root = Path(root).expanduser()
+        for part in subpath:
+            if not isinstance(part, str) or part in ("", ".", "..") or Path(part).name != part:
+                raise ValueError(f"invalid vault subpath: {part!r}")
+        self._subpath = subpath
         self.dir = self.root.joinpath(*subpath)
+        self._assert_contained()
         self.dir.mkdir(parents=True, exist_ok=True)
+        self._assert_contained()
         self.lock_file = self.dir / ".vault-writer.lock"
 
+    def _assert_contained(self) -> None:
+        """Reject a redirected Vault root or any symlinked child directory."""
+        if self.root.is_symlink():
+            raise ValueError("symlink in vault path is rejected")
+        anchor = self.root.resolve(strict=False)
+        current = self.root
+        for part in self._subpath:
+            current = current / part
+            if current.is_symlink():
+                raise ValueError("symlink in vault path is rejected")
+            resolved = current.resolve(strict=False)
+            if resolved != anchor and anchor not in resolved.parents:
+                raise ValueError("path escapes vault")
+
     def path(self, record_id: str) -> Path:
+        self._assert_contained()
         candidate = self.dir / f"{validate_id(record_id)}.json"
         if candidate.is_symlink():
             raise ValueError("symlink in vault path is rejected")
         return candidate
 
     def _locked(self, fn):
+        self._assert_contained()
         self.dir.mkdir(parents=True, exist_ok=True)
+        self._assert_contained()
         # A lock symlink must never redirect the writer outside the Vault.
         flags = os.O_CREAT | os.O_RDWR | os.O_NOFOLLOW
         fd = os.open(self.lock_file, flags, 0o600)
@@ -117,6 +142,7 @@ class VaultDir:
         return True
 
     def list_ids(self) -> list[str]:
+        self._assert_contained()
         ids = []
         for p in sorted(self.dir.glob("*.json")):
             if p.is_symlink():
