@@ -84,7 +84,7 @@ class MemoryStore:
             )
         vault = Path(vault_env).expanduser().resolve(strict=False)
         if db_path is None:
-            root = vault / "06_Automation" / "Hermes" / "HolographicMemory"
+            root = (vault / "06_Automation" / "Hermes" / "HolographicMemory").resolve(strict=False)
         else:
             configured = Path(db_path).expanduser()
             if configured.suffix.lower() == ".db":
@@ -93,11 +93,23 @@ class MemoryStore:
                     "directory inside HERMES_OBSIDIAN_VAULT instead"
                 )
             root = configured.resolve(strict=False)
-            if root == vault or not root.is_relative_to(vault):
-                raise ValueError(
-                    "Holographic memory db_path must be a directory inside "
-                    "HERMES_OBSIDIAN_VAULT"
-                )
+
+        # Validate the default path too: a symlinked Vault subdirectory must
+        # not redirect facts to a location outside the configured Vault.
+        if root == vault or not root.is_relative_to(vault):
+            raise ValueError(
+                "Holographic memory db_path must be a directory inside "
+                "HERMES_OBSIDIAN_VAULT"
+            )
+        # Check existing child links *before* creating any directories.
+        # A symlinked facts/ or banks/ directory would otherwise bypass the
+        # root check and silently persist data outside the Vault store.
+        for child_name in ("facts", "banks", ".vault-writer.lock", "entities.json"):
+            child = root / child_name
+            if not child.resolve(strict=False).is_relative_to(root):
+                raise ValueError("Holographic memory path escapes its Vault directory")
+        if (root / ".vault-writer.lock").is_symlink():
+            raise ValueError("Holographic memory lock file must not be a symlink")
         self.db_path = Path(root)
         self.db_path.mkdir(parents=True, exist_ok=True)
         self.facts_dir = self.db_path / "facts"
