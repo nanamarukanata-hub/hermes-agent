@@ -44,7 +44,14 @@ is read-only to the migration code and is **never automatically deleted**.
 python scripts/migrate_sessions_to_obsidian.py --source ~/.hermes/state.db
 # Inspect the reported counts. Only then:
 python scripts/migrate_sessions_to_obsidian.py --source ~/.hermes/state.db --commit
+# With the gateway still stopped, verify every migrated session and message:
+python scripts/migrate_sessions_to_obsidian.py --source ~/.hermes/state.db --verify-only
 ```
+
+The `--verify-only` mode is read-only and compares complete source session metadata
+and message contents with Vault records. It fails on missing or conflicting
+sessions; aggregate counts alone are not treated as proof of migration.
+Do not use this verification while the gateway is modifying session records.
 
 The migrator's `sqlite3` dependency is offline and one-time. It is not used by
 the Hermes runtime. Stop on conflicts instead of overwriting newer Vault state.
