@@ -331,10 +331,19 @@ class _Client:
 class _WriteQueue:
     """Vault-backed durable async queue; pending JSON records replay on startup."""
 
-    def __init__(self, client: _Client, queue_dir: Path):
+    def __init__(self, client: _Client, queue_dir: Path, *, vault_root: Path | None = None):
         self._client = client
         self._queue_dir = Path(queue_dir)
-        self._store = VaultDir(self._queue_dir)
+        if vault_root is not None:
+            # Anchor containment checks at the Vault root, not at RetainQueue:
+            # otherwise a symlinked 06_Automation parent would go unnoticed.
+            expected = Path(vault_root) / "06_Automation" / "Hermes" / "RetainQueue"
+            if self._queue_dir != expected:
+                raise ValueError("RetainQueue must be inside the configured Vault")
+            self._store = VaultDir(vault_root, "06_Automation", "Hermes", "RetainQueue")
+        else:
+            # Preserve the isolated queue-directory constructor for tests.
+            self._store = VaultDir(self._queue_dir)
         self._q: queue.Queue = queue.Queue()
         # Reconstruct pending work before starting the worker. Invalid records
         # remain untouched for manual inspection rather than being deleted.
@@ -501,7 +510,7 @@ class RetainDBMemoryProvider(MemoryProvider):
         if vault_root is None:
             raise RuntimeError("HERMES_OBSIDIAN_VAULT is required for RetainDB's durable queue")
         queue_dir = vault_root / "06_Automation" / "Hermes" / "RetainQueue"
-        self._queue = _WriteQueue(self._client, queue_dir)
+        self._queue = _WriteQueue(self._client, queue_dir, vault_root=vault_root)
 
         # Seed agent identity from SOUL.md in background
         soul_path = hermes_home_path / "SOUL.md"
