@@ -88,7 +88,8 @@ def migrate(dbfile, commit=False, verify=False):
         )
         if not existing.is_dir():
             raise RuntimeError("Existing Vault Sessions directory required for verification")
-    target = SessionDB()
+    # Dry-run and verification must not create directories in the Vault.
+    target = SessionDB(create_dirs=commit)
     # Preflight the entire dataset BEFORE writing any session. Reject invalid
     # session identifiers and conflicting destinations.
     prepared = []
