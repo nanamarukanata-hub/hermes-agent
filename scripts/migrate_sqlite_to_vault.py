@@ -111,7 +111,7 @@ def _write_batch(vault: Path, planned: list[tuple[Path, dict]], *, force: bool) 
         # Serialization and fsync failures cannot leave published records.
         for dest, data in planned:
             _check_destination(vault, dest)
-            if dest.exists():
+            if dest.exists() and not force:
                 raise FileExistsError(f"Vault destination already exists: {dest}")
             dest.parent.mkdir(parents=True, exist_ok=True)
             fd, tmp_name = tempfile.mkstemp(prefix=f".{dest.name}.tmp-", dir=dest.parent)
