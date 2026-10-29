@@ -45,7 +45,7 @@ def test_invalid_python_is_not_silently_marked_clean(tmp_path):
 def test_database_files_are_reported_without_modification(tmp_path):
     for name in ("state.db", "memory.sqlite", "cache.sqlite3"):
         (tmp_path / name).write_bytes(b"untouched")
-    before = {p.name: p.read_bytes() for p in tmp_path.iterdir()}
+    before = {p.name: p.read_bytes() for p in tmp_path.iterdir() if p.is_file()}
     result = audit(tmp_path)
     assert {Path(p).name for p in result["db_files"]} == set(before)
-    assert {p.name: p.read_bytes() for p in tmp_path.iterdir()} == before
+    assert {p.name: p.read_bytes() for p in tmp_path.iterdir() if p.is_file()} == before
