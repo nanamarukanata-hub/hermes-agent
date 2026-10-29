@@ -325,18 +325,26 @@ class TestTryRecoverPrimaryTransport:
         assert result is False
 
     def test_allowed_for_anthropic_direct(self):
-        """Direct Anthropic endpoint should get recovery."""
-        agent = _make_agent(provider="anthropic", base_url="https://api.anthropic.com")
-        # For non-anthropic_messages api_mode, it will use OpenAI client
-        error = _make_transport_error("ConnectError")
-
-        with patch("run_agent.OpenAI", return_value=MagicMock()), \
-             patch("time.sleep"):
+        """Direct Anthropic recovery rebuilds the native client, without network/SDK imports."""
+        initial_client = MagicMock()
+        recovered_client = MagicMock()
+        # This is a transport-recovery unit test, not an Anthropic SDK import
+        # test. Mock both construction and recovery to keep it independent of
+        # native transitive dependencies such as jiter.
+        with patch(
+            "agent.anthropic_adapter.build_anthropic_client",
+            side_effect=[initial_client, recovered_client],
+        ) as mock_build, patch("time.sleep"):
+            agent = _make_agent(provider="anthropic", base_url="https://api.anthropic.com")
+            assert agent._anthropic_client is initial_client
+            error = _make_transport_error("ConnectError")
             result = agent._try_recover_primary_transport(
                 error, retry_count=3, max_retries=3,
             )
 
         assert result is True
+        assert agent._anthropic_client is recovered_client
+        assert mock_build.call_count == 2
 
     def test_allowed_for_ollama(self):
         agent = _make_agent(provider="ollama", base_url="http://localhost:11434/v1")
