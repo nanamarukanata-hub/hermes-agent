@@ -1,0 +1,35 @@
+name: Muse VM Courier offline tests
+
+on:
+  push:
+    branches:
+      - feat/muse-vm-courier-20261030
+  pull_request:
+    paths:
+      - muse_bridge/vm_courier.py
+      - muse_bridge/vm_operator.py
+      - muse_bridge/agent_config_operator.py
+      - muse_bridge/VM-COURIER.md
+      - tests/test_muse_vm_courier.py
+      - tests/test_muse_vm_operator.py
+      - tests/test_muse_agent_config_operator.py
+      - .github/workflows/muse-vm-courier-ci.yml
+
+permissions:
+  contents: read
+
+jobs:
+  courier-unittest:
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+      - name: Compile and run offline courier tests
+        run: |
+          python -m compileall -q muse_bridge/vm_courier.py muse_bridge/vm_operator.py tests/test_muse_vm_courier.py tests/test_muse_vm_operator.py tests/test_muse_agent_config_operator.py muse_bridge/agent_config_operator.py
+          python -m unittest discover -s tests -p 'test_muse_vm_courier.py' -v
+          python -m unittest discover -s tests -p 'test_muse_vm_operator.py' -v
+          python -m unittest discover -s tests -p 'test_muse_agent_config_operator.py' -v
