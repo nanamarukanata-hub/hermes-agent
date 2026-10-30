@@ -188,3 +188,35 @@ def test_entity_index_symlink_added_after_initialization_is_rejected(vault, tmp_
     else:
         assert outside.read_bytes() == original
     assert list(store.facts_dir.glob("*.json")) == []
+
+
+def test_entity_index_symlink_swap_at_open_is_rejected(vault, tmp_path, monkeypatch):
+    """O_NOFOLLOW must reject a link planted just before the entity-index open."""
+    import os
+    from pathlib import Path
+
+    store = MemoryStore()
+    fact_id = store.add_fact("Alice Smith remembers the event")
+    assert store.fact_entity_names(fact_id) == ["Alice Smith"]
+
+    index_path = store.db_path / "entities.json"
+    outside = tmp_path / "external-entities.json"
+    outside.write_text('{"next_id": 900, "by_name": {"External": 1}}', encoding="utf-8")
+    original = outside.read_bytes()
+    real_open = os.open
+    swapped = False
+
+    def swap_before_open(path, flags, *args, **kwargs):
+        nonlocal swapped
+        if Path(path) == index_path and not swapped:
+            swapped = True
+            index_path.unlink()
+            index_path.symlink_to(outside)
+        return real_open(path, flags, *args, **kwargs)
+
+    monkeypatch.setattr(os, "open", swap_before_open)
+    with pytest.raises(RuntimeError, match="Unsafe Vault entity index"):
+        store._entities_index()
+
+    assert swapped
+    assert outside.read_bytes() == original
