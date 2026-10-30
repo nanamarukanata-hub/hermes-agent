@@ -138,6 +138,10 @@ def run(*, state: Path, home: Path, task_id: str, target: str,
         contents.decode("utf-8")  # only textual instructions, never binary
         backup_dir = state / "config-backups"
         _private_dir(backup_dir)
+        # One approved operation per (task, target). A previous backup also
+        # indicates a partial attempt: fail closed and require owner review.
+        if any(backup_dir.glob(task_id + "-" + target + "-*.md")):
+            raise CourierError("task already attempted this target; new approval required")
         backup_name = task_id + "-" + target + "-" + current_sha[:16] + ".md"
         backup = backup_dir / backup_name
         if backup.exists():
