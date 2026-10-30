@@ -33,6 +33,7 @@ class CourierTests(unittest.TestCase):
         self.tmp = tempfile.TemporaryDirectory()
         self.addCleanup(self.tmp.cleanup)
         self.root = Path(self.tmp.name) / "courier"
+        self.root.mkdir(mode=0o700)  # production main() creates a private state root
 
     def test_rejects_non_https_credentials_and_paths(self):
         for origin in (
