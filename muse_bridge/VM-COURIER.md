@@ -86,3 +86,33 @@ Do not claim work was done if it was not.
 - A 401 means investigate and re-pair; do not publish any secret.
 - connected_recently only proves recent authenticated HTTP polling.
 - The script does not autonomously wake a Muse AI chat or execute tasks.
+
+
+## Owner-owned AI agent Markdown configuration
+
+The separate local module muse_bridge.agent_config_operator exposes six
+explicit target names: hermes_soul, muse_soul, muse_agents,
+muse_identity, muse_user, muse_memory. It does not modify credentials,
+platform-owned system prompts, safety controls, or model weights.
+
+A locally received Courier task must contain an explicit
+AGENT_CONFIG_EDIT[muse_soul] marker for that exact target.
+An ordinary development task is insufficient authority.
+
+To read status without exposing the file contents:
+
+    python3 -m muse_bridge.agent_config_operator --task-id TASK_ID --target muse_soul --operation status
+
+Only after separate explicit owner approval for exact replacement text,
+stage a private UTF-8 Markdown file at
+~/.local/share/muse-bridge-courier/staging/replacement.md (chmod 600).
+Use the SHA-256 returned by the status call:
+
+    python3 -m muse_bridge.agent_config_operator --task-id TASK_ID --target muse_soul --operation apply --source-name replacement.md --expected-sha256 SHA256 --execute
+
+The module creates a private backup, checks for concurrent modifications,
+writes atomically, audits without logging file content, and refuses
+repeat edits for the same task and target. A file write is not proof
+that the hosted Muse runtime reloaded its prompts. Do not modify
+actual agent instructions simply to test this feature: use unit tests
+and a status-only call first.
