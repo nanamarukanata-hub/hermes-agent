@@ -287,3 +287,83 @@ def test_batch_lock_refuses_symlinked_lock_file(tmp_path):
     assert external.read_text(encoding="utf-8") == "DO NOT MODIFY"
     assert not first.exists()
     assert not second.exists()
+
+
+def _pending_marker(vault):
+    return vault / "06_Automation" / "Hermes" / ".sqlite-vault-migration.pending"
+
+
+@pytest.mark.parametrize("force", [False, True])
+def test_batch_refuses_interrupted_publication_before_writes(tmp_path, force):
+    vault, first, second, planned = _batch_paths(tmp_path)
+    marker = _pending_marker(vault)
+    marker.parent.mkdir(parents=True)
+    marker.write_text('{"version": 1, "destinations": ["RetainQueue/1.json"]}\n', encoding="utf-8")
+
+    with pytest.raises(RuntimeError, match="unrecovered SQLite-to-Vault publication marker"):
+        migration._write_batch(vault, planned, force=force)
+
+    assert not first.exists()
+    assert not second.exists()
+    assert marker.is_file()
+    assert list(first.parent.glob(".*.tmp-*")) == []
+
+
+def test_successful_batch_and_complete_rollback_clear_pending_marker(tmp_path):
+    vault, first, second, planned = _batch_paths(tmp_path)
+    marker = _pending_marker(vault)
+
+    with patch.object(migration.os, "link", side_effect=OSError("publication failed")):
+        with pytest.raises(OSError, match="publication failed"):
+            migration._write_batch(vault, planned, force=False)
+    assert not marker.exists()
+    assert not first.exists()
+    assert not second.exists()
+
+    migration._write_batch(vault, planned, force=False)
+    assert not marker.exists()
+    assert json.loads(first.read_text(encoding="utf-8")) == {"user_id": "u1"}
+    assert json.loads(second.read_text(encoding="utf-8")) == {"user_id": "u2"}
+
+
+@pytest.mark.skipif(os.name != "posix", reason="requires POSIX subprocess termination")
+def test_abrupt_exit_during_publish_leaves_marker_and_blocks_retry(tmp_path):
+    import subprocess
+    import sys
+    from pathlib import Path
+
+    vault, first, second, planned = _batch_paths(tmp_path)
+    script = """
+import os
+import sys
+from pathlib import Path
+from scripts import migrate_sqlite_to_vault as migration
+
+vault = Path(sys.argv[1])
+dest = vault / "06_Automation" / "Hermes" / "RetainQueue"
+planned = [(dest / "1.json", {"user_id": "u1"}), (dest / "2.json", {"user_id": "u2"})]
+real_link = os.link
+
+def exit_after_first_link(source, target):
+    real_link(source, target)
+    os._exit(73)
+
+migration.os.link = exit_after_first_link
+migration._write_batch(vault, planned, force=False)
+"""
+    env = dict(os.environ)
+    repo_root = str(Path(__file__).resolve().parents[1])
+    env["PYTHONPATH"] = repo_root + os.pathsep + env.get("PYTHONPATH", "")
+    result = subprocess.run([sys.executable, "-c", script, str(vault)], env=env, check=False)
+    assert result.returncode == 73
+    assert first.is_file()
+    assert not second.exists()
+
+    marker = _pending_marker(vault)
+    manifest = json.loads(marker.read_text(encoding="utf-8"))
+    assert manifest["version"] == 1
+    assert len(manifest["destinations"]) == 2
+    with pytest.raises(RuntimeError, match="unrecovered SQLite-to-Vault publication marker"):
+        migration._write_batch(vault, planned, force=True)
+    assert first.is_file()
+    assert not second.exists()
