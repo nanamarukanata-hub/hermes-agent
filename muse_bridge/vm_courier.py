@@ -168,7 +168,40 @@ def _save_inbox(root: Path, task: dict) -> bool:
         tmp.unlink(missing_ok=True)
 
 
-def poll(base: str, root: Path, once: bool) -> None:
+def _auto_source_fetch(base: str, root: Path, task: dict) -> bool:
+    """Handle one exact, pre-authorized source-download action; no model execution.
+
+    A normal natural-language task or a quoted mention of the marker is not
+    an action. The local supervisor must have been started with the explicit
+    --auto-source-fetch switch by the VM owner.
+    """
+    if task.get("repo") != "hermes-agent" or task.get("instruction") != "MUSE_SOURCE_FETCH_V1":
+        return False
+    task_id = task.get("task_id")
+    if not isinstance(task_id, str) or not TASK_ID.fullmatch(task_id):
+        raise CourierError("invalid auto-fetch task ID")
+    from .redteam_sources import fetch_sources, DEFAULT_ROOT
+    try:
+        report = fetch_sources(DEFAULT_ROOT)
+        errors = len(report["errors"])
+        result = {
+            "result": "Source-only checkout attempted for %d fixed public GitHub projects; "
+                      "%d verified, %d errors. No dependencies or attack code executed." %
+                      (10, len(report["repositories"]), errors),
+            "failed": errors != 0,
+            "test_results": "Commit SHA report: " + json.dumps(report["repositories"], sort_keys=True),
+        }
+    except Exception as exc:
+        result = {"result": "Source-only checkout failed: " + type(exc).__name__,
+                  "failed": True}
+    path = root / "auto-source-results" / (task_id + ".json")
+    _save_private(path, (json.dumps(result, ensure_ascii=False) + "\n").encode("utf-8"))
+    complete(base, root, task_id, path)
+    print("Auto source checkout reported for task " + task_id)
+    return True
+
+
+def poll(base: str, root: Path, once: bool, auto_source_fetch: bool = False) -> None:
     token = _load_token(root)
     failures = 0
     while True:
@@ -183,7 +216,10 @@ def poll(base: str, root: Path, once: bool) -> None:
                 added = _save_inbox(root, response)
                 if added:
                     print("Received approved task " + response["task_id"] +
-                          " in local inbox; NO execution was performed.")
+                          " in local inbox.")
+                if auto_source_fetch:
+                    # Only the exact fixed source-fetch order may run automatically.
+                    _auto_source_fetch(base, root, response)
                 elif once:
                     print("Connected; task already in local inbox.")
                 if once:
@@ -233,6 +269,9 @@ def main(argv: list[str] | None = None) -> int:
     p.add_argument("--code-file", type=Path, help="Optional private file containing the code")
     q = sub.add_parser("poll", help="Long-poll approved work orders into a private inbox")
     q.add_argument("--once", action="store_true")
+    q.add_argument("--auto-source-fetch", action="store_true",
+                   help="Enable automatic handling of exact MUSE_SOURCE_FETCH_V1 tasks "
+                        "(source checkout only; no model execution)")
     c = sub.add_parser("complete", help="Report an agent-reviewed result; never execute a task")
     c.add_argument("task_id")
     c.add_argument("--result-file", type=Path, required=True)
@@ -252,7 +291,7 @@ def main(argv: list[str] | None = None) -> int:
                 code = getpass.getpass("Short-lived pairing code (hidden): ")
             pair(base, root, code)
         elif args.command == "poll":
-            poll(base, root, args.once)
+            poll(base, root, args.once, auto_source_fetch=args.auto_source_fetch)
         else:
             complete(base, root, args.task_id, args.result_file)
         return 0
