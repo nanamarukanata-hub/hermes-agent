@@ -1,0 +1,52 @@
+name: Hermes Colab dispatch CI
+on:
+  push:
+    branches:
+      - feat/hermes-colab-dispatch-20261026
+    paths:
+      - "hermes_hybrid/**"
+      - "deploy/hermes-colab-*.sh"
+      - "deploy/start-hermes-colab-worker.sh"
+      - "tools/colab_job_tools.py"
+      - "toolsets.py"
+      - "tests/hermes_hybrid/test_colab_dispatch.py"
+      - "tests/hermes_hybrid/test_cli_drive_transport_pagination.py"
+      - ".github/workflows/colab-dispatch-ci.yml"
+  pull_request:
+    paths:
+      - "hermes_hybrid/**"
+      - "tools/colab_job_tools.py"
+      - "toolsets.py"
+      - "tests/hermes_hybrid/test_colab_dispatch.py"
+
+permissions:
+  contents: read
+
+jobs:
+  test-colab-dispatch:
+    runs-on: ubuntu-latest
+    timeout-minutes: 12
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - name: Install pytest and hybrid dependencies
+        run: python -m pip install --disable-pip-version-check pytest PyYAML
+      - name: Compile Hermes-Colab code
+        run: python -m py_compile hermes_hybrid/colab_dispatch.py hermes_hybrid/colab_worker.py hermes_hybrid/resident_worker.py hermes_hybrid/cli_drive_transport.py tools/colab_job_tools.py tests/hermes_hybrid/test_colab_dispatch.py
+      - name: Check watchdog and boot launcher shell syntax
+        run: bash -n deploy/hermes-colab-watchdog.sh deploy/start-hermes-colab-worker.sh
+      - name: Hermes to Colab and resident Linux worker test suite
+        run: python -m pytest tests/hermes_hybrid/test_colab_dispatch.py tests/hermes_hybrid/test_cli_drive_transport_pagination.py -q -o addopts=""
+      - name: Existing Drive Vault and integration regression
+        run: python -m pytest tests/hermes_hybrid/test_drive_vault.py tests/hermes_hybrid/test_drive_integration_ops.py -q -o addopts=""
+      - name: Build self-contained Colab worker notebook
+        run: python -c "from pathlib import Path; from hermes_hybrid.colab_worker import worker_notebook_bytes; Path('hermes-colab-queue-worker.ipynb').write_bytes(worker_notebook_bytes())"
+      - name: Upload verified Colab notebook
+        uses: actions/upload-artifact@v4
+        with:
+          name: hermes-colab-worker-notebook
+          path: hermes-colab-queue-worker.ipynb
+          if-no-files-found: error
+          retention-days: 7

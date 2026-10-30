@@ -65,12 +65,20 @@ _HERMES_CORE_TOOLS = [
     # zero schema footprint. Gated via check_fn in tools/kanban_tools.py.
     "kanban_show", "kanban_complete", "kanban_block", "kanban_heartbeat",
     "kanban_comment", "kanban_create", "kanban_link",
+    # Colab jobs: dormant until Drive OAuth + pinned Vault folder ID configured.
+    "colab_submit", "colab_status", "colab_health",
 ]
 
 
 # Core toolset definitions
 # These can include individual tools or reference other toolsets
 TOOLSETS = {
+    "colab": {
+        "description": "Hermes to Google Colab Drive-backed job queue and result polling",
+        "tools": ["colab_submit", "colab_status"],
+        "includes": [],
+    },
+
     # Basic toolsets - individual tool categories
     "web": {
         "description": "Web research and content extraction tools",

@@ -1,0 +1,24 @@
+[Unit]
+Description=Hermes Drive Vault resident compute queue worker
+Documentation=https://github.com/nanamarukanata-hub/hermes-agent/blob/feat/hermes-colab-dispatch-20261026/docs/HERMES-COLAB-DISPATCH.md
+Wants=network-online.target
+After=network-online.target
+
+[Service]
+Type=simple
+# Template: adjust to the verified Hermes checkout path on the target VM.
+WorkingDirectory=%h/hermes-agent
+# This private file must be created OUTSIDE the repository (0600 permissions).
+EnvironmentFile=%h/.config/hermes/colab-resident.env
+ExecStart=/usr/bin/python3 -m hermes_hybrid.resident_worker --interval 30
+Restart=always
+RestartSec=30
+TimeoutStopSec=30
+KillSignal=SIGTERM
+UMask=0077
+NoNewPrivileges=true
+StandardOutput=journal
+StandardError=journal
+
+[Install]
+WantedBy=default.target
