@@ -63,3 +63,30 @@ def test_sqlite_sidecars_are_detected_even_without_main_db(tmp_path):
     before = {p.name: p.read_bytes() for p in tmp_path.iterdir() if p.is_file()}
     assert {Path(p).name for p in audit(tmp_path)["db_files"]} == names
     assert {p.name: p.read_bytes() for p in tmp_path.iterdir() if p.is_file()} == before
+
+# These are active Discord/session/Vault runtime entry points, not offline
+# SQLite-to-Vault migration tools. A regression here would reintroduce a
+# database dependency even when the synthetic audit fixtures still pass.
+_RUNTIME_SQLITE_FREE_MODULES = (
+    "hermes_state.py",
+    "hermes_obsidian_state.py",
+    "gateway/session.py",
+    "gateway/run.py",
+    "gateway/platforms/discord.py",
+    "gateway/platforms/helpers.py",
+    "hermes_hybrid/obsidian_store.py",
+    "hermes_hybrid/session_manager.py",
+    "hermes_hybrid/gateway_adapter.py",
+    "hermes_hybrid/vault_kv.py",
+    "hermes_cli/kanban_db.py",
+)
+
+
+@pytest.mark.parametrize("relative_path", _RUNTIME_SQLITE_FREE_MODULES)
+def test_core_runtime_modules_do_not_import_sqlite(relative_path):
+    from hermes_hybrid.sqlite_audit import _uses_sqlite
+
+    path = Path(__file__).resolve().parents[1] / relative_path
+    assert not _uses_sqlite(path.read_text(encoding="utf-8"), str(path)), (
+        f"SQLite runtime import reintroduced in {relative_path}"
+    )
