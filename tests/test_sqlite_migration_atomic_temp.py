@@ -693,3 +693,40 @@ def test_inspect_recovery_refuses_symlinked_orphan_backup(tmp_path):
     assert external.read_text(encoding="utf-8") == "DO NOT TOUCH"
     assert backup.is_symlink()
     assert not _pending_marker(vault).exists()
+
+
+@pytest.mark.parametrize("force", [False, True])
+def test_batch_refuses_orphan_backup_for_unrelated_record(tmp_path, force):
+    vault, first, second, planned = _batch_paths(tmp_path)
+    # The previous migration may have touched a different store. Even if
+    # neither planned destination has a backup, do not start a new batch.
+    other_dir = vault / "06_Automation" / "Hermes" / "ApiResponses"
+    other_dir.mkdir(parents=True)
+    orphan = other_dir / ".99.json.backup-interrupted"
+    orphan.write_text("IRREPLACEABLE-ORIGINAL", encoding="utf-8")
+
+    with pytest.raises(RuntimeError, match="unrecovered Vault migration backup"):
+        migration._write_batch(vault, planned, force=force)
+
+    assert orphan.read_text(encoding="utf-8") == "IRREPLACEABLE-ORIGINAL"
+    assert not first.exists() and not second.exists()
+    assert not _pending_marker(vault).exists()
+    assert list(first.parent.glob(".*.tmp-*")) == []
+
+
+@pytest.mark.skipif(os.name == "nt", reason="symlink creation may require elevated privileges")
+def test_batch_refuses_symlinked_orphan_in_unrelated_store(tmp_path):
+    vault, first, second, planned = _batch_paths(tmp_path)
+    other_dir = vault / "06_Automation" / "Hermes" / "ApiResponses"
+    other_dir.mkdir(parents=True)
+    external = tmp_path / "outside"
+    external.write_text("DO NOT TOUCH", encoding="utf-8")
+    orphan = other_dir / ".99.json.backup-redirect"
+    orphan.symlink_to(external)
+
+    with pytest.raises(ValueError, match="symlinked Vault destination"):
+        migration._write_batch(vault, planned, force=True)
+
+    assert external.read_text(encoding="utf-8") == "DO NOT TOUCH"
+    assert not first.exists() and not second.exists()
+    assert not _pending_marker(vault).exists()
