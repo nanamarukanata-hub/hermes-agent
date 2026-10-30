@@ -220,3 +220,39 @@ def test_entity_index_symlink_swap_at_open_is_rejected(vault, tmp_path, monkeypa
 
     assert swapped
     assert outside.read_bytes() == original
+
+
+@pytest.mark.parametrize("use_bulk_reader", [False, True])
+def test_fact_symlink_swap_at_open_is_ignored(vault, tmp_path, monkeypatch, use_bulk_reader):
+    """A fact file swapped to an outside link during open must not be read."""
+    import os
+    from pathlib import Path
+
+    store = MemoryStore()
+    fact_id = store.add_fact("Original safe fact")
+    fact_path = store._fact_path(fact_id)
+    outside = tmp_path / "external-fact.json"
+    outside.write_text(
+        '{"fact_id": 999, "content": "External private fact"}',
+        encoding="utf-8",
+    )
+    original = outside.read_bytes()
+    real_open = os.open
+    swapped = False
+
+    def swap_before_open(path, flags, *args, **kwargs):
+        nonlocal swapped
+        if Path(path) == fact_path and not swapped:
+            swapped = True
+            fact_path.unlink()
+            fact_path.symlink_to(outside)
+        return real_open(path, flags, *args, **kwargs)
+
+    monkeypatch.setattr(os, "open", swap_before_open)
+    if use_bulk_reader:
+        assert store._all_facts() == []
+    else:
+        assert store._read_fact(fact_id) is None
+
+    assert swapped
+    assert outside.read_bytes() == original
