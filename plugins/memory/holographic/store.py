@@ -175,12 +175,26 @@ class MemoryStore:
         return self.facts_dir / f"{int(fact_id)}.json"
 
     def _read_fact(self, fact_id: int) -> dict | None:
-        p = self._fact_path(fact_id)
-        if not p.exists() or p.is_symlink():
+        return self._read_regular_json(self._fact_path(fact_id))
+
+    @staticmethod
+    def _read_regular_json(path: Path) -> dict | None:
+        """Read a Vault JSON file without following a late-planted symlink.
+
+        Checking is_symlink() before read_text() leaves a TOCTOU window:
+        another process can swap the file after the check.  Open the final
+        component with O_NOFOLLOW and verify its type on the opened fd.
+        """
+        try:
+            fd = os.open(path, os.O_RDONLY | os.O_NOFOLLOW | os.O_CLOEXEC)
+        except OSError:
             return None
         try:
-            data = json.loads(p.read_text(encoding="utf-8"))
-        except (OSError, json.JSONDecodeError):
+            with os.fdopen(fd, "r", encoding="utf-8") as stream:
+                if not stat.S_ISREG(os.fstat(stream.fileno()).st_mode):
+                    return None
+                data = json.load(stream)
+        except (OSError, UnicodeError, json.JSONDecodeError):
             return None
         return data if isinstance(data, dict) else None
 
@@ -190,13 +204,8 @@ class MemoryStore:
     def _all_facts(self) -> list[dict]:
         facts = []
         for p in sorted(self.facts_dir.glob("*.json")):
-            if p.is_symlink():
-                continue
-            try:
-                data = json.loads(p.read_text(encoding="utf-8"))
-            except (OSError, json.JSONDecodeError):
-                continue
-            if isinstance(data, dict):
+            data = self._read_regular_json(p)
+            if data is not None:
                 facts.append(data)
         return facts
 
