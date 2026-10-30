@@ -1,0 +1,29 @@
+name: Muse red team research sources offline tests
+
+on:
+  push:
+    branches:
+      - feat/muse-redteam-sources-20261030
+  pull_request:
+    paths:
+      - muse_bridge/redteam_sources.py
+      - muse_bridge/REDTEAM-SOURCES.md
+      - tests/test_muse_redteam_sources.py
+      - .github/workflows/muse-redteam-sources-ci.yml
+
+permissions:
+  contents: read
+
+jobs:
+  source-registry-tests:
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+      - name: Compile and run offline source checkout tests
+        run: |
+          python -m compileall -q muse_bridge/redteam_sources.py tests/test_muse_redteam_sources.py
+          python -m unittest discover -s tests -p 'test_muse_redteam_sources.py' -v
