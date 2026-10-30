@@ -170,6 +170,17 @@ def _write_batch_locked(vault: Path, planned: list[tuple[Path, dict]], *, force:
     original_stats: dict[Path, tuple[int, int, int, int, int] | None] = {}
     published: list[tuple[Path, Path, tuple[int, int]]] = []
     preserve_backups: set[Path] = set()
+    # A durable, fail-closed marker distinguishes an interrupted publication
+    # from an ordinary completed migration. It is NOT an automatic recovery log.
+    marker = vault / "06_Automation" / "Hermes" / ".sqlite-vault-migration.pending"
+    _check_destination(vault, marker)
+    if marker.exists():
+        raise RuntimeError(
+            f"unrecovered SQLite-to-Vault publication marker: {marker}; "
+            "inspect the Vault and backups before retrying"
+        )
+    marker_inode: tuple[int, int] | None = None
+    rollback_incomplete = False
     try:
         # All serialization and fsyncs finish before any Vault record changes.
         for dest, data in planned:
@@ -226,6 +237,31 @@ def _write_batch_locked(vault: Path, planned: list[tuple[Path, dict]], *, force:
                     raise RuntimeError(f"Vault destination changed during backup: {dest}")
                 original_stats[dest] = fingerprint
 
+        # Create and fsync the marker *before* publishing any record. A
+        # SIGKILL or power loss during a multi-file publication then blocks
+        # further migrations rather than silently treating partial output as
+        # complete. A directory fsync makes the new name durable on POSIX.
+        marker_fd = os.open(
+            marker, os.O_WRONLY | os.O_CREAT | os.O_EXCL | getattr(os, "O_NOFOLLOW", 0),
+            0o600,
+        )
+        marker_stat = os.fstat(marker_fd)
+        marker_inode = (marker_stat.st_dev, marker_stat.st_ino)
+        with os.fdopen(marker_fd, "w", encoding="utf-8") as stream:
+            json.dump(
+                {"version": 1, "destinations": [str(dest.relative_to(vault)) for _, dest in prepared]},
+                stream,
+            )
+            stream.write("\n")
+            stream.flush()
+            os.fsync(stream.fileno())
+        if os.name == "posix":
+            dir_fd = os.open(marker.parent, os.O_RDONLY | getattr(os, "O_DIRECTORY", 0))
+            try:
+                os.fsync(dir_fd)
+            finally:
+                os.close(dir_fd)
+
         for tmp, dest in prepared:
             _check_destination(vault, dest)
             new_stat = tmp.stat(follow_symlinks=False)
@@ -277,6 +313,7 @@ def _write_batch_locked(vault: Path, planned: list[tuple[Path, dict]], *, force:
                     preserve_backups.add(dest)
                 rollback_errors.append(f"{dest}: {error}")
         if rollback_errors:
+            rollback_incomplete = True
             exc.add_note("Vault export rollback incomplete: " + "; ".join(rollback_errors))
             retained = [str(backups[d]) for d in preserve_backups if backups[d] is not None]
             if retained:
@@ -288,6 +325,16 @@ def _write_batch_locked(vault: Path, planned: list[tuple[Path, dict]], *, force:
         for dest, backup in backups.items():
             if backup is not None and dest not in preserve_backups:
                 backup.unlink(missing_ok=True)
+        # Only remove our own marker after complete publication or successful
+        # rollback and backup cleanup. Incomplete rollback must remain blocked.
+        if marker_inode is not None and not rollback_incomplete:
+            try:
+                current_marker = marker.stat(follow_symlinks=False)
+            except FileNotFoundError:
+                pass
+            else:
+                if (current_marker.st_dev, current_marker.st_ino) == marker_inode:
+                    marker.unlink()
 
 
 def main() -> int:
