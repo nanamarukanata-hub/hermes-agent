@@ -21,6 +21,7 @@ from __future__ import annotations
 
 import argparse
 import base64
+import hashlib
 import json
 import os
 import re
@@ -75,6 +76,88 @@ def _check_destination(vault: Path, dest: Path) -> None:
         current = current / part
         if current.is_symlink():
             raise ValueError(f"symlinked Vault destination: {current}")
+
+
+def _sha256_file(path: Path) -> str:
+    """Hash a staged export or recovery backup without modifying it."""
+    digest = hashlib.sha256()
+    with path.open("rb") as stream:
+        for chunk in iter(lambda: stream.read(1024 * 1024), b""):
+            digest.update(chunk)
+    return digest.hexdigest()
+
+
+def _recovery_report(vault: Path) -> dict:
+    """Inspect an interrupted export; never restore, remove, or overwrite files."""
+    marker = vault / "06_Automation" / "Hermes" / ".sqlite-vault-migration.pending"
+    _check_destination(vault, marker)
+    if not marker.is_file():
+        return {"pending": False, "records": []}
+    with marker.open(encoding="utf-8") as stream:
+        manifest = json.load(stream)
+    if not isinstance(manifest, dict) or manifest.get("version") not in (1, 2):
+        raise ValueError("unsupported SQLite-to-Vault recovery marker")
+    entries = manifest.get("destinations")
+    if not isinstance(entries, list):
+        raise ValueError("invalid SQLite-to-Vault recovery destinations")
+
+    def checked_path(value: object) -> Path:
+        if not isinstance(value, str) or not value:
+            raise ValueError("invalid recovery path")
+        relative = Path(value)
+        if relative.is_absolute() or ".." in relative.parts:
+            raise ValueError("unsafe recovery path")
+        path = vault / relative
+        _check_destination(vault, path)
+        return path
+
+    records = []
+    for entry in entries:
+        if manifest["version"] == 1:
+            dest = checked_path(entry)
+            records.append({
+                "path": str(dest.relative_to(vault)),
+                "destination": "unverifiable" if dest.is_file() else "missing",
+                "backup": "unverifiable",
+            })
+            continue
+        if not isinstance(entry, dict):
+            raise ValueError("invalid recovery record")
+        dest = checked_path(entry.get("path"))
+        new_hash = entry.get("new_sha256")
+        old_hash = entry.get("original_sha256")
+        if not isinstance(new_hash, str) or re.fullmatch(r"[0-9a-f]{64}", new_hash) is None:
+            raise ValueError("invalid staged export digest")
+        if old_hash is not None and (
+            not isinstance(old_hash, str) or re.fullmatch(r"[0-9a-f]{64}", old_hash) is None
+        ):
+            raise ValueError("invalid original export digest")
+        if not dest.is_file():
+            destination_state = "missing"
+        else:
+            current_hash = _sha256_file(dest)
+            destination_state = (
+                "published" if current_hash == new_hash
+                else "original" if current_hash == old_hash
+                else "changed"
+            )
+        backup_name = entry.get("backup")
+        if backup_name is None:
+            backup_state = "none"
+        else:
+            backup = checked_path(backup_name)
+            backup_state = (
+                "missing" if not backup.is_file()
+                else "valid" if _sha256_file(backup) == old_hash
+                else "changed"
+            )
+        records.append({
+            "path": str(dest.relative_to(vault)),
+            "destination": destination_state,
+            "backup": backup_state,
+        })
+    # No automated recovery: a concurrent Vault writer may have changed a file.
+    return {"pending": True, "version": manifest["version"], "records": records}
 
 
 def _write_json(vault: Path, dest: Path, data: dict, *, force: bool) -> None:
@@ -248,10 +331,16 @@ def _write_batch_locked(vault: Path, planned: list[tuple[Path, dict]], *, force:
         marker_stat = os.fstat(marker_fd)
         marker_inode = (marker_stat.st_dev, marker_stat.st_ino)
         with os.fdopen(marker_fd, "w", encoding="utf-8") as stream:
-            json.dump(
-                {"version": 1, "destinations": [str(dest.relative_to(vault)) for _, dest in prepared]},
-                stream,
-            )
+            records = []
+            for tmp, dest in prepared:
+                backup = backups.get(dest)
+                records.append({
+                    "path": str(dest.relative_to(vault)),
+                    "new_sha256": _sha256_file(tmp),
+                    "original_sha256": _sha256_file(backup) if backup is not None else None,
+                    "backup": str(backup.relative_to(vault)) if backup is not None else None,
+                })
+            json.dump({"version": 2, "force": force, "destinations": records}, stream)
             stream.write("\n")
             stream.flush()
             os.fsync(stream.fileno())
@@ -344,9 +433,19 @@ def main() -> int:
     ap.add_argument("--dry-run", action="store_true")
     ap.add_argument("--force", action="store_true")
     ap.add_argument("--verify", action="store_true", help="Compare Vault export with legacy SQLite without writing")
+    ap.add_argument(
+        "--inspect-recovery", action="store_true",
+        help="Read-only report of an interrupted export; never restore or delete files",
+    )
     args = ap.parse_args()
     if args.verify and (args.dry_run or args.force):
         ap.error("--verify cannot be combined with --dry-run or --force")
+    if args.inspect_recovery and (args.verify or args.dry_run or args.force):
+        ap.error("--inspect-recovery cannot be combined with --verify, --dry-run or --force")
+    if args.inspect_recovery:
+        vault = Path(args.vault).expanduser()
+        print(json.dumps(_recovery_report(vault), indent=2))
+        return 0
 
     home = Path(args.home).expanduser() if args.home else Path(os.environ.get("HERMES_HOME", Path.home() / ".hermes")).expanduser()
     vault = Path(args.vault).expanduser()
