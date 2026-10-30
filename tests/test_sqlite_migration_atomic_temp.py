@@ -730,3 +730,77 @@ def test_batch_refuses_symlinked_orphan_in_unrelated_store(tmp_path):
     assert external.read_text(encoding="utf-8") == "DO NOT TOUCH"
     assert not first.exists() and not second.exists()
     assert not _pending_marker(vault).exists()
+
+
+
+def test_recovery_with_pending_v2_marker_reports_only_unreferenced_backups(tmp_path):
+    vault, first, second, _ = _batch_paths(tmp_path)
+    first.parent.mkdir(parents=True)
+    referenced = first.parent / ".1.json.backup-known"
+    orphan = second.parent / ".2.json.backup-stranded"
+    referenced.write_bytes(b"ORIGINAL-1")
+    orphan.write_bytes(b"ORIGINAL-2")
+    marker = _pending_marker(vault)
+    marker.write_text(json.dumps({
+        "version": 2,
+        "destinations": [{
+            "path": str(first.relative_to(vault)),
+            "new_sha256": hashlib.sha256(b"NEW-1").hexdigest(),
+            "original_sha256": hashlib.sha256(referenced.read_bytes()).hexdigest(),
+            "backup": str(referenced.relative_to(vault)),
+        }],
+    }), encoding="utf-8")
+    before = {p: p.read_bytes() for p in (marker, referenced, orphan)}
+
+    report = migration._recovery_report(vault)
+
+    assert report["pending"] is True
+    assert report["records"][0]["backup"] == "valid"
+    assert report["orphan_backups"] == [str(orphan.relative_to(vault))]
+    assert report["requires_attention"] is True
+    assert {p: p.read_bytes() for p in before} == before
+
+
+def test_recovery_with_legacy_v1_marker_reports_unreferenced_backups(tmp_path):
+    vault, first, _, _ = _batch_paths(tmp_path)
+    first.parent.mkdir(parents=True)
+    orphan = first.parent / ".1.json.backup-stranded"
+    orphan.write_bytes(b"KEEP-ORIGINAL")
+    marker = _pending_marker(vault)
+    marker.write_text(json.dumps({
+        "version": 1, "destinations": [str(first.relative_to(vault))],
+    }), encoding="utf-8")
+
+    report = migration._recovery_report(vault)
+
+    assert report["pending"] is True
+    assert report["orphan_backups"] == [str(orphan.relative_to(vault))]
+    assert report["requires_attention"] is True
+    assert orphan.read_bytes() == b"KEEP-ORIGINAL"
+
+
+@pytest.mark.skipif(os.name == "nt", reason="symlink creation may require elevated privileges")
+def test_recovery_with_pending_marker_refuses_unreferenced_symlink_backup(tmp_path):
+    vault, first, _, _ = _batch_paths(tmp_path)
+    first.parent.mkdir(parents=True)
+    external = tmp_path / "external-original"
+    external.write_text("DO NOT TOUCH", encoding="utf-8")
+    orphan = first.parent / ".1.json.backup-redirect"
+    orphan.symlink_to(external)
+    marker = _pending_marker(vault)
+    marker.write_text(json.dumps({
+        "version": 2,
+        "destinations": [{
+            "path": str(first.relative_to(vault)),
+            "new_sha256": "0" * 64,
+            "original_sha256": None,
+            "backup": None,
+        }],
+    }), encoding="utf-8")
+
+    with pytest.raises(ValueError, match="symlinked Vault destination"):
+        migration._recovery_report(vault)
+
+    assert orphan.is_symlink()
+    assert external.read_text(encoding="utf-8") == "DO NOT TOUCH"
+    assert marker.is_file()
