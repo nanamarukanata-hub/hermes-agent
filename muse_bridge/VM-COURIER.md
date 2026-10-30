@@ -95,9 +95,10 @@ explicit target names: hermes_soul, muse_soul, muse_agents,
 muse_identity, muse_user, muse_memory. It does not modify credentials,
 platform-owned system prompts, safety controls, or model weights.
 
-A locally received Courier task must contain an explicit
-AGENT_CONFIG_EDIT[muse_soul] marker for that exact target.
-An ordinary development task is insufficient authority.
+Status-only inspection requires a locally received Courier task.
+An edit additionally requires the target-specific authorization marker
+AGENT_CONFIG_EDIT[muse_soul] in that task. An ordinary development
+task grants no editing authority.
 
 To read status without exposing the file contents:
 
