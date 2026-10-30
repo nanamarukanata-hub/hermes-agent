@@ -24,7 +24,9 @@ import base64
 import json
 import os
 import re
+import shutil
 import sqlite3
+import stat
 import tempfile
 from pathlib import Path
 from urllib.parse import quote
@@ -99,16 +101,18 @@ def _write_json(vault: Path, dest: Path, data: dict, *, force: bool) -> None:
 
 
 def _write_batch(vault: Path, planned: list[tuple[Path, dict]], *, force: bool) -> None:
-    """Stage all exports before publishing, even with --force.
+    """Stage all exports, and roll back ordinary publication errors.
 
-    Staging failures cannot partially overwrite existing Vault records.
-    Non-force publishes are rolled back on errors. Force-mode publication
-    failures may still leave partial overwrites; this is not a transaction.
+    Force mode also snapshots existing records before replacing anything.
+    Rollback is best-effort, not crash-safe or an atomic multi-file commit.
     """
     prepared: list[tuple[Path, Path]] = []
-    published: list[tuple[Path, Path]] = []
+    backups: dict[Path, Path | None] = {}
+    original_stats: dict[Path, tuple[int, int, int, int] | None] = {}
+    published: list[tuple[Path, Path, tuple[int, int]]] = []
+    preserve_backups: set[Path] = set()
     try:
-        # Serialization and fsync failures cannot leave published records.
+        # All serialization and fsyncs finish before any Vault record changes.
         for dest, data in planned:
             _check_destination(vault, dest)
             if dest.exists() and not force:
@@ -122,36 +126,86 @@ def _write_batch(vault: Path, planned: list[tuple[Path, dict]], *, force: bool) 
                 stream.flush()
                 os.fsync(stream.fileno())
 
+        if force:
+            # Snapshot *every* original before the first replacement.
+            # Unlike hard-link backups, copies cannot be changed by a writer
+            # modifying the original inode in place after this point.
+            for _, dest in prepared:
+                _check_destination(vault, dest)
+                if not dest.exists():
+                    backups[dest] = None
+                    original_stats[dest] = None
+                    continue
+                before = dest.stat(follow_symlinks=False)
+                fingerprint = (before.st_dev, before.st_ino, before.st_size, before.st_mtime_ns)
+                fd, backup_name = tempfile.mkstemp(
+                    prefix=f".{dest.name}.backup-", dir=dest.parent
+                )
+                backup = Path(backup_name)
+                backups[dest] = backup
+                with dest.open("rb") as source, os.fdopen(fd, "wb") as stream:
+                    shutil.copyfileobj(source, stream)
+                    stream.flush()
+                    os.fchmod(stream.fileno(), stat.S_IMODE(before.st_mode))
+                    os.fsync(stream.fileno())
+                after = dest.stat(follow_symlinks=False)
+                if (after.st_dev, after.st_ino, after.st_size, after.st_mtime_ns) != fingerprint:
+                    raise RuntimeError(f"Vault destination changed during backup: {dest}")
+                original_stats[dest] = fingerprint
+
         for tmp, dest in prepared:
             _check_destination(vault, dest)
+            new_stat = tmp.stat(follow_symlinks=False)
             if force:
-                # Replace only after *every* record has been staged and fsynced.
+                # Detect ordinary concurrent replacements between backup and
+                # publication. This check is not a cross-process file lock.
+                current = dest.stat(follow_symlinks=False) if dest.exists() else None
+                fingerprint = (
+                    (current.st_dev, current.st_ino, current.st_size, current.st_mtime_ns)
+                    if current is not None else None
+                )
+                if fingerprint != original_stats[dest]:
+                    raise RuntimeError(f"Vault destination changed before publication: {dest}")
                 os.replace(tmp, dest)
             else:
-                # Never overwrite a file created by another writer since preflight.
                 os.link(tmp, dest)
-                published.append((tmp, dest))
+            published.append((tmp, dest, (new_stat.st_dev, new_stat.st_ino)))
     except BaseException as exc:
-        rollback_errors = []
-        for tmp, dest in reversed(published):
+        rollback_errors: list[str] = []
+        for tmp, dest, new_inode in reversed(published):
             try:
-                source_stat = tmp.stat(follow_symlinks=False)
-                target_stat = dest.stat(follow_symlinks=False)
-                # Do not remove a path replaced by a concurrent Vault writer.
-                if (source_stat.st_dev, source_stat.st_ino) == (
-                    target_stat.st_dev, target_stat.st_ino
-                ):
+                target = dest.stat(follow_symlinks=False)
+                if (target.st_dev, target.st_ino) != new_inode:
+                    # A concurrent writer replaced the published record.
+                    # Never overwrite it during rollback; retain its backup.
+                    if force and backups.get(dest) is not None:
+                        preserve_backups.add(dest)
+                    rollback_errors.append(f"{dest}: changed by another writer")
+                    continue
+                if force and backups[dest] is not None:
+                    os.replace(backups[dest], dest)
+                else:
                     dest.unlink()
             except FileNotFoundError:
-                pass
+                if force and backups.get(dest) is not None:
+                    preserve_backups.add(dest)
+                rollback_errors.append(f"{dest}: missing during rollback")
             except OSError as error:
+                if force and backups.get(dest) is not None:
+                    preserve_backups.add(dest)
                 rollback_errors.append(f"{dest}: {error}")
         if rollback_errors:
             exc.add_note("Vault export rollback incomplete: " + "; ".join(rollback_errors))
+            retained = [str(backups[d]) for d in preserve_backups if backups[d] is not None]
+            if retained:
+                exc.add_note("Retained original Vault backups for recovery: " + ", ".join(retained))
         raise
     finally:
         for tmp, _ in prepared:
             tmp.unlink(missing_ok=True)
+        for dest, backup in backups.items():
+            if backup is not None and dest not in preserve_backups:
+                backup.unlink(missing_ok=True)
 
 
 def main() -> int:
