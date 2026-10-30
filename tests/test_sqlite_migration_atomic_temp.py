@@ -452,3 +452,77 @@ def test_inspect_recovery_cli_does_not_require_legacy_sqlite(tmp_path, monkeypat
     assert migration.main() == 0
     assert json.loads(capsys.readouterr().out) == {"pending": False, "records": []}
     assert not vault.exists()
+
+
+@pytest.mark.skipif(os.name != "posix", reason="directory fsync durability is POSIX-specific")
+def test_force_backup_directory_entries_are_synced_before_marker(tmp_path):
+    vault, first, _, _ = _batch_paths(tmp_path)
+    second = vault / "06_Automation" / "Hermes" / "ApiResponses" / "2.json"
+    for path in (first, second):
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text("ORIGINAL", encoding="utf-8")
+    planned = [(first, {"value": 1}), (second, {"value": 2})]
+    marker = _pending_marker(vault)
+    required_parents = {first.parent, second.parent}
+    synced_parents = set()
+    directory_fds = {}
+    marker_created = False
+    real_open, real_fsync = os.open, os.fsync
+
+    def tracked_open(path, flags, *args, **kwargs):
+        nonlocal marker_created
+        if os.fspath(path) == os.fspath(marker) and flags & os.O_EXCL:
+            marker_created = True
+            assert synced_parents == required_parents
+        fd = real_open(path, flags, *args, **kwargs)
+        if os.fspath(path) in {os.fspath(p) for p in required_parents}:
+            directory_fds[fd] = os.fspath(path)
+        return fd
+
+    def tracked_fsync(fd):
+        if fd in directory_fds and stat.S_ISDIR(os.fstat(fd).st_mode):
+            synced_parents.add(type(first)(directory_fds[fd]))
+        return real_fsync(fd)
+
+    with patch.object(migration.os, "open", side_effect=tracked_open):
+        with patch.object(migration.os, "fsync", side_effect=tracked_fsync):
+            migration._write_batch(vault, planned, force=True)
+
+    assert marker_created
+    assert synced_parents == required_parents
+    assert json.loads(first.read_text(encoding="utf-8")) == {"value": 1}
+    assert json.loads(second.read_text(encoding="utf-8")) == {"value": 2}
+
+
+@pytest.mark.skipif(os.name != "posix", reason="directory fsync durability is POSIX-specific")
+def test_force_backup_directory_sync_failure_prevents_publication(tmp_path):
+    vault, first, second, planned = _batch_paths(tmp_path)
+    first.parent.mkdir(parents=True)
+    first.write_text("ORIGINAL-1", encoding="utf-8")
+    second.write_text("ORIGINAL-2", encoding="utf-8")
+    real_fsync = os.fsync
+    marker = _pending_marker(vault)
+    marker_created = False
+    real_open = os.open
+
+    def tracked_open(path, flags, *args, **kwargs):
+        nonlocal marker_created
+        if os.fspath(path) == os.fspath(marker) and flags & os.O_EXCL:
+            marker_created = True
+        return real_open(path, flags, *args, **kwargs)
+
+    def fail_directory_fsync(fd):
+        if stat.S_ISDIR(os.fstat(fd).st_mode):
+            raise OSError("backup directory sync failed")
+        return real_fsync(fd)
+
+    with patch.object(migration.os, "open", side_effect=tracked_open):
+        with patch.object(migration.os, "fsync", side_effect=fail_directory_fsync):
+            with pytest.raises(OSError, match="backup directory sync failed"):
+                migration._write_batch(vault, planned, force=True)
+
+    assert not marker_created
+    assert not marker.exists()
+    assert first.read_text(encoding="utf-8") == "ORIGINAL-1"
+    assert second.read_text(encoding="utf-8") == "ORIGINAL-2"
+    assert list(first.parent.glob(".*.backup-*")) == []
