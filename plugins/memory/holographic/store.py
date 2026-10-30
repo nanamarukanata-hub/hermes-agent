@@ -392,14 +392,10 @@ class MemoryStore:
 
     def get_bank_vector(self, bank_name: str) -> bytes | None:
         """Return a memory bank's vector bytes, or None."""
-        p = self._bank_path(bank_name)
-        if p.is_symlink() or not p.exists():
-            return None
-        try:
-            data = json.loads(p.read_text(encoding="utf-8"))
-        except (OSError, json.JSONDecodeError):
-            return None
-        b64 = data.get("vector_b64") if isinstance(data, dict) else None
+        # Reuse the no-follow fd reader: a path-level symlink check followed
+        # by read_text() can be raced to read a file outside the Vault.
+        data = self._read_regular_json(self._bank_path(bank_name))
+        b64 = data.get("vector_b64") if data is not None else None
         if not b64:
             return None
         try:
