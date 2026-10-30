@@ -228,17 +228,23 @@ class MemoryStore:
     # -- entities ------------------------------------------------------
     def _entities_index(self) -> dict:
         p = self.db_path / "entities.json"
-        # The constructor rejects pre-existing links, but another process may
-        # plant one later. Never read an entity index outside the Vault.
-        if p.is_symlink():
-            raise RuntimeError("Unsafe Vault entity index")
-        if not p.exists():
-            return {"next_id": 1, "by_name": {}}
+        empty = {"next_id": 1, "by_name": {}}
+        # Open without following the final component: checking is_symlink()
+        # and then read_text() would still permit a symlink-swap race.
         try:
-            data = json.loads(p.read_text(encoding="utf-8"))
+            raw_fd = os.open(p, os.O_RDONLY | os.O_NOFOLLOW | os.O_CLOEXEC)
+        except FileNotFoundError:
+            return empty
+        except OSError as exc:
+            raise RuntimeError("Unsafe Vault entity index") from exc
+        try:
+            with os.fdopen(raw_fd, "r", encoding="utf-8") as index_file:
+                if not stat.S_ISREG(os.fstat(index_file.fileno()).st_mode):
+                    raise RuntimeError("Unsafe Vault entity index")
+                data = json.load(index_file)
         except (OSError, json.JSONDecodeError):
-            return {"next_id": 1, "by_name": {}}
-        return data if isinstance(data, dict) and "by_name" in data else {"next_id": 1, "by_name": {}}
+            return empty
+        return data if isinstance(data, dict) and "by_name" in data else empty
 
     def _save_entities_index(self, index: dict) -> None:
         _atomic_write_json(self.db_path / "entities.json", index)
