@@ -2,6 +2,7 @@
 
 import json
 import os
+import stat
 from unittest.mock import patch
 
 import pytest
@@ -210,3 +211,35 @@ def test_force_rollback_preserves_concurrent_writer_and_original_backup(tmp_path
     assert len(retained) == 1
     assert retained[0].read_text(encoding="utf-8") == "ORIGINAL-1"
     assert any("rollback incomplete" in note for note in caught.value.__notes__)
+
+
+def test_force_batch_preserves_existing_file_permissions(tmp_path):
+    vault, first, second, planned = _batch_paths(tmp_path)
+    first.parent.mkdir(parents=True)
+    first.write_text("ORIGINAL-1", encoding="utf-8")
+    second.write_text("ORIGINAL-2", encoding="utf-8")
+    first.chmod(0o640)
+    second.chmod(0o600)
+
+    migration._write_batch(vault, planned, force=True)
+
+    assert stat.S_IMODE(first.stat().st_mode) == 0o640
+    assert stat.S_IMODE(second.stat().st_mode) == 0o600
+    assert json.loads(first.read_text(encoding="utf-8")) == {"user_id": "u1"}
+    assert json.loads(second.read_text(encoding="utf-8")) == {"user_id": "u2"}
+
+
+@pytest.mark.parametrize("force", [False, True])
+def test_batch_refuses_unrecovered_backup_without_publishing(tmp_path, force):
+    vault, first, second, planned = _batch_paths(tmp_path)
+    first.parent.mkdir(parents=True)
+    original = first.parent / ".1.json.backup-interrupted"
+    original.write_text("IRREPLACEABLE-ORIGINAL", encoding="utf-8")
+
+    with pytest.raises(RuntimeError, match="unrecovered Vault migration backup"):
+        migration._write_batch(vault, planned, force=force)
+
+    assert original.read_text(encoding="utf-8") == "IRREPLACEABLE-ORIGINAL"
+    assert not first.exists()
+    assert not second.exists()
+    assert list(first.parent.glob(".*.tmp-*")) == []
