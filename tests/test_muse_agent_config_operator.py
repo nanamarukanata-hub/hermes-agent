@@ -44,6 +44,14 @@ class AgentConfigTests(unittest.TestCase):
         dest.chmod(0o600)
         return dest
 
+    def test_status_only_needs_authenticated_inbox_not_edit_marker(self):
+        task = self.state / "inbox" / (self.task_id + ".json")
+        work = json.loads(task.read_text())
+        work["instruction"] = "Just inspect local configuration"
+        task.write_text(json.dumps(work))
+        self.assertTrue(self.call()["exists"])
+        self.assertEqual(json.loads((self.state / "config-audit.jsonl").read_text().splitlines()[-1])["result"], "inspected")
+
     def test_status_never_exposes_contents(self):
         response = self.call()
         self.assertFalse(response["contents_exposed"])
@@ -53,7 +61,7 @@ class AgentConfigTests(unittest.TestCase):
 
     def test_requires_target_specific_owner_work_order(self):
         with self.assertRaises(app.CourierError):
-            self.call(target="muse_agents")
+            self.call(target="muse_agents", operation="apply", execute=True)
         self.assertIn('"denied"', (self.state/"config-audit.jsonl").read_text())
 
     def test_requires_execute_and_matching_digest(self):
@@ -113,7 +121,7 @@ class AgentConfigTests(unittest.TestCase):
         payload["instruction"] = "inspect unrelated project"
         task.write_text(json.dumps(payload))
         with self.assertRaisesRegex(app.CourierError, "explicitly authorize"):
-            self.call()
+            self.call(operation="apply", execute=True)
 
 if __name__ == "__main__":
     unittest.main()
