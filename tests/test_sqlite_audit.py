@@ -49,3 +49,17 @@ def test_database_files_are_reported_without_modification(tmp_path):
     result = audit(tmp_path)
     assert {Path(p).name for p in result["db_files"]} == set(before)
     assert {p.name: p.read_bytes() for p in tmp_path.iterdir() if p.is_file()} == before
+
+
+def test_sqlite_sidecars_are_detected_even_without_main_db(tmp_path):
+    """WAL, SHM and rollback journals are persistent SQLite artifacts."""
+    extensions = (".db", ".sqlite", ".sqlite3")
+    suffixes = ("-wal", "-shm", "-journal")
+    names = {f"state{ext}{suffix}" for ext in extensions for suffix in suffixes}
+    for name in names:
+        (tmp_path / name).write_bytes(b"untouched")
+    (tmp_path / "unrelated.db-backup").write_bytes(b"ignore")
+    (tmp_path / "directory.db").mkdir()
+    before = {p.name: p.read_bytes() for p in tmp_path.iterdir() if p.is_file()}
+    assert {Path(p).name for p in audit(tmp_path)["db_files"]} == names
+    assert {p.name: p.read_bytes() for p in tmp_path.iterdir() if p.is_file()} == before
