@@ -91,8 +91,10 @@ def _recovery_report(vault: Path) -> dict:
     """Inspect an interrupted export; never restore, remove, or overwrite files."""
     marker = vault / "06_Automation" / "Hermes" / ".sqlite-vault-migration.pending"
     _check_destination(vault, marker)
-    if not marker.is_file():
+    if not marker.exists():
         return {"pending": False, "records": []}
+    if not marker.is_file():
+        raise ValueError("invalid SQLite-to-Vault recovery marker type")
     with marker.open(encoding="utf-8") as stream:
         manifest = json.load(stream)
     if not isinstance(manifest, dict) or manifest.get("version") not in (1, 2):
@@ -112,9 +114,13 @@ def _recovery_report(vault: Path) -> dict:
         return path
 
     records = []
+    seen_destinations: set[Path] = set()
     for entry in entries:
         if manifest["version"] == 1:
             dest = checked_path(entry)
+            if dest in seen_destinations:
+                raise ValueError("duplicate recovery destination")
+            seen_destinations.add(dest)
             records.append({
                 "path": str(dest.relative_to(vault)),
                 "destination": "unverifiable" if dest.is_file() else "missing",
@@ -124,6 +130,9 @@ def _recovery_report(vault: Path) -> dict:
         if not isinstance(entry, dict):
             raise ValueError("invalid recovery record")
         dest = checked_path(entry.get("path"))
+        if dest in seen_destinations:
+            raise ValueError("duplicate recovery destination")
+        seen_destinations.add(dest)
         new_hash = entry.get("new_sha256")
         old_hash = entry.get("original_sha256")
         if not isinstance(new_hash, str) or re.fullmatch(r"[0-9a-f]{64}", new_hash) is None:
@@ -146,6 +155,10 @@ def _recovery_report(vault: Path) -> dict:
             backup_state = "none"
         else:
             backup = checked_path(backup_name)
+            if backup.parent != dest.parent or not backup.name.startswith(
+                f".{dest.name}.backup-"
+            ):
+                raise ValueError("invalid recovery backup path")
             backup_state = (
                 "missing" if not backup.is_file()
                 else "valid" if _sha256_file(backup) == old_hash
