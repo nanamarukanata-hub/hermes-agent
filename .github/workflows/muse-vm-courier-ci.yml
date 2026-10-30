@@ -7,8 +7,10 @@ on:
   pull_request:
     paths:
       - muse_bridge/vm_courier.py
+      - muse_bridge/vm_operator.py
       - muse_bridge/VM-COURIER.md
       - tests/test_muse_vm_courier.py
+      - tests/test_muse_vm_operator.py
       - .github/workflows/muse-vm-courier-ci.yml
 
 permissions:
@@ -25,5 +27,6 @@ jobs:
           python-version: '3.11'
       - name: Compile and run offline courier tests
         run: |
-          python -m compileall -q muse_bridge/vm_courier.py tests/test_muse_vm_courier.py
+          python -m compileall -q muse_bridge/vm_courier.py muse_bridge/vm_operator.py tests/test_muse_vm_courier.py tests/test_muse_vm_operator.py
           python -m unittest discover -s tests -p 'test_muse_vm_courier.py' -v
+          python -m unittest discover -s tests -p 'test_muse_vm_operator.py' -v
