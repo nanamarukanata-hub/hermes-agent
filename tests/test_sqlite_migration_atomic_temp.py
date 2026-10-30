@@ -579,3 +579,81 @@ def test_force_backup_directory_sync_failure_prevents_publication(tmp_path):
     assert first.read_text(encoding="utf-8") == "ORIGINAL-1"
     assert second.read_text(encoding="utf-8") == "ORIGINAL-2"
     assert list(first.parent.glob(".*.backup-*")) == []
+
+
+@pytest.mark.skipif(os.name != "posix", reason="directory fsync durability is POSIX-specific")
+def test_published_directory_is_synced_before_pending_marker_removed(tmp_path):
+    vault, first, second, planned = _batch_paths(tmp_path)
+    marker = _pending_marker(vault)
+    real_fsync = os.fsync
+    real_unlink = migration.Path.unlink
+    publication_synced = False
+    marker_removed = False
+
+    def track_fsync(fd):
+        nonlocal publication_synced
+        if stat.S_ISDIR(os.fstat(fd).st_mode) and first.is_file() and second.is_file():
+            publication_synced = True
+        return real_fsync(fd)
+
+    def track_unlink(self, *args, **kwargs):
+        nonlocal marker_removed
+        if self == marker:
+            assert publication_synced, "marker removed before publication directory fsync"
+            marker_removed = True
+        return real_unlink(self, *args, **kwargs)
+
+    with patch.object(migration.os, "fsync", side_effect=track_fsync):
+        with patch.object(migration.Path, "unlink", track_unlink):
+            migration._write_batch(vault, planned, force=False)
+
+    assert publication_synced and marker_removed
+    assert not marker.exists()
+    assert first.is_file() and second.is_file()
+
+
+@pytest.mark.skipif(os.name != "posix", reason="directory fsync durability is POSIX-specific")
+def test_publication_directory_sync_failure_rolls_back_without_partial_export(tmp_path):
+    vault, first, second, planned = _batch_paths(tmp_path)
+    real_fsync = os.fsync
+
+    def fail_published_directory_fsync(fd):
+        if stat.S_ISDIR(os.fstat(fd).st_mode) and first.is_file() and second.is_file():
+            raise OSError("publication directory sync failed")
+        return real_fsync(fd)
+
+    with patch.object(migration.os, "fsync", side_effect=fail_published_directory_fsync):
+        with pytest.raises(OSError, match="publication directory sync failed"):
+            migration._write_batch(vault, planned, force=False)
+
+    assert not first.exists() and not second.exists()
+    assert not _pending_marker(vault).exists()
+    assert list(first.parent.glob(".*.tmp-*")) == []
+
+
+@pytest.mark.skipif(os.name != "posix", reason="directory fsync durability is POSIX-specific")
+def test_rollback_directory_sync_failure_retains_pending_marker(tmp_path):
+    vault, first, second, planned = _batch_paths(tmp_path)
+    real_link, real_fsync = os.link, os.fsync
+    publication_failed = False
+
+    def fail_second_link(source, target):
+        nonlocal publication_failed
+        if target == second:
+            publication_failed = True
+            raise OSError("second link failed")
+        return real_link(source, target)
+
+    def fail_rollback_directory_fsync(fd):
+        if publication_failed and stat.S_ISDIR(os.fstat(fd).st_mode):
+            raise OSError("rollback directory sync failed")
+        return real_fsync(fd)
+
+    with patch.object(migration.os, "link", side_effect=fail_second_link):
+        with patch.object(migration.os, "fsync", side_effect=fail_rollback_directory_fsync):
+            with pytest.raises(OSError, match="second link failed") as caught:
+                migration._write_batch(vault, planned, force=False)
+
+    assert not first.exists() and not second.exists()
+    assert _pending_marker(vault).is_file()
+    assert any("rollback incomplete" in note for note in caught.value.__notes__)
