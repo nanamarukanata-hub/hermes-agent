@@ -21,6 +21,7 @@ from __future__ import annotations
 
 import argparse
 import base64
+from contextlib import contextmanager
 import json
 import os
 import re
@@ -100,7 +101,65 @@ def _write_json(vault: Path, dest: Path, data: dict, *, force: bool) -> None:
 
 
 
+@contextmanager
+def _migration_lock(vault: Path):
+    """Prevent two cooperating SQLite exports from publishing concurrently.
+
+    The lock file is intentionally retained: removing a locked file would let
+    another process lock a different inode. OS locks release on process exit,
+    including an abrupt termination. Verification and dry-run never lock.
+    """
+    lock_path = vault / "06_Automation" / "Hermes" / ".sqlite-vault-migration.lock"
+    _check_destination(vault, lock_path)
+    lock_path.parent.mkdir(parents=True, exist_ok=True)
+    flags = os.O_CREAT | os.O_RDWR | getattr(os, "O_NOFOLLOW", 0)
+    fd = os.open(lock_path, flags, 0o600)
+    locked = False
+    try:
+        # Do not trust a lock inode that was swapped out before acquisition.
+        _check_destination(vault, lock_path)
+        if os.name == "nt":
+            import msvcrt
+
+            if os.fstat(fd).st_size == 0:
+                os.write(fd, b"\\0")
+            os.lseek(fd, 0, os.SEEK_SET)
+            try:
+                msvcrt.locking(fd, msvcrt.LK_NBLCK, 1)
+            except OSError as exc:
+                raise RuntimeError("another SQLite-to-Vault migration is active") from exc
+        else:
+            import fcntl
+
+            try:
+                fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+            except BlockingIOError as exc:
+                raise RuntimeError("another SQLite-to-Vault migration is active") from exc
+        locked = True
+        held = os.fstat(fd)
+        current = lock_path.stat(follow_symlinks=False)
+        if (held.st_dev, held.st_ino) != (current.st_dev, current.st_ino):
+            raise RuntimeError("SQLite-to-Vault migration lock was replaced")
+        yield
+    finally:
+        if locked:
+            if os.name == "nt":
+                os.lseek(fd, 0, os.SEEK_SET)
+                msvcrt.locking(fd, msvcrt.LK_UNLCK, 1)
+            else:
+                fcntl.flock(fd, fcntl.LOCK_UN)
+        os.close(fd)
+
+
 def _write_batch(vault: Path, planned: list[tuple[Path, dict]], *, force: bool) -> None:
+    """Publish one batch while holding the cooperative Vault migration lock."""
+    if not planned:
+        return
+    with _migration_lock(vault):
+        _write_batch_locked(vault, planned, force=force)
+
+
+def _write_batch_locked(vault: Path, planned: list[tuple[Path, dict]], *, force: bool) -> None:
     """Stage all exports, and roll back ordinary publication errors.
 
     Force mode also snapshots existing records before replacing anything.
