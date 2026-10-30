@@ -11,6 +11,7 @@ import ast
 from pathlib import Path
 
 _SQLITE_MODULES = frozenset({"sqlite3", "aiosqlite"})
+_ENGINE_FACTORIES = frozenset({"create_engine", "create_async_engine"})
 
 
 def _uses_sqlite(source: str, filename: str) -> bool:
@@ -24,17 +25,29 @@ def _uses_sqlite(source: str, filename: str) -> bool:
     # Resolve the common importlib aliases before looking for dynamic calls.
     importlib_names = {"importlib"}
     import_module_names: set[str] = set()
+    sqlalchemy_names: set[str] = set()
+    engine_names: set[str] = set()
     for node in ast.walk(tree):
         if isinstance(node, ast.Import):
             importlib_names.update(
                 alias.asname or "importlib"
                 for alias in node.names if alias.name == "importlib"
             )
-        elif isinstance(node, ast.ImportFrom) and node.module == "importlib":
-            import_module_names.update(
-                alias.asname or alias.name
-                for alias in node.names if alias.name == "import_module"
+            sqlalchemy_names.update(
+                alias.asname or "sqlalchemy"
+                for alias in node.names if alias.name.startswith("sqlalchemy")
             )
+        elif isinstance(node, ast.ImportFrom):
+            if node.module == "importlib":
+                import_module_names.update(
+                    alias.asname or alias.name
+                    for alias in node.names if alias.name == "import_module"
+                )
+            if node.module in {"sqlalchemy", "sqlalchemy.ext.asyncio"}:
+                engine_names.update(
+                    alias.asname or alias.name
+                    for alias in node.names if alias.name in _ENGINE_FACTORIES
+                )
     for node in ast.walk(tree):
         if isinstance(node, ast.Import):
             if any(alias.name.split(".", 1)[0] in _SQLITE_MODULES for alias in node.names):
@@ -47,13 +60,20 @@ def _uses_sqlite(source: str, filename: str) -> bool:
             if not isinstance(first, ast.Constant) or not isinstance(first.value, str):
                 continue
             module = first.value.split(".", 1)[0]
-            if module not in _SQLITE_MODULES:
-                continue
             func = node.func
-            if isinstance(func, ast.Name) and func.id in {"__import__", *import_module_names}:
-                return True
-            if isinstance(func, ast.Attribute) and func.attr == "import_module":
-                if isinstance(func.value, ast.Name) and func.value.id in importlib_names:
+            if module in _SQLITE_MODULES:
+                if isinstance(func, ast.Name) and func.id in {"__import__", *import_module_names}:
+                    return True
+                if isinstance(func, ast.Attribute) and func.attr == "import_module":
+                    if isinstance(func.value, ast.Name) and func.value.id in importlib_names:
+                        return True
+            # SQLAlchemy opens SQLite without an explicit sqlite3 import.
+            # Match known engine factories, not arbitrary strings mentioning SQLite.
+            if first.value.startswith(("sqlite:", "sqlite+")) and "://" in first.value:
+                if isinstance(func, ast.Name) and func.id in engine_names:
+                    return True
+                if (isinstance(func, ast.Attribute) and func.attr in _ENGINE_FACTORIES
+                        and isinstance(func.value, ast.Name) and func.value.id in sqlalchemy_names):
                     return True
     return False
 
