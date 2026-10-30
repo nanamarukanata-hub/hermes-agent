@@ -12,6 +12,7 @@ import math
 import os
 import re
 import shutil
+import stat
 import tempfile
 import time
 import uuid
@@ -56,14 +57,24 @@ class SessionDB:
 
     @contextmanager
     def _guard(self):
-        # Never follow an attacker-controlled lockfile symlink. Every writer
-        # must lock the same file inside the Vault.
-        if (self._lockfile.is_symlink() or
-                (self._lockfile.exists() and not self._lockfile.is_file())):
-            raise RuntimeError("Unsafe Vault session lockfile")
-        with self._lockfile.open("a+b") as fd:
+        # Path.is_symlink() followed by Path.open() is a TOCTOU race:
+        # the lock can be replaced with a symlink between the two calls.
+        # Open the final component without following links, then verify
+        # that the pathname still names the inode we locked.
+        flags = os.O_RDWR | os.O_CREAT | os.O_NOFOLLOW | os.O_CLOEXEC
+        try:
+            raw_fd = os.open(self._lockfile, flags, 0o600)
+        except OSError as exc:
+            raise RuntimeError("Unsafe Vault session lockfile") from exc
+        with os.fdopen(raw_fd, "a+b") as fd:
+            if not stat.S_ISREG(os.fstat(fd.fileno()).st_mode):
+                raise RuntimeError("Unsafe Vault session lockfile")
             fcntl.flock(fd, fcntl.LOCK_EX)
             try:
+                opened = os.fstat(fd.fileno())
+                current = os.stat(self._lockfile, follow_symlinks=False)
+                if (opened.st_dev, opened.st_ino) != (current.st_dev, current.st_ino):
+                    raise RuntimeError("Vault session lockfile changed during acquisition")
                 yield
             finally:
                 fcntl.flock(fd, fcntl.LOCK_UN)
