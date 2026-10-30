@@ -202,8 +202,23 @@ def _recovery_report(vault: Path) -> dict:
             "destination": destination_state,
             "backup": backup_state,
         })
+    # A valid journal can coexist with backups from a different interrupted
+    # migration. Report those unreferenced originals rather than hiding them.
+    # Version 1 has no backup manifest, so all discovered backups are orphaned.
+    referenced_backups = {
+        entry["backup"] for entry in entries
+        if isinstance(entry, dict) and isinstance(entry.get("backup"), str)
+    }
+    orphan_backups = [
+        path for path in _orphaned_migration_backups(vault)
+        if path not in referenced_backups
+    ]
     # No automated recovery: a concurrent Vault writer may have changed a file.
-    return {"pending": True, "version": manifest["version"], "records": records}
+    report = {"pending": True, "version": manifest["version"], "records": records}
+    if orphan_backups:
+        report["orphan_backups"] = orphan_backups
+        report["requires_attention"] = True
+    return report
 
 
 def _fsync_directories(parents: set[Path]) -> None:
