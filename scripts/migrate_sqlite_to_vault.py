@@ -108,13 +108,21 @@ def _write_batch(vault: Path, planned: list[tuple[Path, dict]], *, force: bool) 
     """
     prepared: list[tuple[Path, Path]] = []
     backups: dict[Path, Path | None] = {}
-    original_stats: dict[Path, tuple[int, int, int, int] | None] = {}
+    original_stats: dict[Path, tuple[int, int, int, int, int] | None] = {}
     published: list[tuple[Path, Path, tuple[int, int]]] = []
     preserve_backups: set[Path] = set()
     try:
         # All serialization and fsyncs finish before any Vault record changes.
         for dest, data in planned:
             _check_destination(vault, dest)
+            # A prior interrupted force migration may have retained the only
+            # original copy here. Do not overwrite more records until the
+            # operator has inspected and recovered those backups.
+            if any(dest.parent.glob(f".{dest.name}.backup-*")):
+                raise RuntimeError(
+                    f"unrecovered Vault migration backup for {dest}; "
+                    "inspect the .backup-* file before retrying"
+                )
             if dest.exists() and not force:
                 raise FileExistsError(f"Vault destination already exists: {dest}")
             dest.parent.mkdir(parents=True, exist_ok=True)
@@ -137,7 +145,10 @@ def _write_batch(vault: Path, planned: list[tuple[Path, dict]], *, force: bool) 
                     original_stats[dest] = None
                     continue
                 before = dest.stat(follow_symlinks=False)
-                fingerprint = (before.st_dev, before.st_ino, before.st_size, before.st_mtime_ns)
+                fingerprint = (
+                    before.st_dev, before.st_ino, before.st_size,
+                    before.st_mtime_ns, stat.S_IMODE(before.st_mode),
+                )
                 fd, backup_name = tempfile.mkstemp(
                     prefix=f".{dest.name}.backup-", dir=dest.parent
                 )
@@ -149,7 +160,10 @@ def _write_batch(vault: Path, planned: list[tuple[Path, dict]], *, force: bool) 
                     os.fchmod(stream.fileno(), stat.S_IMODE(before.st_mode))
                     os.fsync(stream.fileno())
                 after = dest.stat(follow_symlinks=False)
-                if (after.st_dev, after.st_ino, after.st_size, after.st_mtime_ns) != fingerprint:
+                if (
+                    after.st_dev, after.st_ino, after.st_size,
+                    after.st_mtime_ns, stat.S_IMODE(after.st_mode),
+                ) != fingerprint:
                     raise RuntimeError(f"Vault destination changed during backup: {dest}")
                 original_stats[dest] = fingerprint
 
@@ -161,11 +175,20 @@ def _write_batch(vault: Path, planned: list[tuple[Path, dict]], *, force: bool) 
                 # publication. This check is not a cross-process file lock.
                 current = dest.stat(follow_symlinks=False) if dest.exists() else None
                 fingerprint = (
-                    (current.st_dev, current.st_ino, current.st_size, current.st_mtime_ns)
+                    (
+                        current.st_dev, current.st_ino, current.st_size,
+                        current.st_mtime_ns, stat.S_IMODE(current.st_mode),
+                    )
                     if current is not None else None
                 )
                 if fingerprint != original_stats[dest]:
                     raise RuntimeError(f"Vault destination changed before publication: {dest}")
+                if current is not None:
+                    # mkstemp creates 0600 files. Preserve the original
+                    # permissions instead of silently restricting readers.
+                    os.chmod(tmp, stat.S_IMODE(current.st_mode))
+                    with tmp.open("rb") as staged:
+                        os.fsync(staged.fileno())
                 os.replace(tmp, dest)
             else:
                 os.link(tmp, dest)
