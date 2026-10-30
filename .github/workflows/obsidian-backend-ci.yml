@@ -31,6 +31,9 @@ on:
       - 'tests/test_kanban_vault_runtime_paths.py'
       - 'hermes_hybrid/sqlite_audit.py'
       - 'tests/test_sqlite_audit.py'
+      - 'plugins/memory/holographic/__init__.py'
+      - 'plugins/memory/holographic/store.py'
+      - 'tests/test_holographic_vault_paths.py'
   pull_request:
     branches: [main]
     paths:
@@ -62,6 +65,9 @@ on:
       - 'tests/test_kanban_vault_runtime_paths.py'
       - 'hermes_hybrid/sqlite_audit.py'
       - 'tests/test_sqlite_audit.py'
+      - 'plugins/memory/holographic/__init__.py'
+      - 'plugins/memory/holographic/store.py'
+      - 'tests/test_holographic_vault_paths.py'
   workflow_dispatch:
 jobs:
   obsidian-storage:
@@ -90,5 +96,7 @@ jobs:
         run: python -m pytest tests/gateway/test_discord_thread_persistence.py -q -k 'symlinked_vault_parent_rejected_before_mkdir or regular_file_blocks_vault_thread_directory'
       - name: Runtime SQLite audit regression
         run: python -m pytest tests/test_sqlite_audit.py -q
+      - name: Holographic memory Vault path and lock regression
+        run: python -m pytest tests/test_holographic_vault_paths.py -q
       - name: Syntax verification
         run: python -m py_compile hermes_state.py hermes_obsidian_state.py hermes_hybrid/sqlite_audit.py scripts/migrate_sessions_to_obsidian.py scripts/migrate_kanban_to_vault.py scripts/migrate_sqlite_to_vault.py gateway/session.py gateway/platforms/helpers.py
