@@ -23,6 +23,31 @@ def test_detects_nested_aliased_and_dynamic_imports(tmp_path, source):
     assert audit(tmp_path)["sqlite_imports"] == [str(path)]
 
 
+
+@pytest.mark.parametrize("source", [
+    "from sqlalchemy import create_engine\\ndb = create_engine('sqlite:///session.db')\\n",
+    "from sqlalchemy import create_engine as ce\\ndb = ce('sqlite+pysqlite:///session.db')\\n",
+    "import sqlalchemy as sa\\ndb = sa.create_engine('sqlite:///:memory:')\\n",
+    "from sqlalchemy.ext.asyncio import create_async_engine as ae\\ndb = ae('sqlite+aiosqlite:///session.db')\\n",
+    "import sqlalchemy.ext.asyncio as sa\\ndb = sa.create_async_engine('sqlite+aiosqlite:///session.db')\\n",
+])
+def test_sqlalchemy_sqlite_engine_without_sqlite_import_is_detected(tmp_path, source):
+    path = tmp_path / "runtime.py"
+    path.write_text(source, encoding="utf-8")
+    assert audit(tmp_path)["sqlite_imports"] == [str(path)]
+
+
+@pytest.mark.parametrize("source", [
+    "from sqlalchemy import create_engine\\ndb = create_engine('postgresql+psycopg://localhost/db')\\n",
+    "example = 'sqlite:///session.db'\\n",
+    "def create_engine(url): return url\\ndb = create_engine('sqlite:///not_sqlalchemy.db')\\n",
+])
+def test_sqlalchemy_audit_avoids_unrelated_strings_and_engines(tmp_path, source):
+    path = tmp_path / "runtime.py"
+    path.write_text(source, encoding="utf-8")
+    assert audit(tmp_path)["sqlite_imports"] == []
+
+
 def test_migration_filename_is_not_an_implicit_exemption(tmp_path):
     path = tmp_path / "migrate_hidden.py"
     path.write_text("import sqlite3\n", encoding="utf-8")
