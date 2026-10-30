@@ -320,6 +320,16 @@ def _write_batch_locked(vault: Path, planned: list[tuple[Path, dict]], *, force:
             f"unrecovered SQLite-to-Vault publication marker: {marker}; "
             "inspect the Vault and backups before retrying"
         )
+    # A missing pending marker is not proof of a clean prior migration.
+    # Backups for records outside this batch may be the only surviving
+    # originals. Fail closed across every directory this exporter writes.
+    orphan_backups = _orphaned_migration_backups(vault)
+    if orphan_backups:
+        raise RuntimeError(
+            "unrecovered Vault migration backup(s): "
+            + ", ".join(orphan_backups)
+            + "; inspect recovery before retrying"
+        )
     marker_inode: tuple[int, int] | None = None
     rollback_incomplete = False
     try:
