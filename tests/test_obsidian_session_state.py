@@ -453,6 +453,45 @@ class ObsidianStateTests(unittest.TestCase):
             self.assertEqual(external.read_text(encoding="utf-8"), "do not modify")
             self.assertFalse((self.db.root / "blocked").exists())
 
+    def test_writer_lock_symlink_swap_at_open_is_rejected(self):
+        # Simulate a link inserted after a path-only precheck but just
+        # before open(). O_NOFOLLOW must reject it without touching the target.
+        with tempfile.TemporaryDirectory() as outside:
+            external = Path(outside) / "private"
+            external.write_text("unchanged", encoding="utf-8")
+            real_open = os.open
+
+            def swap_at_open(path, flags, mode=0o777, *, dir_fd=None):
+                if Path(path) == self.db._lockfile:
+                    self.db._lockfile.symlink_to(external)
+                if dir_fd is None:
+                    return real_open(path, flags, mode)
+                return real_open(path, flags, mode, dir_fd=dir_fd)
+
+            with patch("hermes_obsidian_state.os.open", side_effect=swap_at_open):
+                with self.assertRaises(RuntimeError):
+                    self.db.create_session("race_blocked", "discord")
+            self.assertEqual(external.read_text(encoding="utf-8"), "unchanged")
+            self.assertFalse((self.db.root / "race_blocked").exists())
+
+    def test_writer_lock_replacement_after_flock_is_rejected(self):
+        # Locking an unlinked inode does not serialize writers opening a
+        # replacement pathname. Refuse the write if the inode changed.
+        import fcntl
+
+        real_flock = fcntl.flock
+
+        def swap_after_lock(fd, operation):
+            real_flock(fd, operation)
+            if operation == fcntl.LOCK_EX:
+                self.db._lockfile.unlink()
+                self.db._lockfile.write_text("replacement", encoding="utf-8")
+
+        with patch("hermes_obsidian_state.fcntl.flock", side_effect=swap_after_lock):
+            with self.assertRaisesRegex(RuntimeError, "changed during acquisition"):
+                self.db.create_session("replaced_lock", "discord")
+        self.assertFalse((self.db.root / "replaced_lock").exists())
+
     def test_global_state_meta_normal_roundtrip(self):
         self.assertIsNone(self.db.get_meta("last_auto_prune"))
         self.db.set_meta("last_auto_prune", "123")
