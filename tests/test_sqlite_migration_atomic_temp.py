@@ -1,5 +1,6 @@
 """Regressions for the non-destructive SQLite-to-Vault export publisher."""
 
+import hashlib
 import json
 import os
 import stat
@@ -361,9 +362,93 @@ migration._write_batch(vault, planned, force=False)
 
     marker = _pending_marker(vault)
     manifest = json.loads(marker.read_text(encoding="utf-8"))
-    assert manifest["version"] == 1
+    assert manifest["version"] == 2
     assert len(manifest["destinations"]) == 2
+    assert manifest["destinations"][0]["path"].endswith("RetainQueue/1.json")
+    assert manifest["destinations"][0]["new_sha256"] == hashlib.sha256(first.read_bytes()).hexdigest()
+    assert manifest["destinations"][0]["backup"] is None
     with pytest.raises(RuntimeError, match="unrecovered SQLite-to-Vault publication marker"):
         migration._write_batch(vault, planned, force=True)
     assert first.is_file()
     assert not second.exists()
+
+
+def test_recovery_report_identifies_published_original_and_valid_backup(tmp_path):
+    vault, first, second, _ = _batch_paths(tmp_path)
+    first.parent.mkdir(parents=True)
+    first.write_text("NEW", encoding="utf-8")
+    second.write_text("OLD", encoding="utf-8")
+    backup = first.parent / ".1.json.backup-recovery"
+    backup.write_text("OLD", encoding="utf-8")
+    digest = lambda data: hashlib.sha256(data.encode("utf-8")).hexdigest()
+    marker = _pending_marker(vault)
+    marker.write_text(json.dumps({
+        "version": 2, "force": True, "destinations": [
+            {
+                "path": str(first.relative_to(vault)),
+                "new_sha256": digest("NEW"), "original_sha256": digest("OLD"),
+                "backup": str(backup.relative_to(vault)),
+            },
+            {
+                "path": str(second.relative_to(vault)),
+                "new_sha256": digest("NEW"), "original_sha256": digest("OLD"),
+                "backup": None,
+            },
+        ],
+    }), encoding="utf-8")
+    before = {p: p.read_bytes() for p in (marker, first, second, backup)}
+    report = migration._recovery_report(vault)
+    assert report["pending"] is True
+    assert report["version"] == 2
+    assert report["records"][0]["destination"] == "published"
+    assert report["records"][0]["backup"] == "valid"
+    assert report["records"][1]["destination"] == "original"
+    assert report["records"][1]["backup"] == "none"
+    assert all(p.read_bytes() == content for p, content in before.items())
+
+
+def test_recovery_report_flags_changed_or_missing_backup(tmp_path):
+    vault, first, _, _ = _batch_paths(tmp_path)
+    first.parent.mkdir(parents=True)
+    first.write_text("CONCURRENT", encoding="utf-8")
+    backup = first.parent / ".1.json.backup-recovery"
+    backup.write_text("CORRUPTED", encoding="utf-8")
+    marker = _pending_marker(vault)
+    digest = lambda data: hashlib.sha256(data.encode("utf-8")).hexdigest()
+    marker.write_text(json.dumps({
+        "version": 2, "destinations": [{
+            "path": str(first.relative_to(vault)), "new_sha256": digest("NEW"),
+            "original_sha256": digest("OLD"), "backup": str(backup.relative_to(vault)),
+        }],
+    }), encoding="utf-8")
+    report = migration._recovery_report(vault)
+    assert report["records"][0]["destination"] == "changed"
+    assert report["records"][0]["backup"] == "changed"
+    backup.unlink()
+    assert migration._recovery_report(vault)["records"][0]["backup"] == "missing"
+
+
+def test_recovery_report_rejects_marker_path_traversal(tmp_path):
+    vault, first, _, _ = _batch_paths(tmp_path)
+    first.parent.mkdir(parents=True)
+    marker = _pending_marker(vault)
+    marker.write_text(json.dumps({
+        "version": 2, "destinations": [{
+            "path": "../../outside", "new_sha256": "0" * 64,
+            "original_sha256": None, "backup": None,
+        }],
+    }), encoding="utf-8")
+    with pytest.raises(ValueError, match="unsafe recovery path"):
+        migration._recovery_report(vault)
+    assert marker.exists()
+
+
+def test_inspect_recovery_cli_does_not_require_legacy_sqlite(tmp_path, monkeypatch, capsys):
+    vault, _, _, _ = _batch_paths(tmp_path)
+    monkeypatch.setattr(
+        "sys.argv",
+        ["migrate_sqlite_to_vault.py", "--vault", str(vault), "--inspect-recovery"],
+    )
+    assert migration.main() == 0
+    assert json.loads(capsys.readouterr().out) == {"pending": False, "records": []}
+    assert not vault.exists()
