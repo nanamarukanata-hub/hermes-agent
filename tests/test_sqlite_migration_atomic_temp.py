@@ -657,3 +657,39 @@ def test_rollback_directory_sync_failure_retains_pending_marker(tmp_path):
     assert not first.exists() and not second.exists()
     assert _pending_marker(vault).is_file()
     assert any("rollback incomplete" in note for note in caught.value.__notes__)
+
+
+def test_inspect_recovery_reports_orphaned_backup_without_pending_marker(tmp_path):
+    vault, first, _, _ = _batch_paths(tmp_path)
+    first.parent.mkdir(parents=True)
+    backup = first.parent / ".1.json.backup-interrupted"
+    backup.write_text("IRREPLACEABLE-ORIGINAL", encoding="utf-8")
+    before = backup.read_bytes()
+
+    report = migration._recovery_report(vault)
+
+    assert report == {
+        "pending": False,
+        "records": [],
+        "orphan_backups": [str(backup.relative_to(vault))],
+        "requires_attention": True,
+    }
+    assert backup.read_bytes() == before
+    assert not _pending_marker(vault).exists()
+
+
+@pytest.mark.skipif(os.name == "nt", reason="symlink creation may require elevated privileges")
+def test_inspect_recovery_refuses_symlinked_orphan_backup(tmp_path):
+    vault, first, _, _ = _batch_paths(tmp_path)
+    first.parent.mkdir(parents=True)
+    external = tmp_path / "original-outside-vault"
+    external.write_text("DO NOT TOUCH", encoding="utf-8")
+    backup = first.parent / ".1.json.backup-redirect"
+    backup.symlink_to(external)
+
+    with pytest.raises(ValueError, match="symlinked Vault destination"):
+        migration._recovery_report(vault)
+
+    assert external.read_text(encoding="utf-8") == "DO NOT TOUCH"
+    assert backup.is_symlink()
+    assert not _pending_marker(vault).exists()
