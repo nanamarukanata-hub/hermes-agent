@@ -443,6 +443,59 @@ def test_recovery_report_rejects_marker_path_traversal(tmp_path):
     assert marker.exists()
 
 
+
+def test_recovery_report_rejects_directory_marker_instead_of_reporting_clean(tmp_path):
+    vault, _, _, _ = _batch_paths(tmp_path)
+    marker = _pending_marker(vault)
+    marker.mkdir(parents=True)
+    with pytest.raises(ValueError, match="invalid SQLite-to-Vault recovery marker type"):
+        migration._recovery_report(vault)
+    assert marker.is_dir()
+
+
+@pytest.mark.parametrize("version", [1, 2])
+def test_recovery_report_rejects_duplicate_destinations(tmp_path, version):
+    vault, first, _, _ = _batch_paths(tmp_path)
+    marker = _pending_marker(vault)
+    marker.parent.mkdir(parents=True)
+    path = str(first.relative_to(vault))
+    if version == 1:
+        destinations = [path, path]
+    else:
+        record = {
+            "path": path, "new_sha256": "0" * 64,
+            "original_sha256": None, "backup": None,
+        }
+        destinations = [record, record]
+    marker.write_text(
+        json.dumps({"version": version, "destinations": destinations}), encoding="utf-8"
+    )
+    before = marker.read_bytes()
+    with pytest.raises(ValueError, match="duplicate recovery destination"):
+        migration._recovery_report(vault)
+    assert marker.read_bytes() == before
+
+
+def test_recovery_report_rejects_backup_not_belonging_to_destination(tmp_path):
+    vault, first, _, _ = _batch_paths(tmp_path)
+    first.parent.mkdir(parents=True)
+    unrelated = first.parent / "other-record.json"
+    unrelated.write_text("KEEP", encoding="utf-8")
+    marker = _pending_marker(vault)
+    marker.write_text(json.dumps({
+        "version": 2, "destinations": [{
+            "path": str(first.relative_to(vault)),
+            "new_sha256": "0" * 64,
+            "original_sha256": hashlib.sha256(b"KEEP").hexdigest(),
+            "backup": str(unrelated.relative_to(vault)),
+        }],
+    }), encoding="utf-8")
+    before = {p: p.read_bytes() for p in (marker, unrelated)}
+    with pytest.raises(ValueError, match="invalid recovery backup path"):
+        migration._recovery_report(vault)
+    assert {p: p.read_bytes() for p in before} == before
+
+
 def test_inspect_recovery_cli_does_not_require_legacy_sqlite(tmp_path, monkeypatch, capsys):
     vault, _, _, _ = _batch_paths(tmp_path)
     monkeypatch.setattr(
