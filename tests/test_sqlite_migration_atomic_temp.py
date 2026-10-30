@@ -140,3 +140,73 @@ def test_force_batch_replaces_existing_records_after_staging(tmp_path):
     assert json.loads(first.read_text(encoding="utf-8")) == {"user_id": "u1"}
     assert json.loads(second.read_text(encoding="utf-8")) == {"user_id": "u2"}
     assert list(first.parent.glob(".*.tmp-*")) == []
+
+
+def test_force_batch_second_replace_failure_restores_originals(tmp_path):
+    vault, first, second, planned = _batch_paths(tmp_path)
+    first.parent.mkdir(parents=True)
+    first.write_text("ORIGINAL-1", encoding="utf-8")
+    second.write_text("ORIGINAL-2", encoding="utf-8")
+    real_replace = os.replace
+
+    def fail_second(source, target):
+        if target == second:
+            raise OSError("second replacement failed")
+        return real_replace(source, target)
+
+    with patch.object(migration.os, "replace", side_effect=fail_second):
+        with pytest.raises(OSError, match="second replacement failed"):
+            migration._write_batch(vault, planned, force=True)
+
+    assert first.read_text(encoding="utf-8") == "ORIGINAL-1"
+    assert second.read_text(encoding="utf-8") == "ORIGINAL-2"
+    assert list(first.parent.glob(".*.tmp-*")) == []
+    assert list(first.parent.glob(".*.backup-*")) == []
+
+
+def test_force_batch_replace_failure_removes_newly_published_record(tmp_path):
+    vault, first, second, planned = _batch_paths(tmp_path)
+    first.parent.mkdir(parents=True)
+    # The first destination is new; the second has an existing original.
+    second.write_text("ORIGINAL-2", encoding="utf-8")
+    real_replace = os.replace
+
+    def fail_second(source, target):
+        if target == second:
+            raise OSError("second replacement failed")
+        return real_replace(source, target)
+
+    with patch.object(migration.os, "replace", side_effect=fail_second):
+        with pytest.raises(OSError, match="second replacement failed"):
+            migration._write_batch(vault, planned, force=True)
+
+    assert not first.exists()
+    assert second.read_text(encoding="utf-8") == "ORIGINAL-2"
+    assert list(first.parent.glob(".*.backup-*")) == []
+
+
+def test_force_rollback_preserves_concurrent_writer_and_original_backup(tmp_path):
+    vault, first, second, planned = _batch_paths(tmp_path)
+    first.parent.mkdir(parents=True)
+    first.write_text("ORIGINAL-1", encoding="utf-8")
+    second.write_text("ORIGINAL-2", encoding="utf-8")
+    real_replace = os.replace
+
+    def competing_replace(source, target):
+        if target == second:
+            competing = first.with_name("competing.json")
+            competing.write_text("CONCURRENT", encoding="utf-8")
+            real_replace(competing, first)
+            raise OSError("second replacement failed")
+        return real_replace(source, target)
+
+    with patch.object(migration.os, "replace", side_effect=competing_replace):
+        with pytest.raises(OSError, match="second replacement failed") as caught:
+            migration._write_batch(vault, planned, force=True)
+
+    assert first.read_text(encoding="utf-8") == "CONCURRENT"
+    assert second.read_text(encoding="utf-8") == "ORIGINAL-2"
+    retained = list(first.parent.glob(".1.json.backup-*"))
+    assert len(retained) == 1
+    assert retained[0].read_text(encoding="utf-8") == "ORIGINAL-1"
+    assert any("rollback incomplete" in note for note in caught.value.__notes__)
