@@ -320,6 +320,19 @@ def _write_batch_locked(vault: Path, planned: list[tuple[Path, dict]], *, force:
                     raise RuntimeError(f"Vault destination changed during backup: {dest}")
                 original_stats[dest] = fingerprint
 
+            # fsync() on a backup file does not persist its directory entry.
+            # Ensure every backup name is durable before publishing the
+            # recovery marker; otherwise a crash can leave a durable marker
+            # pointing at a backup that never reached disk.
+            if os.name == "posix":
+                backup_parents = {backup.parent for backup in backups.values() if backup is not None}
+                for parent in sorted(backup_parents):
+                    dir_fd = os.open(parent, os.O_RDONLY | getattr(os, "O_DIRECTORY", 0))
+                    try:
+                        os.fsync(dir_fd)
+                    finally:
+                        os.close(dir_fd)
+
         # Create and fsync the marker *before* publishing any record. A
         # SIGKILL or power loss during a multi-file publication then blocks
         # further migrations rather than silently treating partial output as
