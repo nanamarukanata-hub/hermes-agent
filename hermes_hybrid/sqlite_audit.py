@@ -69,6 +69,12 @@ def audit(path: str | Path) -> dict[str, list[str]]:
     for py in sorted(root.rglob("*.py")):
         if _uses_sqlite(py.read_text(encoding="utf-8"), str(py)):
             imports.append(str(py))
-    for suffix in ("*.db", "*.sqlite", "*.sqlite3"):
-        db_files.extend(str(p) for p in sorted(root.rglob(suffix)))
+    # SQLite may leave WAL/SHM/rollback journals after the main DB is gone.
+    extensions = (".db", ".sqlite", ".sqlite3")
+    endings = extensions + tuple(
+        ext + suffix for ext in extensions for suffix in ("-wal", "-shm", "-journal")
+    )
+    for entry in root.rglob("*"):
+        if entry.name.endswith(endings) and (entry.is_file() or entry.is_symlink()):
+            db_files.append(str(entry))
     return {"sqlite_imports": imports, "db_files": sorted(db_files)}
