@@ -256,3 +256,40 @@ def test_fact_symlink_swap_at_open_is_ignored(vault, tmp_path, monkeypatch, use_
 
     assert swapped
     assert outside.read_bytes() == original
+
+def test_bank_vector_reads_regular_vault_file(vault):
+    """Valid bank vectors remain readable after switching to the safe reader."""
+    store = MemoryStore()
+    bank_path = store._bank_path("cat:general")
+    bank_path.write_text('{"vector_b64": "c2FmZQ=="}', encoding="utf-8")
+
+    assert store.get_bank_vector("cat:general") == b"safe"
+
+
+def test_bank_vector_symlink_swap_at_open_is_ignored(vault, tmp_path, monkeypatch):
+    """A bank file swapped to an outside link at open must not leak its data."""
+    import os
+    from pathlib import Path
+
+    store = MemoryStore()
+    bank_path = store._bank_path("cat:general")
+    bank_path.write_text('{"vector_b64": "c2FmZQ=="}', encoding="utf-8")
+    outside = tmp_path / "external-bank.json"
+    outside.write_text('{"vector_b64": "cHJpdmF0ZQ=="}', encoding="utf-8")
+    original = outside.read_bytes()
+    real_open = os.open
+    swapped = False
+
+    def swap_before_open(path, flags, *args, **kwargs):
+        nonlocal swapped
+        if Path(path) == bank_path and not swapped:
+            swapped = True
+            bank_path.unlink()
+            bank_path.symlink_to(outside)
+        return real_open(path, flags, *args, **kwargs)
+
+    monkeypatch.setattr(os, "open", swap_before_open)
+    assert store.get_bank_vector("cat:general") is None
+    assert swapped
+    assert outside.read_bytes() == original
+
