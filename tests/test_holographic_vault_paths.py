@@ -166,3 +166,25 @@ def test_lockfile_inode_replacement_after_flock_is_rejected(vault, monkeypatch):
     assert replaced
     assert store._lock_depth == 0
     assert list(store.facts_dir.glob("*.json")) == []
+
+
+@pytest.mark.parametrize("dangling", [False, True])
+def test_entity_index_symlink_added_after_initialization_is_rejected(vault, tmp_path, dangling):
+    """A late-planted entity index link must never be read outside the Vault."""
+    store = MemoryStore()
+    outside = tmp_path / "external-entities.json"
+    if not dangling:
+        outside.write_text('{"next_id": 900, "by_name": {"External": 1}}', encoding="utf-8")
+    index_path = store.db_path / "entities.json"
+    index_path.symlink_to(outside)
+    original = outside.read_bytes() if not dangling else None
+
+    with pytest.raises(RuntimeError, match="Unsafe Vault entity index"):
+        store.add_fact('Alice Smith remembers the event')
+
+    assert index_path.is_symlink()
+    if dangling:
+        assert not outside.exists()
+    else:
+        assert outside.read_bytes() == original
+    assert list(store.facts_dir.glob("*.json")) == []
