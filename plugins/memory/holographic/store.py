@@ -228,6 +228,10 @@ class MemoryStore:
     # -- entities ------------------------------------------------------
     def _entities_index(self) -> dict:
         p = self.db_path / "entities.json"
+        # The constructor rejects pre-existing links, but another process may
+        # plant one later. Never read an entity index outside the Vault.
+        if p.is_symlink():
+            raise RuntimeError("Unsafe Vault entity index")
         if not p.exists():
             return {"next_id": 1, "by_name": {}}
         try:
