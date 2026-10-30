@@ -23,6 +23,7 @@ import fcntl
 import json
 import os
 import re
+import stat
 import threading
 import tempfile
 from contextlib import contextmanager
@@ -148,10 +149,23 @@ class MemoryStore:
                     self._lock_depth -= 1
                 return
 
-            with open(self._lock_file, "a+", encoding="utf-8") as lock:
+            # The initialization-time symlink check is not sufficient:
+            # another process could replace the lock before it is opened.
+            flags = os.O_RDWR | os.O_CREAT | os.O_NOFOLLOW | os.O_CLOEXEC
+            try:
+                raw_fd = os.open(self._lock_file, flags, 0o600)
+            except OSError as exc:
+                raise RuntimeError("Unsafe Vault memory lockfile") from exc
+            with os.fdopen(raw_fd, "a+", encoding="utf-8") as lock:
+                if not stat.S_ISREG(os.fstat(lock.fileno()).st_mode):
+                    raise RuntimeError("Unsafe Vault memory lockfile")
                 fcntl.flock(lock.fileno(), fcntl.LOCK_EX)
                 self._lock_depth = 1
                 try:
+                    opened = os.fstat(lock.fileno())
+                    current = os.stat(self._lock_file, follow_symlinks=False)
+                    if (opened.st_dev, opened.st_ino) != (current.st_dev, current.st_ino):
+                        raise RuntimeError("Vault memory lockfile changed during acquisition")
                     yield
                 finally:
                     self._lock_depth = 0
