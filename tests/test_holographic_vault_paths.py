@@ -125,3 +125,44 @@ def test_store_rejects_symlinked_entity_index(vault, tmp_path):
         MemoryStore()
 
     assert external_index.read_text(encoding="utf-8") == '{"by_name": {}}'
+
+
+def test_lockfile_symlink_added_after_initialization_is_rejected(vault, tmp_path):
+    """The lock must not follow a link planted after the constructor check."""
+    store = MemoryStore()
+    outside = tmp_path / "external.lock"
+    outside.write_text("untouched", encoding="utf-8")
+    store._lock_file.symlink_to(outside)
+
+    with pytest.raises(RuntimeError, match="Unsafe Vault memory lockfile"):
+        store.add_fact("Must not persist")
+
+    assert outside.read_text(encoding="utf-8") == "untouched"
+    assert list(store.facts_dir.glob("*.json")) == []
+
+
+def test_lockfile_inode_replacement_after_flock_is_rejected(vault, monkeypatch):
+    """Do not write facts under a lock whose pathname was replaced."""
+    import fcntl
+    import os
+
+    store = MemoryStore()
+    original_flock = fcntl.flock
+    replaced = False
+
+    def swap_after_lock(fd, operation):
+        nonlocal replaced
+        original_flock(fd, operation)
+        if operation == fcntl.LOCK_EX and not replaced:
+            replaced = True
+            replacement = store.db_path / ".replacement-lock"
+            replacement.write_text("replacement", encoding="utf-8")
+            os.replace(replacement, store._lock_file)
+
+    monkeypatch.setattr(fcntl, "flock", swap_after_lock)
+    with pytest.raises(RuntimeError, match="changed during acquisition"):
+        store.add_fact("Must not persist")
+
+    assert replaced
+    assert store._lock_depth == 0
+    assert list(store.facts_dir.glob("*.json")) == []
