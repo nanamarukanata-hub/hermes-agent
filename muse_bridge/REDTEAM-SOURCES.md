@@ -46,3 +46,26 @@ No shell command is triggered merely by receiving the Bridge work order.
 The Muse VM owner or authorized local agent must perform the checkout
 command explicitly. This is deliberate: the Courier does not have a
 generic shell execution capability.
+
+## Pre-authorized no-review source-only intake
+
+To enable unattended processing of one narrowly defined action,
+start the updated Courier from the existing Muse VM supervisor with:
+
+    python3 -m muse_bridge.vm_courier poll --auto-source-fetch
+
+The new optional flag is OFF by default. It permits automatic handling
+of an **exact** instruction string `MUSE_SOURCE_FETCH_V1` from a Bridge
+work order scoped to `repo=hermes-agent`. This operation does nothing
+except obtain the ten public source repositories listed above into the
+isolated source directory and send a factual checkout report back via
+`/agent/complete`. It does not pip install/npm install, execute attack
+scripts, open model APIs, edit agent configuration, or grant shell access.
+
+Natural-language orders, quoted markers, extra commands, and all other
+work orders remain inbox-only and require normal review. Bridge-side
+authorization and a live authenticated Courier are still prerequisites.
+The VM owner must enable the flag once in the existing supervisor; this
+change alone does not modify a live Muse VM or bypass its own security
+policies. Check that a task is archived into `done/` only after server
+acknowledgment and inspect the private checkout report for actual SHAs.
