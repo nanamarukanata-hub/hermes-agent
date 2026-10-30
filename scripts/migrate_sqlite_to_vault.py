@@ -21,7 +21,6 @@ from __future__ import annotations
 
 import argparse
 import base64
-from contextlib import contextmanager
 import json
 import os
 import re
@@ -29,6 +28,7 @@ import shutil
 import sqlite3
 import stat
 import tempfile
+from contextlib import contextmanager
 from pathlib import Path
 from urllib.parse import quote
 
