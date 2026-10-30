@@ -34,7 +34,7 @@ _TASK = re.compile(r"^[0-9a-f]{16}$")
 _SHA = re.compile(r"^[0-9a-f]{64}$")
 
 
-def _load_work_order(state: Path, task_id: str, target: str) -> dict:
+def _load_work_order(state: Path, task_id: str, target: str, *, require_edit: bool) -> dict:
     if not _TASK.fullmatch(task_id):
         raise CourierError("invalid task ID")
     record = state / "inbox" / (task_id + ".json")
@@ -46,7 +46,7 @@ def _load_work_order(state: Path, task_id: str, target: str) -> dict:
     # Task creation and Bridge approval alone do not authorize ALL files.
     # Explicit owner instruction marker is required for this config operation.
     instruction = work.get("instruction")
-    if not isinstance(instruction, str) or ("AGENT_CONFIG_EDIT[" + target + "]") not in instruction:
+    if require_edit and (not isinstance(instruction, str) or ("AGENT_CONFIG_EDIT[" + target + "]") not in instruction):
         raise CourierError("work order does not explicitly authorize this target")
     return work
 
@@ -111,7 +111,7 @@ def run(*, state: Path, home: Path, task_id: str, target: str,
     _private_dir(state)
     audit_result = "denied"
     try:
-        _load_work_order(state, task_id, target)
+        _load_work_order(state, task_id, target, require_edit=(operation == "apply"))
         path = _target(home, target)
         original = _read_file(path)
         current_sha = hashlib.sha256(original).hexdigest()
