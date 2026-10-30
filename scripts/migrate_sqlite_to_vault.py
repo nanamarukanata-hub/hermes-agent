@@ -87,11 +87,44 @@ def _sha256_file(path: Path) -> str:
     return digest.hexdigest()
 
 
+def _orphaned_migration_backups(vault: Path) -> list[str]:
+    """Find stranded migration backups even when no pending marker survived.
+
+    Inspect only directories used by this exporter.  The scan is read-only,
+    and a symlinked directory or backup fails closed rather than following
+    it outside the Vault.
+    """
+    root = vault / "06_Automation" / "Hermes"
+    locations = (
+        "RetainQueue",
+        "HolographicMemory",
+        "HolographicMemory/facts",
+        "HolographicMemory/banks",
+        "ApiResponses",
+    )
+    found: set[str] = set()
+    for relative in locations:
+        directory = root / relative
+        _check_destination(vault, directory)
+        if not directory.is_dir():
+            continue
+        for backup in directory.glob(".*.backup-*"):
+            _check_destination(vault, backup)
+            found.add(str(backup.relative_to(vault)))
+    return sorted(found)
+
+
 def _recovery_report(vault: Path) -> dict:
     """Inspect an interrupted export; never restore, remove, or overwrite files."""
     marker = vault / "06_Automation" / "Hermes" / ".sqlite-vault-migration.pending"
     _check_destination(vault, marker)
     if not marker.exists():
+        orphans = _orphaned_migration_backups(vault)
+        if orphans:
+            return {
+                "pending": False, "records": [],
+                "orphan_backups": orphans, "requires_attention": True,
+            }
         return {"pending": False, "records": []}
     if not marker.is_file():
         raise ValueError("invalid SQLite-to-Vault recovery marker type")
