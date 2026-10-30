@@ -243,3 +243,47 @@ def test_batch_refuses_unrecovered_backup_without_publishing(tmp_path, force):
     assert not first.exists()
     assert not second.exists()
     assert list(first.parent.glob(".*.tmp-*")) == []
+
+
+def test_batch_lock_rejects_concurrent_migration_without_writes(tmp_path):
+    vault, first, second, planned = _batch_paths(tmp_path)
+
+    with migration._migration_lock(vault):
+        with pytest.raises(RuntimeError, match="another SQLite-to-Vault migration"):
+            migration._write_batch(vault, planned, force=False)
+        assert not first.exists()
+        assert not second.exists()
+
+    # The OS lock must be released, without deleting its lock-file inode.
+    migration._write_batch(vault, planned, force=False)
+    assert json.loads(first.read_text(encoding="utf-8")) == {"user_id": "u1"}
+    assert json.loads(second.read_text(encoding="utf-8")) == {"user_id": "u2"}
+    assert (vault / "06_Automation" / "Hermes" / ".sqlite-vault-migration.lock").is_file()
+
+
+def test_batch_lock_released_after_failed_publish(tmp_path):
+    vault, first, second, planned = _batch_paths(tmp_path)
+
+    with patch.object(migration.os, "link", side_effect=OSError("publish failed")):
+        with pytest.raises(OSError, match="publish failed"):
+            migration._write_batch(vault, planned, force=False)
+
+    migration._write_batch(vault, planned, force=False)
+    assert first.exists()
+    assert second.exists()
+
+
+def test_batch_lock_refuses_symlinked_lock_file(tmp_path):
+    vault, first, second, planned = _batch_paths(tmp_path)
+    lock_path = vault / "06_Automation" / "Hermes" / ".sqlite-vault-migration.lock"
+    lock_path.parent.mkdir(parents=True)
+    external = tmp_path / "external.txt"
+    external.write_text("DO NOT MODIFY", encoding="utf-8")
+    lock_path.symlink_to(external)
+
+    with pytest.raises(ValueError, match="symlinked Vault destination"):
+        migration._write_batch(vault, planned, force=True)
+
+    assert external.read_text(encoding="utf-8") == "DO NOT MODIFY"
+    assert not first.exists()
+    assert not second.exists()
