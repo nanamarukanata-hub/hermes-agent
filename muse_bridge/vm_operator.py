@@ -153,40 +153,46 @@ def _write_file(target: Path, source: Path, allow_overwrite: bool) -> str:
 def execute(args: argparse.Namespace) -> str:
     state = args.home.expanduser()
     _private_dir(state)
-    task = _task(state, args.task_id)
-    workspace = _safe_workspace(args.workspace)
-    action = args.action
-    if action not in ACTIONS:
-        raise CourierError("action not in capability allowlist")
-    if ACTIONS[action]["writes"] and not args.execute:
-        raise CourierError("this action requires --execute after Muse review")
     event = {"timestamp": int(time.time()), "task_id": args.task_id,
-             "action": action, "result": "denied"}
+             "action": args.action, "result": "denied"}
+    phase = "preflight"
     try:
+        _task(state, args.task_id)
+        workspace = _safe_workspace(args.workspace)
+        action = args.action
+        if action not in ACTIONS:
+            raise CourierError("action not in capability allowlist")
+        if ACTIONS[action]["writes"] and not args.execute:
+            raise CourierError("this action requires --execute after Muse review")
         if action == "read_file":
             target = _safe_path(workspace, args.path)
             if not target.is_file() or target.stat().st_size > MAX_FILE:
                 raise CourierError("file not found or too large")
+            phase = "execution"
             result = target.read_text(encoding="utf-8")[:MAX_OUTPUT]
         elif action == "write_file":
             target = _safe_path(workspace, args.path, allow_missing=True)
             if not args.content_file:
                 raise CourierError("--content-file required for write_file")
+            phase = "execution"
             result = _write_file(target, args.content_file, args.overwrite)
         elif action == "git_status":
+            phase = "execution"
             result = _run(["git", "status", "--short"], workspace, timeout=15)
         elif action == "git_diff":
+            phase = "execution"
             result = _run(["git", "diff", "--no-ext-diff", "--stat"], workspace, timeout=15)
         else:  # run_tests
             pattern = args.test_pattern
             if not TEST_PATTERN.fullmatch(pattern):
                 raise CourierError("test pattern must be a specific test_*.py basename")
+            phase = "execution"
             result = _run([sys.executable, "-m", "unittest", "discover", "-s", "tests",
                            "-p", pattern, "-v"], workspace, timeout=180)
         event["result"] = "executed"
         return result
     except Exception:
-        event["result"] = "error"
+        event["result"] = "error" if phase == "execution" else "denied"
         raise
     finally:
         _audit(state, event)
