@@ -173,6 +173,18 @@ def _recovery_report(vault: Path) -> dict:
     return {"pending": True, "version": manifest["version"], "records": records}
 
 
+def _fsync_directories(parents: set[Path]) -> None:
+    """Persist directory-entry changes before treating a migration as complete."""
+    if os.name != "posix":
+        return
+    for parent in sorted(parents):
+        dir_fd = os.open(parent, os.O_RDONLY | getattr(os, "O_DIRECTORY", 0))
+        try:
+            os.fsync(dir_fd)
+        finally:
+            os.close(dir_fd)
+
+
 def _write_json(vault: Path, dest: Path, data: dict, *, force: bool) -> None:
     _check_destination(vault, dest)
     if dest.exists() and not force:
@@ -337,14 +349,9 @@ def _write_batch_locked(vault: Path, planned: list[tuple[Path, dict]], *, force:
             # Ensure every backup name is durable before publishing the
             # recovery marker; otherwise a crash can leave a durable marker
             # pointing at a backup that never reached disk.
-            if os.name == "posix":
-                backup_parents = {backup.parent for backup in backups.values() if backup is not None}
-                for parent in sorted(backup_parents):
-                    dir_fd = os.open(parent, os.O_RDONLY | getattr(os, "O_DIRECTORY", 0))
-                    try:
-                        os.fsync(dir_fd)
-                    finally:
-                        os.close(dir_fd)
+            _fsync_directories({
+                backup.parent for backup in backups.values() if backup is not None
+            })
 
         # Create and fsync the marker *before* publishing any record. A
         # SIGKILL or power loss during a multi-file publication then blocks
@@ -403,6 +410,9 @@ def _write_batch_locked(vault: Path, planned: list[tuple[Path, dict]], *, force:
             else:
                 os.link(tmp, dest)
             published.append((tmp, dest, (new_stat.st_dev, new_stat.st_ino)))
+        # A durable pending marker must outlive every published directory entry.
+        # Otherwise a power loss can lose an export after the marker is removed.
+        _fsync_directories({dest.parent for _, dest, _ in published})
     except BaseException as exc:
         rollback_errors: list[str] = []
         for tmp, dest, new_inode in reversed(published):
@@ -427,6 +437,12 @@ def _write_batch_locked(vault: Path, planned: list[tuple[Path, dict]], *, force:
                 if force and backups.get(dest) is not None:
                     preserve_backups.add(dest)
                 rollback_errors.append(f"{dest}: {error}")
+        # Rollback must also be durable before the pending marker can be cleared.
+        if published:
+            try:
+                _fsync_directories({dest.parent for _, dest, _ in published})
+            except OSError as error:
+                rollback_errors.append(f"rollback directory sync failed: {error}")
         if rollback_errors:
             rollback_incomplete = True
             exc.add_note("Vault export rollback incomplete: " + "; ".join(rollback_errors))
