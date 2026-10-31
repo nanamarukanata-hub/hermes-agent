@@ -117,7 +117,7 @@ class VaultStore:
     def gateway_sessions_path(self) -> Path:
         return self._unified(*_TREE, "GatewayRouting", "sessions.json")
 
-    def _open_vault_dir(self, directory: Path) -> int:
+    def _open_vault_dir(self, directory: Path, *, create: bool = True) -> int:
         """Open a Vault directory through no-follow directory descriptors.
 
         Do not use a pathname-based mkdir/open sequence here: a symlink
@@ -134,10 +134,11 @@ class VaultStore:
             raise
         try:
             for part in parts:
-                try:
-                    os.mkdir(part, dir_fd=fd)
-                except FileExistsError:
-                    pass
+                if create:
+                    try:
+                        os.mkdir(part, dir_fd=fd)
+                    except FileExistsError:
+                        pass
                 try:
                     next_fd = os.open(part, flags, dir_fd=fd)
                 except OSError as exc:
@@ -150,6 +151,26 @@ class VaultStore:
         except BaseException:
             os.close(fd)
             raise
+
+    def _assert_vault_dir_attached(self, directory: Path, held_fd: int) -> None:
+        """Fail closed if a pinned directory is no longer at its Vault path.
+
+        Descriptor-relative writes prevent symlink redirection, but a rename
+        could otherwise make a successful write land in an orphaned folder.
+        Traverse the existing path without creating directories or following
+        symlinks and compare its inode with the pinned descriptor.
+        """
+        try:
+            current_fd = self._open_vault_dir(directory, create=False)
+        except (OSError, ValueError) as exc:
+            raise RuntimeError("vault directory moved during write") from exc
+        try:
+            held = os.fstat(held_fd)
+            current = os.fstat(current_fd)
+            if (held.st_dev, held.st_ino) != (current.st_dev, current.st_ino):
+                raise RuntimeError("vault directory moved during write")
+        finally:
+            os.close(current_fd)
 
     def _atomic_write(self, path: Path, text: str) -> None:
         # Pin the parent directory by descriptor so a concurrent symlink
@@ -165,8 +186,10 @@ class VaultStore:
                 stream.write(text)
                 stream.flush()
                 os.fsync(stream.fileno())
+            self._assert_vault_dir_attached(path.parent, dir_fd)
             os.replace(tmp_name, path.name, src_dir_fd=dir_fd, dst_dir_fd=dir_fd)
             os.fsync(dir_fd)
+            self._assert_vault_dir_attached(path.parent, dir_fd)
         finally:
             try:
                 os.unlink(tmp_name, dir_fd=dir_fd)
@@ -202,7 +225,10 @@ class VaultStore:
                     )
                     if (held.st_dev, held.st_ino) != (current.st_dev, current.st_ino):
                         raise RuntimeError("vault writer lock changed during acquisition")
-                    return fn()
+                    self._assert_vault_dir_attached(lock_path.parent, dir_fd)
+                    result = fn()
+                    self._assert_vault_dir_attached(lock_path.parent, dir_fd)
+                    return result
                 finally:
                     fcntl.flock(lock.fileno(), fcntl.LOCK_UN)
         finally:
