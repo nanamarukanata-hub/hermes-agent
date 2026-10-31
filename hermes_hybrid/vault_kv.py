@@ -26,6 +26,7 @@ import fcntl
 import json
 import os
 import re
+import stat
 import tempfile
 from pathlib import Path
 from typing import Any
@@ -116,12 +117,25 @@ class VaultDir:
 
     def read(self, record_id: str) -> dict[str, Any] | None:
         p = self.path(record_id)
-        if not p.exists():
+        # A pathname symlink check followed by read_text() is racy. Open the
+        # final component without following links; O_NONBLOCK also prevents
+        # an attacker-controlled FIFO from hanging a gateway worker.
+        try:
+            fd = os.open(p, os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK | os.O_CLOEXEC)
+        except OSError:
             return None
         try:
-            data = json.loads(p.read_text(encoding="utf-8"))
-        except (OSError, json.JSONDecodeError):
-            return None
+            if not stat.S_ISREG(os.fstat(fd).st_mode):
+                return None
+            with os.fdopen(fd, "r", encoding="utf-8") as stream:
+                fd = -1  # fdopen now owns the descriptor
+                try:
+                    data = json.load(stream)
+                except (OSError, UnicodeError, json.JSONDecodeError):
+                    return None
+        finally:
+            if fd >= 0:
+                os.close(fd)
         return data if isinstance(data, dict) else None
 
     def write(self, record_id: str, data: dict[str, Any]) -> None:
