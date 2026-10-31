@@ -128,3 +128,34 @@ def test_symlinked_root_is_rejected_before_any_write(tmp_path):
     with pytest.raises(ValueError, match="symlink"):
         VaultDir(alias, "06_Automation", "Hermes", "RetainQueue")
     assert list(outside.iterdir()) == []
+
+
+def test_record_read_does_not_follow_link_swapped_at_open(tmp_path, monkeypatch):
+    """The link can be installed after VaultDir.path's initial check."""
+    outside = tmp_path / "outside-secret.json"
+    secret = '{"secret": "must-not-be-read"}'
+    outside.write_text(secret, encoding="utf-8")
+    vault = VaultDir(tmp_path / "vault", "06_Automation", "Hermes", "RetainQueue")
+    vault.write("item", {"value": "safe"})
+    record = vault.path("item")
+    real_open = os.open
+    swapped = False
+
+    def swap_before_open(path, flags, *args, **kwargs):
+        nonlocal swapped
+        if os.fspath(path) == os.fspath(record) and not swapped:
+            swapped = True
+            record.unlink()
+            record.symlink_to(outside)
+        return real_open(path, flags, *args, **kwargs)
+
+    monkeypatch.setattr(os, "open", swap_before_open)
+    assert vault.read("item") is None
+    assert swapped
+    assert outside.read_text(encoding="utf-8") == secret
+
+
+def test_record_read_rejects_fifo_without_blocking(tmp_path):
+    vault = VaultDir(tmp_path / "vault", "06_Automation", "Hermes", "RetainQueue")
+    os.mkfifo(vault.path("item"))
+    assert vault.read("item") is None
