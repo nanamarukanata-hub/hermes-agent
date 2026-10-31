@@ -297,9 +297,9 @@ class ResponseStore:
     (with tool calls and results) so it can be reconstructed on subsequent
     requests via previous_response_id.  One JSON file per response under
     ``06_Automation/Hermes/ApiResponses/`` in the Obsidian Vault
-    (``HERMES_OBSIDIAN_VAULT``) or, when that is unset, under
-    ``<hermes_home>/06_Automation/Hermes/ApiResponses/`` in the same
-    Vault format.  No SQLite is used.
+    (``HERMES_OBSIDIAN_VAULT``).  An explicit Vault is required for
+    durable storage; startup fails instead of writing to HERMES_HOME.
+    No SQLite is used.
 
     Persists across gateway restarts.  ``db_path`` is kept as a
     compatibility argument: a legacy ``*.db`` path is interpreted as
@@ -313,26 +313,27 @@ class ResponseStore:
         self._max_size = max_size
         self._temp_dir = None
         if db_path == ":memory:":
+            # Explicitly ephemeral mode is retained for isolated callers/tests.
             self._temp_dir = Path(tempfile.mkdtemp(prefix="hermes-responses-"))
-            store_root = self._temp_dir
-            subpath = ()
-        elif db_path:
-            p = Path(db_path).expanduser()
-            store_root = p.parent / p.stem if p.suffix == ".db" else p
-            subpath = ()
+            store_root, subpath = self._temp_dir, ()
         else:
             vault = resolve_vault_root()
-            if vault is not None:
-                store_root, subpath = vault, ("06_Automation", "Hermes", "ApiResponses")
+            if vault is None:
+                raise RuntimeError(
+                    "HERMES_OBSIDIAN_VAULT must be configured for persistent API responses"
+                )
+            if db_path:
+                # Legacy db_path may only select a directory *inside* the Vault.
+                # Never silently persist conversations under HERMES_HOME.
+                p = Path(db_path).expanduser()
+                candidate = p.parent / p.stem if p.suffix == ".db" else p
+                candidate = candidate.resolve(strict=False)
+                root = vault.resolve(strict=False)
+                if candidate == root or root not in candidate.parents:
+                    raise ValueError("ResponseStore db_path must be inside HERMES_OBSIDIAN_VAULT")
+                store_root, subpath = candidate, ()
             else:
-                try:
-                    from hermes_cli.config import get_hermes_home
-
-                    store_root = get_hermes_home()
-                except Exception:
-                    self._temp_dir = Path(tempfile.mkdtemp(prefix="hermes-responses-"))
-                    store_root = self._temp_dir
-                subpath = ("06_Automation", "Hermes", "ApiResponses")
+                store_root, subpath = vault, ("06_Automation", "Hermes", "ApiResponses")
         self._store = VaultDir(store_root, *subpath)
         self._conversations_path = self._store.dir / "conversations.json"
 
