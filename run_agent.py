@@ -1749,8 +1749,15 @@ class AIAgent:
                         user_char_limit=mem_config.get("user_char_limit", 1375),
                     )
                     self._memory_store.load_from_disk()
-            except Exception:
-                pass  # Memory is optional -- don't break agent init
+            except Exception as exc:
+                # Curated memory was explicitly enabled. Continuing here would
+                # silently drop persistent MEMORY.md / USER.md state when the
+                # Obsidian Vault is missing, invalid, or unreadable.
+                if self._memory_enabled or self._user_profile_enabled:
+                    raise RuntimeError(
+                        "Vault-backed curated memory failed to initialize"
+                    ) from exc
+                logger.debug("Optional memory configuration unavailable: %s", exc)
         
 
 
