@@ -57,10 +57,10 @@ def test_sqlalchemy_audit_avoids_unrelated_strings_and_engines(tmp_path, source)
 
 
 @pytest.mark.parametrize("source", [
-    "import importlib\\nmodule_name = 'sqlite3'\\nconn = importlib.import_module(module_name)\\n",
-    "from importlib import import_module\\nmodule_name: str = 'aiosqlite'\\nconn = import_module(module_name)\\n",
-    "from sqlalchemy import create_engine\\nurl = 'sqlite:///session.db'\\ndb = create_engine(url)\\n",
-    "from sqlalchemy.ext.asyncio import create_async_engine\\nurl: str = 'sqlite+aiosqlite:///session.db'\\ndb = create_async_engine(url)\\n",
+    "import importlib\nmodule_name = 'sqlite3'\nconn = importlib.import_module(module_name)\n",
+    "from importlib import import_module\nmodule_name: str = 'aiosqlite'\nconn = import_module(module_name)\n",
+    "from sqlalchemy import create_engine\nurl = 'sqlite:///session.db'\ndb = create_engine(url)\n",
+    "from sqlalchemy.ext.asyncio import create_async_engine\nurl: str = 'sqlite+aiosqlite:///session.db'\ndb = create_async_engine(url)\n",
 ])
 def test_detects_sqlite_connections_via_module_string_constants(tmp_path, source):
     path = tmp_path / "runtime.py"
@@ -69,10 +69,10 @@ def test_detects_sqlite_connections_via_module_string_constants(tmp_path, source
 
 
 @pytest.mark.parametrize("source", [
-    "from sqlalchemy import create_engine\\nurl = 'postgresql://localhost/db'\\ndb = create_engine(url)\\n",
-    "from sqlalchemy import create_engine\\nurl = 'sqlite:///old.db'\\nurl = 'postgresql://localhost/db'\\ndb = create_engine(url)\\n",
-    "import importlib\\nmodule_name = 'sqlite3'\\nmodule_name = 'json'\\nconn = importlib.import_module(module_name)\\n",
-    "url = 'sqlite:///example.db'\\n",
+    "from sqlalchemy import create_engine\nurl = 'postgresql://localhost/db'\ndb = create_engine(url)\n",
+    "from sqlalchemy import create_engine\nurl = 'sqlite:///old.db'\nurl = 'postgresql://localhost/db'\ndb = create_engine(url)\n",
+    "import importlib\nmodule_name = 'sqlite3'\nmodule_name = 'json'\nconn = importlib.import_module(module_name)\n",
+    "url = 'sqlite:///example.db'\n",
 ])
 def test_module_string_constants_do_not_trigger_without_a_proven_connection(tmp_path, source):
     path = tmp_path / "runtime.py"
