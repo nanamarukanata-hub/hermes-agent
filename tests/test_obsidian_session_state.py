@@ -459,6 +459,40 @@ class ObsidianStateTests(unittest.TestCase):
             with self.assertRaises(RuntimeError):
                 self.db.set_meta("new", "value")
 
+    def test_state_meta_symlink_swap_at_open_is_rejected(self):
+        # A pathname-only check can pass before a concurrent symlink swap.
+        self.db.set_meta("safe", "vault")
+        meta = self.db.root / "state_meta.json"
+        with tempfile.TemporaryDirectory() as outside:
+            external = Path(outside) / "private.json"
+            original = '{"private": "outside"}'
+            external.write_text(original, encoding="utf-8")
+            real_open = os.open
+            swapped = False
+
+            def swap_at_open(path, flags, mode=0o777, *, dir_fd=None):
+                nonlocal swapped
+                if Path(path) == meta and not swapped:
+                    swapped = True
+                    meta.unlink()
+                    meta.symlink_to(external)
+                if dir_fd is None:
+                    return real_open(path, flags, mode)
+                return real_open(path, flags, mode, dir_fd=dir_fd)
+
+            with patch("hermes_obsidian_state.os.open", side_effect=swap_at_open):
+                with self.assertRaisesRegex(RuntimeError, "Unsafe Vault state metadata"):
+                    self.db.get_meta("private")
+            self.assertTrue(swapped)
+            self.assertEqual(external.read_text(encoding="utf-8"), original)
+
+    def test_state_meta_fifo_is_rejected_without_blocking(self):
+        # O_NONBLOCK must prevent a named pipe from hanging the reader.
+        meta = self.db.root / "state_meta.json"
+        os.mkfifo(meta)
+        with self.assertRaisesRegex(RuntimeError, "Unsafe Vault state metadata"):
+            self.db.get_meta("anything")
+
     def test_symlinked_vault_parent_does_not_create_outside_directories(self):
         # Validate before mkdir(parents=True): an attacker-controlled Vault
         # parent link must not cause even temporary writes outside the Vault.
