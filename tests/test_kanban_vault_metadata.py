@@ -1,4 +1,5 @@
 """Regression tests: Kanban board metadata and selector stay inside the Vault."""
+import json
 import os
 import tempfile
 import unittest
@@ -87,7 +88,7 @@ class KanbanVaultMetadataTests(unittest.TestCase):
                     selector = kb.set_current_board("default")
                 self.assertEqual(outside.read_text(encoding="utf-8"), "untouched")
                 self.assertFalse(selector.is_symlink())
-                self.assertEqual(selector.read_text(encoding="utf-8"), "default\\n")
+                self.assertEqual(selector.read_text(encoding="utf-8"), "default\n")
 
     def test_metadata_open_time_symlink_swap_does_not_overwrite_outside(self):
         with tempfile.TemporaryDirectory() as root:
@@ -108,7 +109,7 @@ class KanbanVaultMetadataTests(unittest.TestCase):
                 self.assertEqual(outside.read_text(encoding="utf-8"), "untouched")
                 self.assertFalse(path.is_symlink())
                 self.assertEqual(meta["name"], "Protected")
-                self.assertEqual(__import__("json").loads(path.read_text(encoding="utf-8"))["name"], "Protected")
+                self.assertEqual(json.loads(path.read_text(encoding="utf-8"))["name"], "Protected")
 
     def test_failed_atomic_replace_cleans_temporary_file(self):
         with tempfile.TemporaryDirectory() as root:
@@ -120,7 +121,7 @@ class KanbanVaultMetadataTests(unittest.TestCase):
                     with self.assertRaisesRegex(OSError, "injected failure"):
                         kb.set_current_board("default")
                 self.assertFalse(selector.exists())
-                self.assertEqual(list(selector.parent.glob(".current-board.tmp-*")), [])
+                self.assertEqual(list(selector.parent.glob("..current-board.tmp-*")), [])
 
 
 if __name__ == "__main__":
