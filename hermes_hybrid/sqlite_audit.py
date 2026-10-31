@@ -48,6 +48,27 @@ def _uses_sqlite(source: str, filename: str) -> bool:
                     alias.asname or alias.name
                     for alias in node.names if alias.name in _ENGINE_FACTORIES
                 )
+    # Resolve only unambiguous module-level string assignments. This catches
+    # common SQLite URLs and import names passed through constants, without
+    # treating an unrelated string literal as an active database connection.
+    bindings: dict[str, list[ast.expr]] = {}
+    for statement in tree.body:
+        if isinstance(statement, ast.Assign):
+            for target in statement.targets:
+                if isinstance(target, ast.Name):
+                    bindings.setdefault(target.id, []).append(statement.value)
+        elif isinstance(statement, ast.AnnAssign) and isinstance(statement.target, ast.Name):
+            if statement.value is not None:
+                bindings.setdefault(statement.target.id, []).append(statement.value)
+        elif isinstance(statement, ast.AugAssign) and isinstance(statement.target, ast.Name):
+            bindings.setdefault(statement.target.id, []).append(statement.value)
+    constants = {
+        name: values[0].value
+        for name, values in bindings.items()
+        if len(values) == 1
+        and isinstance(values[0], ast.Constant)
+        and isinstance(values[0].value, str)
+    }
     for node in ast.walk(tree):
         if isinstance(node, ast.Import):
             if any(alias.name.split(".", 1)[0] in _SQLITE_MODULES for alias in node.names):
@@ -63,9 +84,15 @@ def _uses_sqlite(source: str, filename: str) -> bool:
                 (kw.value for kw in node.keywords if kw.arg in {"name", "url"}),
                 None,
             )
-            if not isinstance(first, ast.Constant) or not isinstance(first.value, str):
+            if isinstance(first, ast.Constant) and isinstance(first.value, str):
+                argument = first.value
+            elif isinstance(first, ast.Name):
+                argument = constants.get(first.id)
+            else:
+                argument = None
+            if argument is None:
                 continue
-            module = first.value.split(".", 1)[0]
+            module = argument.split(".", 1)[0]
             func = node.func
             if module in _SQLITE_MODULES:
                 if isinstance(func, ast.Name) and func.id in {"__import__", *import_module_names}:
@@ -75,7 +102,7 @@ def _uses_sqlite(source: str, filename: str) -> bool:
                         return True
             # SQLAlchemy opens SQLite without an explicit sqlite3 import.
             # Match known engine factories, not arbitrary strings mentioning SQLite.
-            if first.value.startswith(("sqlite:", "sqlite+")) and "://" in first.value:
+            if argument.startswith(("sqlite:", "sqlite+")) and "://" in argument:
                 if isinstance(func, ast.Name) and func.id in engine_names:
                     return True
                 if isinstance(func, ast.Attribute) and func.attr in _ENGINE_FACTORIES:
