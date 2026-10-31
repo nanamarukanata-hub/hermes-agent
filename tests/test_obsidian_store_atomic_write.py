@@ -13,10 +13,8 @@ def test_preplanted_pid_temp_symlink_cannot_overwrite_external_file(tmp_path, ki
     store = VaultStore(tmp_path / "vault")
     if kind == "session":
         target = store.session_path("s1")
-        save = lambda: store.save_session("alice", "s1", {"messages": []})
     else:
         target = store.memory_path("m1")
-        save = lambda: store.save_memory("alice", "m1", {"text": "hello"})
     target.parent.mkdir(parents=True, exist_ok=True)
 
     outside = tmp_path / "external-secret.txt"
@@ -24,7 +22,10 @@ def test_preplanted_pid_temp_symlink_cannot_overwrite_external_file(tmp_path, ki
     predictable = target.with_name(f".{target.name}.tmp-{os.getpid()}")
     predictable.symlink_to(outside)
 
-    save()
+    if kind == "session":
+        store.save_session("alice", "s1", {"messages": []})
+    else:
+        store.save_memory("alice", "m1", {"text": "hello"})
 
     assert outside.read_text(encoding="utf-8") == "DO NOT MODIFY"
     assert predictable.is_symlink()
