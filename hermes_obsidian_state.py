@@ -702,13 +702,25 @@ class SessionDB:
 
     def _read_state_meta(self):
         path = self.root / "state_meta.json"
-        # Global metadata needs the same containment checks as per-session
-        # metadata. A dangling symlink is unsafe too.
-        if path.is_symlink() or (path.exists() and not path.is_file()):
-            raise RuntimeError("Unsafe Vault state metadata")
-        if not path.exists():
+        # Validate the opened descriptor rather than a pathname precheck:
+        # another process can replace state_meta.json with a symlink between
+        # is_symlink() and read_text(). O_NONBLOCK prevents FIFO read hangs.
+        try:
+            fd = os.open(
+                path, os.O_RDONLY | os.O_NOFOLLOW | os.O_CLOEXEC | os.O_NONBLOCK
+            )
+        except FileNotFoundError:
             return {}
-        data = json.loads(path.read_text(encoding="utf-8"))
+        except OSError as exc:
+            raise RuntimeError("Unsafe Vault state metadata") from exc
+        try:
+            if not stat.S_ISREG(os.fstat(fd).st_mode):
+                raise RuntimeError("Unsafe Vault state metadata")
+        except BaseException:
+            os.close(fd)
+            raise
+        with os.fdopen(fd, "r", encoding="utf-8") as stream:
+            data = json.load(stream)
         if not isinstance(data, dict):
             raise RuntimeError("Invalid Vault state metadata")
         return data
