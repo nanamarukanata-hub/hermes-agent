@@ -158,7 +158,7 @@ def test_atomic_write_rejects_parent_swapped_to_symlink_before_open(tmp_path, mo
     assert list(outside.iterdir()) == []
 
 
-def test_atomic_write_uses_pinned_parent_after_symlink_swap(tmp_path, monkeypatch):
+def test_atomic_write_rejects_pinned_parent_after_symlink_swap(tmp_path, monkeypatch):
     store = VaultStore(tmp_path / "vault")
     target = store.session_path("s1")
     target.parent.mkdir(parents=True)
@@ -175,9 +175,11 @@ def test_atomic_write_uses_pinned_parent_after_symlink_swap(tmp_path, monkeypatc
         return fd
 
     monkeypatch.setattr(store, "_open_vault_dir", swap_after_open)
-    store._atomic_write(target, "pinned")
+    with pytest.raises(RuntimeError, match="vault directory moved during write"):
+        store._atomic_write(target, "pinned")
     assert list(outside.iterdir()) == []
-    assert (backup / target.name).read_text(encoding="utf-8") == "pinned"
+    assert not (backup / target.name).exists()
+    assert not list(backup.glob(".*.tmp-*"))
 
 
 def test_writer_lock_rejects_parent_swapped_to_symlink(tmp_path, monkeypatch):
@@ -197,3 +199,41 @@ def test_writer_lock_rejects_parent_swapped_to_symlink(tmp_path, monkeypatch):
     with pytest.raises(ValueError, match="symlink"):
         store._locked(lambda: None)
     assert list(outside.iterdir()) == []
+
+
+def test_atomic_write_detects_parent_rename_after_replace(tmp_path, monkeypatch):
+    store = VaultStore(tmp_path / "vault")
+    target = store.session_path("s1")
+    target.parent.mkdir(parents=True)
+    backup = target.parent.with_name("s1-renamed")
+    original_replace = obsidian_store.os.replace
+    moved = False
+
+    def rename_after_replace(source, destination, **kwargs):
+        nonlocal moved
+        result = original_replace(source, destination, **kwargs)
+        if kwargs.get("src_dir_fd") is not None and not moved:
+            moved = True
+            target.parent.rename(backup)
+        return result
+
+    monkeypatch.setattr(obsidian_store.os, "replace", rename_after_replace)
+    with pytest.raises(RuntimeError, match="vault directory moved during write"):
+        store._atomic_write(target, "written-before-rename")
+    assert moved
+    assert not target.exists()
+    assert (backup / target.name).read_text(encoding="utf-8") == "written-before-rename"
+
+
+def test_writer_lock_detects_tree_rename_during_callback(tmp_path):
+    store = VaultStore(tmp_path / "vault")
+    backup = store.tree.with_name("Hermes-renamed")
+
+    def rename_tree():
+        store.tree.rename(backup)
+        return "would-be-success"
+
+    with pytest.raises(RuntimeError, match="vault directory moved during write"):
+        store._locked(rename_tree)
+    assert backup.is_dir()
+    assert not store.tree.exists()
