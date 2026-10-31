@@ -34,7 +34,9 @@ Safety rules (all enforced, all tested):
 """
 from __future__ import annotations
 
+import errno
 import fcntl
+import stat
 import json
 import os
 import re
@@ -131,10 +133,32 @@ class VaultStore:
             tmp.unlink(missing_ok=True)
 
     def _locked(self, fn):
-        self.lock_file.parent.mkdir(parents=True, exist_ok=True)
-        with open(self.lock_file, "a+", encoding="utf-8") as lock:
+        # A pre-planted symlink or FIFO must not redirect or block the
+        # shared Vault writer lock. Revalidate its inode after flock too:
+        # a replaced pathname would otherwise let writers use different locks.
+        lock_path = self._unified(*_TREE, ".vault-writer.lock")
+        lock_path.parent.mkdir(parents=True, exist_ok=True)
+        if lock_path.is_symlink():
+            raise ValueError("symlink in vault path is rejected")
+        try:
+            fd = os.open(
+                lock_path,
+                os.O_RDWR | os.O_CREAT | os.O_NOFOLLOW | os.O_NONBLOCK,
+                0o600,
+            )
+        except OSError as exc:
+            if exc.errno in (errno.ELOOP, errno.ENXIO):
+                raise ValueError("unsafe vault writer lock") from exc
+            raise
+        with os.fdopen(fd, "r+", encoding="utf-8") as lock:
+            if not stat.S_ISREG(os.fstat(lock.fileno()).st_mode):
+                raise ValueError("vault writer lock must be a regular file")
             fcntl.flock(lock.fileno(), fcntl.LOCK_EX)
             try:
+                held = os.fstat(lock.fileno())
+                current = os.stat(lock_path, follow_symlinks=False)
+                if (held.st_dev, held.st_ino) != (current.st_dev, current.st_ino):
+                    raise RuntimeError("vault writer lock changed during acquisition")
                 return fn()
             finally:
                 fcntl.flock(lock.fileno(), fcntl.LOCK_UN)
