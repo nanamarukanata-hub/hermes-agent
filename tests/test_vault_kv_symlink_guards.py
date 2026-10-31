@@ -81,6 +81,68 @@ def test_legacy_counter_is_never_reissued(tmp_path):
     assert vault.next_id("sequence") == 10
 
 
+
+def test_counter_open_time_symlink_swap_fails_without_reading_outside(tmp_path, monkeypatch):
+    """A counter link installed after the initial check must not be followed."""
+    vault = VaultDir(tmp_path / "vault", "06_Automation", "Hermes", "RetainQueue")
+    assert vault.next_id("sequence") == 1
+    counter = vault.path("sequence")
+    outside = tmp_path / "outside-counter.json"
+    secret = '{"next": 999999, "secret": "outside"}'
+    outside.write_text(secret, encoding="utf-8")
+    real_open = os.open
+    swapped = False
+
+    def swap_before_open(path, flags, *args, **kwargs):
+        nonlocal swapped
+        if os.fspath(path) == os.fspath(counter) and not swapped:
+            swapped = True
+            counter.unlink()
+            counter.symlink_to(outside)
+        return real_open(path, flags, *args, **kwargs)
+
+    monkeypatch.setattr(os, "open", swap_before_open)
+    with pytest.raises(ValueError, match="invalid vault counter"):
+        vault.next_id("sequence")
+    assert swapped
+    assert counter.is_symlink()
+    assert outside.read_text(encoding="utf-8") == secret
+
+
+def test_corrupt_counter_is_not_silently_reset_or_overwritten(tmp_path):
+    vault = VaultDir(tmp_path / "vault", "06_Automation", "Hermes", "RetainQueue")
+    counter = vault.path("sequence")
+    counter.write_text("{not-json", encoding="utf-8")
+    with pytest.raises(ValueError, match="invalid vault counter"):
+        vault.next_id("sequence")
+    assert counter.read_text(encoding="utf-8") == "{not-json"
+
+
+@pytest.mark.parametrize("invalid_value", [True, -1, 1.5, {}, "not-a-number", None])
+def test_invalid_counter_values_cannot_reissue_ids(tmp_path, invalid_value):
+    vault = VaultDir(tmp_path / "vault", "06_Automation", "Hermes", "RetainQueue")
+    counter = vault.path("sequence")
+    original = json.dumps({"next": invalid_value})
+    counter.write_text(original, encoding="utf-8")
+    with pytest.raises(ValueError, match="invalid vault counter"):
+        vault.next_id("sequence")
+    assert counter.read_text(encoding="utf-8") == original
+
+
+def test_fifo_counter_is_rejected_without_blocking(tmp_path):
+    vault = VaultDir(tmp_path / "vault", "06_Automation", "Hermes", "RetainQueue")
+    os.mkfifo(vault.path("sequence"))
+    with pytest.raises(ValueError, match="invalid vault counter"):
+        vault.next_id("sequence")
+
+
+def test_missing_counter_preserves_numeric_record_floor(tmp_path):
+    vault = VaultDir(tmp_path / "vault", "06_Automation", "Hermes", "RetainQueue")
+    vault.write("42", {"value": "existing"})
+    assert vault.next_id("sequence") == 43
+    assert vault.next_id("sequence") == 44
+
+
 @pytest.mark.parametrize("subpath", ["", ".", "..", "../outside", "nested/escape", "/absolute"])
 def test_invalid_subpath_rejected_before_directory_creation(tmp_path, subpath):
     root = tmp_path / "vault"
