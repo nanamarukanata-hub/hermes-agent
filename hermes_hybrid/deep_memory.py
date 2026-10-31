@@ -48,6 +48,7 @@ import json
 import math
 import os
 import re
+import tempfile
 import time
 import uuid
 from pathlib import Path
@@ -94,12 +95,18 @@ class DeepMemory:
     # -- low-level -----------------------------------------------------
     def _atomic(self, path: Path, data: dict) -> None:
         path.parent.mkdir(parents=True, exist_ok=True)
-        tmp = path.with_name(f".{path.name}.tmp-{os.getpid()}")
-        with open(tmp, "w", encoding="utf-8") as f:
-            f.write(json.dumps(data, indent=2, ensure_ascii=False) + "\n")
-            f.flush()
-            os.fsync(f.fileno())
-        os.replace(tmp, path)
+        # An attacker can pre-create a predictable PID-named temp symlink.
+        # mkstemp creates a fresh file with an unpredictable name and O_EXCL.
+        fd, tmp = tempfile.mkstemp(prefix=f".{path.name}.tmp-", dir=path.parent)
+        try:
+            with os.fdopen(fd, "w", encoding="utf-8") as f:
+                f.write(json.dumps(data, indent=2, ensure_ascii=False) + "\n")
+                f.flush()
+                os.fsync(f.fileno())
+            os.replace(tmp, path)
+        finally:
+            if os.path.lexists(tmp):
+                os.unlink(tmp)
 
     def _read_dir(self, directory: Path) -> list[dict]:
         out = []
