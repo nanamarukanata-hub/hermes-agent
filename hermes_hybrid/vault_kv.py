@@ -148,6 +148,30 @@ class VaultDir:
 
         self._locked(_do)
 
+    def update(self, record_id: str, transform) -> None:
+        """Atomically read, transform, and replace a JSON record under one lock.
+
+        Refuse to overwrite a present but unreadable record: treating a
+        damaged index as empty would silently discard its existing contents.
+        """
+
+        def _do():
+            path = self.path(record_id)
+            current = self.read(record_id)
+            if current is None:
+                if path.exists():
+                    raise ValueError(f"cannot update invalid vault record: {record_id!r}")
+                current = {}
+            updated = transform(current)
+            if not isinstance(updated, dict):
+                raise TypeError("vault record update must produce a dict")
+            self._atomic_write(
+                self.path(record_id),
+                json.dumps(updated, indent=2, ensure_ascii=False) + "\n",
+            )
+
+        self._locked(_do)
+
     def delete(self, record_id: str) -> bool:
         p = self.path(record_id)
         if not p.exists():
