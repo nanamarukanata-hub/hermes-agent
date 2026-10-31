@@ -29,7 +29,7 @@ def test_preplanted_pid_temp_symlink_cannot_overwrite_external_file(tmp_path, ki
     assert outside.read_text(encoding="utf-8") == "DO NOT MODIFY"
     assert predictable.is_symlink()
     assert target.is_file() and not target.is_symlink()
-    assert not list(target.parent.glob(f".{target.name}.tmp-*")) == [predictable]
+    assert list(target.parent.glob(f".{target.name}.tmp-*")) == [predictable]
 
 
 def test_replace_failure_keeps_original_and_removes_temp(tmp_path, monkeypatch):
