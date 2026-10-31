@@ -1,5 +1,6 @@
 """Regression guards for SQLite-free VaultDir persistence paths."""
 
+import fcntl
 import json
 import os
 
@@ -159,3 +160,33 @@ def test_record_read_rejects_fifo_without_blocking(tmp_path):
     vault = VaultDir(tmp_path / "vault", "06_Automation", "Hermes", "RetainQueue")
     os.mkfifo(vault.path("item"))
     assert vault.read("item") is None
+
+def test_lock_inode_swap_after_flock_aborts_update(tmp_path, monkeypatch):
+    """A replaced lock inode must not allow an unlocked JSON update."""
+    vault = VaultDir(tmp_path / "vault", "06_Automation", "Hermes", "RetainQueue")
+    real_flock = fcntl.flock
+    swapped = False
+
+    def swap_after_acquire(fd, operation):
+        nonlocal swapped
+        result = real_flock(fd, operation)
+        if operation == fcntl.LOCK_EX and not swapped:
+            swapped = True
+            vault.lock_file.rename(vault.dir / ".detached-writer.lock")
+            vault.lock_file.write_text("", encoding="utf-8")
+        return result
+
+    monkeypatch.setattr(fcntl, "flock", swap_after_acquire)
+    with pytest.raises(ValueError, match="vault lock changed"):
+        vault.write("item", {"value": "must-not-write"})
+    assert swapped
+    assert not vault.path("item").exists()
+
+
+def test_fifo_lock_is_rejected_without_blocking(tmp_path):
+    """An attacker-controlled FIFO cannot be used as the writer lock."""
+    vault = VaultDir(tmp_path / "vault", "06_Automation", "Hermes", "RetainQueue")
+    os.mkfifo(vault.lock_file)
+    with pytest.raises(ValueError, match="vault lock is not a regular file"):
+        vault.write("item", {"value": "must-not-write"})
+    assert not vault.path("item").exists()
