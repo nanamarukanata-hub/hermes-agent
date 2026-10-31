@@ -34,6 +34,22 @@ silently reset legacy thread counters because that can mix formerly isolated
 conversations. Google Chat OAuth tokens and credentials are **not** copied
 to the Vault, since a synced Vault is not a credential store.
 
+## Curated MEMORY.md and USER.md
+
+The built-in `memory` tool now stores both files exclusively under
+`$HERMES_OBSIDIAN_VAULT/06_Automation/Hermes/CuratedMemory/`.
+An unset or missing Vault fails closed instead of writing to
+`$HERMES_HOME/memories/`. Existing files in the old location are **not**
+deleted, moved, or automatically imported.
+
+For existing installations, stop all Hermes writers, back up both locations,
+and inspect `$HERMES_HOME/memories/MEMORY.md` and `USER.md` before any
+manual migration. Copy a legacy file into the Vault **only if the corresponding
+Vault file does not already exist**; otherwise reconcile entries explicitly
+rather than overwriting newer Vault content. Restart only after verifying the
+Vault copy. Keep the legacy files as a backup until migration is independently
+verified.
+
 ## Optional one-time migration of legacy history
 
 Stop Hermes CLI and the Discord gateway before the write step. Preserve a
