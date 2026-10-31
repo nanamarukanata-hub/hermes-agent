@@ -104,6 +104,14 @@ _RUNTIME_SQLITE_FREE_MODULES = (
     "hermes_hybrid/gateway_adapter.py",
     "hermes_hybrid/vault_kv.py",
     "hermes_cli/kanban_db.py",
+    "gateway/platforms/api_server.py",
+    "gateway/mirror.py",
+    "acp_adapter/session.py",
+    "agent/memory_manager.py",
+    "run_agent.py",
+    "tools/memory_tool.py",
+    "plugins/memory/holographic/store.py",
+    "hermes_hybrid/deep_memory.py",
 )
 
 
