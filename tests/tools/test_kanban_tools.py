@@ -14,6 +14,16 @@ import os
 import pytest
 
 
+def _edit_task_file(task_id, **fields):
+    """Edit a task's Vault JSON file directly (Vault-structure seeding)."""
+    from hermes_cli import kanban_db as kb
+
+    path = kb.kanban_store_dir() / f"{task_id}.json"
+    data = json.loads(path.read_text(encoding="utf-8"))
+    data.update(fields)
+    path.write_text(json.dumps(data, indent=2) + "\n", encoding="utf-8")
+
+
 # ---------------------------------------------------------------------------
 # Gating
 # ---------------------------------------------------------------------------
@@ -232,14 +242,8 @@ def test_heartbeat_extends_claim_expires(worker_env):
     # unambiguous (avoids time.sleep flakiness).
     conn = kb.connect()
     try:
-        conn.execute(
-            "UPDATE tasks SET claim_expires = ? WHERE id = ?",
-            (1, worker_env),
-        )
-        conn.commit()
-        before = conn.execute(
-            "SELECT claim_expires FROM tasks WHERE id = ?", (worker_env,)
-        ).fetchone()["claim_expires"]
+        _edit_task_file(worker_env, claim_expires=1)
+        before = kb.get_task(conn, worker_env).claim_expires
     finally:
         conn.close()
     assert before == 1
@@ -249,9 +253,7 @@ def test_heartbeat_extends_claim_expires(worker_env):
 
     conn = kb.connect()
     try:
-        after = conn.execute(
-            "SELECT claim_expires FROM tasks WHERE id = ?", (worker_env,)
-        ).fetchone()["claim_expires"]
+        after = kb.get_task(conn, worker_env).claim_expires
     finally:
         conn.close()
 
@@ -597,8 +599,7 @@ def test_worker_complete_rejects_foreign_task_id(worker_env):
     conn = kb.connect()
     try:
         other = kb.create_task(conn, title="sibling")
-        conn.execute("UPDATE tasks SET status='ready' WHERE id=?", (other,))
-        conn.commit()
+        _edit_task_file(other, status="ready")
     finally:
         conn.close()
 
@@ -622,8 +623,7 @@ def test_worker_block_rejects_foreign_task_id(worker_env):
     conn = kb.connect()
     try:
         other = kb.create_task(conn, title="sibling")
-        conn.execute("UPDATE tasks SET status='ready' WHERE id=?", (other,))
-        conn.commit()
+        _edit_task_file(other, status="ready")
     finally:
         conn.close()
 
@@ -646,8 +646,7 @@ def test_worker_heartbeat_rejects_foreign_task_id(worker_env):
     try:
         other = kb.create_task(conn, title="sibling")
         # Put sibling in running state so heartbeat would otherwise succeed.
-        conn.execute("UPDATE tasks SET status='running' WHERE id=?", (other,))
-        conn.commit()
+        _edit_task_file(other, status="running")
     finally:
         conn.close()
 
@@ -720,8 +719,7 @@ def test_orchestrator_complete_any_task_allowed(monkeypatch, tmp_path):
     conn = kb.connect()
     try:
         tid = kb.create_task(conn, title="child to close out")
-        conn.execute("UPDATE tasks SET status='ready' WHERE id=?", (tid,))
-        conn.commit()
+        _edit_task_file(tid, status="ready")
     finally:
         conn.close()
 

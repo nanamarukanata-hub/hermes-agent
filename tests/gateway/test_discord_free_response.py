@@ -474,6 +474,30 @@ async def test_discord_free_channel_skips_auto_thread(adapter, monkeypatch):
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize("free_channels", ["789", "*"])
+async def test_discord_free_channel_mention_stays_inline(adapter, monkeypatch, free_channels):
+    """Explicit mentions in free-response channels must also avoid auto-threads."""
+    monkeypatch.setenv("DISCORD_REQUIRE_MENTION", "true")
+    monkeypatch.setenv("DISCORD_FREE_RESPONSE_CHANNELS", free_channels)
+    monkeypatch.delenv("DISCORD_AUTO_THREAD", raising=False)
+
+    adapter._auto_create_thread = AsyncMock()
+    message = make_message(
+        channel=FakeTextChannel(channel_id=789),
+        content="<@999> reply inline",
+        mentions=[adapter._client.user],
+    )
+
+    await adapter._handle_message(message)
+
+    adapter._auto_create_thread.assert_not_awaited()
+    adapter.handle_message.assert_awaited_once()
+    event = adapter.handle_message.await_args.args[0]
+    assert event.source.chat_type == "group"
+    assert event.source.chat_id == "789"
+
+
+@pytest.mark.asyncio
 async def test_discord_voice_linked_parent_thread_still_requires_mention(adapter, monkeypatch):
     """Threads under a voice-linked channel should still require @mention."""
     monkeypatch.setenv("DISCORD_REQUIRE_MENTION", "true")

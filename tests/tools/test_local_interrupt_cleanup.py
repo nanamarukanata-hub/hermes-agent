@@ -192,3 +192,29 @@ def test_wait_for_process_kills_subprocess_on_keyboardinterrupt():
             env.cleanup()
         except Exception:
             pass
+
+@pytest.mark.parametrize("interrupt", [KeyboardInterrupt, SystemExit])
+def test_execute_cleans_up_when_interrupt_precedes_poll_guard(monkeypatch, interrupt):
+    """A spawned child must be cleaned up even if polling never begins.
+
+    _wait_for_process has its own interrupt guard, but initialization before
+    its try block can raise asynchronously.  Exercise the outer execute()
+    cleanup path deterministically without thread timing or live processes.
+    """
+    env = LocalEnvironment(cwd="/tmp")
+    proc = object()
+    killed = []
+
+    def interrupt_before_poll(*args, **kwargs):
+        raise interrupt
+
+    monkeypatch.setattr(env, "_run_bash", lambda *args, **kwargs: proc)
+    monkeypatch.setattr(env, "_wait_for_process", interrupt_before_poll)
+    monkeypatch.setattr(env, "_kill_process", killed.append)
+
+    try:
+        with pytest.raises(interrupt):
+            env.execute("sleep 30", timeout=60)
+        assert killed == [proc]
+    finally:
+        env.cleanup()

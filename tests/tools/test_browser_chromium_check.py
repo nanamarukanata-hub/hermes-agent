@@ -15,7 +15,11 @@ from tools import browser_tool as bt
 
 
 @pytest.fixture(autouse=True)
-def _reset_chromium_cache():
+def _reset_chromium_cache(monkeypatch):
+    # Keep detection tests independent of the runner's Chrome installation
+    # and inherited explicit browser configuration.
+    monkeypatch.delenv("AGENT_BROWSER_EXECUTABLE_PATH", raising=False)
+    monkeypatch.setattr(bt.shutil, "which", lambda _name: None)
     bt._cached_chromium_installed = None
     yield
     bt._cached_chromium_installed = None
@@ -41,6 +45,21 @@ class TestChromiumSearchRoots:
 
 
 class TestChromiumInstalled:
+    def test_true_when_system_chromium_on_path(self, monkeypatch, tmp_path):
+        monkeypatch.setenv("PLAYWRIGHT_BROWSERS_PATH", str(tmp_path))
+        monkeypatch.setattr(
+            bt.shutil, "which",
+            lambda name: "/usr/bin/chromium" if name == "chromium-browser" else None,
+        )
+        assert bt._chromium_installed() is True
+
+    def test_true_when_explicit_browser_path_exists(self, monkeypatch, tmp_path):
+        binary = tmp_path / "custom-chrome"
+        binary.write_bytes(b"test browser placeholder")
+        monkeypatch.setenv("AGENT_BROWSER_EXECUTABLE_PATH", str(binary))
+        monkeypatch.setenv("PLAYWRIGHT_BROWSERS_PATH", str(tmp_path / "empty"))
+        assert bt._chromium_installed() is True
+
     def test_true_when_chromium_dir_present(self, monkeypatch, tmp_path):
         monkeypatch.setenv("PLAYWRIGHT_BROWSERS_PATH", str(tmp_path))
         (tmp_path / "chromium-1208").mkdir()

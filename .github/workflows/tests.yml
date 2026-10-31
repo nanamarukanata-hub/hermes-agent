@@ -45,9 +45,16 @@ jobs:
 
       - name: Run tests
         run: |
+          mkdir -p "$HERMES_OBSIDIAN_VAULT"
           source .venv/bin/activate
-          python -m pytest tests/ -q --ignore=tests/integration --ignore=tests/e2e --tb=short -n auto
+          # Always verify the token-limit retry regression before fail-fast triage.
+          python -m pytest tests/agent/test_unsupported_parameter_retry.py -q --tb=short
+          # Triage mode: stop at first failure so CI prints the failing test and traceback
+          # before the 20-minute job timeout. Restore full-suite execution once fixed.
+          python -m pytest tests/ -q --ignore=tests/integration --ignore=tests/e2e --tb=short -n auto --maxfail=1
         env:
+          # Isolated CI-only Vault: production data and SQLite are never used.
+          HERMES_OBSIDIAN_VAULT: ${{ runner.temp }}/hermes-unit-vault
           # Ensure tests don't accidentally call real APIs
           OPENROUTER_API_KEY: ""
           OPENAI_API_KEY: ""
@@ -74,9 +81,11 @@ jobs:
 
       - name: Run e2e tests
         run: |
+          mkdir -p "$HERMES_OBSIDIAN_VAULT"
           source .venv/bin/activate
           python -m pytest tests/e2e/ -v --tb=short
         env:
+          HERMES_OBSIDIAN_VAULT: ${{ runner.temp }}/hermes-e2e-vault
           OPENROUTER_API_KEY: ""
           OPENAI_API_KEY: ""
           NOUS_API_KEY: ""

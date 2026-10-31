@@ -225,23 +225,24 @@ def test_run_slash_reclaim_running_task(kanban_home):
     assert m
     tid = m.group(1)
 
-    # Simulate a running claim outside TTL.
+    # Simulate a running claim (claim via the API, then set the PID
+    # in the Vault JSON, mirroring the old direct-SQL fabrication).
+    import json as _json
     conn = kb.connect()
     try:
         lock = secrets.token_hex(4)
-        conn.execute(
-            "UPDATE tasks SET status='running', claim_lock=?, claim_expires=?, "
-            "worker_pid=? WHERE id=?",
-            (lock, int(time.time()) + 3600, 4242, tid),
-        )
-        conn.execute(
-            "INSERT INTO task_runs (task_id, status, claim_lock, claim_expires, "
-            "worker_pid, started_at) VALUES (?, 'running', ?, ?, ?, ?)",
-            (tid, lock, int(time.time()) + 3600, 4242, int(time.time())),
-        )
-        rid = conn.execute("SELECT last_insert_rowid()").fetchone()[0]
-        conn.execute("UPDATE tasks SET current_run_id=? WHERE id=?", (rid, tid))
-        conn.commit()
+        kb.claim_task(conn, tid, claimer=lock, ttl_seconds=3600)
+        store = kb.kanban_store_dir()
+        task_path = store / f"{tid}.json"
+        task_data = _json.loads(task_path.read_text(encoding="utf-8"))
+        task_data["worker_pid"] = 4242
+        task_path.write_text(_json.dumps(task_data, indent=2) + "\n", encoding="utf-8")
+        runs_path = store / "runs.json"
+        runs = _json.loads(runs_path.read_text(encoding="utf-8"))
+        for run in runs:
+            if run["task_id"] == tid and run.get("ended_at") is None:
+                run["worker_pid"] = 4242
+        runs_path.write_text(_json.dumps(runs, indent=2) + "\n", encoding="utf-8")
     finally:
         conn.close()
 
@@ -262,23 +263,24 @@ def test_run_slash_reassign_with_reclaim_flag(kanban_home):
     m = re.search(r"(t_[a-f0-9]+)", out1)
     tid = m.group(1)
 
-    # Simulate a running claim.
+    # Simulate a running claim (claim via the API, then set the PID
+    # in the Vault JSON, mirroring the old direct-SQL fabrication).
+    import json as _json
     conn = kb.connect()
     try:
         lock = secrets.token_hex(4)
-        conn.execute(
-            "UPDATE tasks SET status='running', claim_lock=?, claim_expires=?, "
-            "worker_pid=? WHERE id=?",
-            (lock, int(time.time()) + 3600, 4242, tid),
-        )
-        conn.execute(
-            "INSERT INTO task_runs (task_id, status, claim_lock, claim_expires, "
-            "worker_pid, started_at) VALUES (?, 'running', ?, ?, ?, ?)",
-            (tid, lock, int(time.time()) + 3600, 4242, int(time.time())),
-        )
-        rid = conn.execute("SELECT last_insert_rowid()").fetchone()[0]
-        conn.execute("UPDATE tasks SET current_run_id=? WHERE id=?", (rid, tid))
-        conn.commit()
+        kb.claim_task(conn, tid, claimer=lock, ttl_seconds=3600)
+        store = kb.kanban_store_dir()
+        task_path = store / f"{tid}.json"
+        task_data = _json.loads(task_path.read_text(encoding="utf-8"))
+        task_data["worker_pid"] = 4242
+        task_path.write_text(_json.dumps(task_data, indent=2) + "\n", encoding="utf-8")
+        runs_path = store / "runs.json"
+        runs = _json.loads(runs_path.read_text(encoding="utf-8"))
+        for run in runs:
+            if run["task_id"] == tid and run.get("ended_at") is None:
+                run["worker_pid"] = 4242
+        runs_path.write_text(_json.dumps(runs, indent=2) + "\n", encoding="utf-8")
     finally:
         conn.close()
 

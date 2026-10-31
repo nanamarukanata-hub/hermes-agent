@@ -47,32 +47,29 @@ def test_resolve_last_session_prefers_last_active_over_started_at(monkeypatch):
 
 
 def test_search_sessions_exposes_last_active_column(tmp_path, monkeypatch):
-    # End-to-end: SessionDB must surface last_active and order by MRU.
+    # End-to-end: Vault SessionDB must surface last_active and order by MRU.
+    # Freeze the clock at each write instead of modifying a SQLite table.
+    from unittest.mock import patch
+
     monkeypatch.setenv("HERMES_HOME", str(tmp_path))
+    monkeypatch.setenv("HERMES_OBSIDIAN_VAULT", str(tmp_path))
     monkeypatch.setattr("pathlib.Path.home", lambda: tmp_path)
 
     import hermes_state
 
-    from pathlib import Path
-
-    db = hermes_state.SessionDB(db_path=Path(tmp_path / "state.db"))
+    db = hermes_state.SessionDB()
     try:
-        db.create_session("s_started_later", source="cli")
-        db.create_session("s_active_later", source="cli")
-        # Force started_at ordering so the test is deterministic regardless
-        # of how quickly the two inserts land.
-        with db._lock:
-            db._conn.execute("UPDATE sessions SET started_at=? WHERE id=?", (2000.0, "s_started_later"))
-            db._conn.execute("UPDATE sessions SET started_at=? WHERE id=?", (1000.0, "s_active_later"))
-            db._conn.commit()
+        with patch("hermes_obsidian_state.time.time", return_value=2000.0):
+            db.create_session("s_started_later", source="cli")
+        with patch("hermes_obsidian_state.time.time", return_value=1000.0):
+            db.create_session("s_active_later", source="cli")
 
-        db.append_message("s_active_later", role="user", content="hi")
-        with db._lock:
-            db._conn.execute(
-                "UPDATE messages SET timestamp=? WHERE session_id=?",
-                (3000.0, "s_active_later"),
-            )
-            db._conn.commit()
+        # Explicit timestamps are supported by the Vault message replacement
+        # API and avoid relying on wall-clock timing in CI.
+        db.replace_messages(
+            "s_active_later",
+            [{"role": "user", "content": "hi", "timestamp": 3000.0}],
+        )
 
         rows = db.search_sessions(source="cli", limit=5)
         ids = {r["id"]: r.get("last_active") for r in rows}
@@ -80,6 +77,7 @@ def test_search_sessions_exposes_last_active_column(tmp_path, monkeypatch):
         assert ids["s_started_later"] == 2000.0
         assert ids["s_active_later"] == 3000.0
         assert rows[0]["id"] == "s_active_later"
+        assert not (tmp_path / "state.db").exists()
     finally:
         db.close()
 
@@ -119,39 +117,32 @@ def test_resolve_last_session_falls_back_to_started_at(monkeypatch):
 
 
 def test_resolve_last_session_not_limited_to_newest_started_20(tmp_path, monkeypatch):
-    # Regression: when sampling by started_at, -c could miss the true MRU if
-    # it was older than the newest 20 started sessions.
+    # Regression: the newest 20 sessions by creation time must not hide an
+    # older session whose messages were updated more recently.
+    from unittest.mock import patch
+
     monkeypatch.setenv("HERMES_HOME", str(tmp_path))
+    monkeypatch.setenv("HERMES_OBSIDIAN_VAULT", str(tmp_path))
     monkeypatch.setattr("pathlib.Path.home", lambda: tmp_path)
 
     import hermes_state
 
-    from pathlib import Path
-
-    state_db = Path(tmp_path / "state.db")
     real_session_db = hermes_state.SessionDB
-    db = real_session_db(db_path=state_db)
+    db = real_session_db()
     try:
         for i in range(25):
             sid = f"s_{i:02d}"
-            db.create_session(sid, source="cli")
-            with db._lock:
-                db._conn.execute(
-                    "UPDATE sessions SET started_at=? WHERE id=?",
-                    (10_000.0 - i, sid),
-                )
-                db._conn.commit()
+            with patch("hermes_obsidian_state.time.time", return_value=10_000.0 - i):
+                db.create_session(sid, source="cli")
 
         target = "s_24"
-        db.append_message(target, role="user", content="latest activity")
-        with db._lock:
-            db._conn.execute(
-                "UPDATE messages SET timestamp=? WHERE session_id=?",
-                (20_000.0, target),
-            )
-            db._conn.commit()
+        db.replace_messages(
+            target,
+            [{"role": "user", "content": "latest activity", "timestamp": 20_000.0}],
+        )
     finally:
         db.close()
 
-    monkeypatch.setattr("hermes_state.SessionDB", lambda: real_session_db(db_path=state_db))
+    monkeypatch.setattr("hermes_state.SessionDB", lambda: real_session_db())
     assert _resolve_last_session("cli") == target
+    assert not (tmp_path / "state.db").exists()

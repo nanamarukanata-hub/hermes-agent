@@ -26,7 +26,7 @@ from gateway.session import SessionEntry, SessionStore
 
 
 def _make_store(tmp_path, max_age_days: int = 90, has_active_processes_fn=None):
-    """Build a SessionStore bypassing SQLite/disk-load side effects."""
+    """Build a SessionStore with an isolated temporary Obsidian Vault."""
     config = GatewayConfig(
         default_reset_policy=SessionResetPolicy(mode="none"),
         session_store_max_age_days=max_age_days,
@@ -36,6 +36,7 @@ def _make_store(tmp_path, max_age_days: int = 90, has_active_processes_fn=None):
             sessions_dir=tmp_path,
             config=config,
             has_active_processes_fn=has_active_processes_fn,
+            vault_path=tmp_path,
         )
     store._db = None
     store._loaded = True
@@ -224,12 +225,12 @@ class TestPruneBasics:
 
 class TestPrunePersistsToDisk:
     def test_prune_rewrites_sessions_json(self, tmp_path):
-        """After prune, sessions.json on disk reflects the new dict."""
+        """After prune, the Vault index is persisted and reloadable."""
         config = GatewayConfig(
             default_reset_policy=SessionResetPolicy(mode="none"),
             session_store_max_age_days=90,
         )
-        store = SessionStore(sessions_dir=tmp_path, config=config)
+        store = SessionStore(sessions_dir=tmp_path, config=config, vault_path=tmp_path)
         store._db = None
         # Force-populate without calling get_or_create to avoid DB side-effects
         store._entries["stale"] = _entry("stale", age_days=500)
@@ -237,14 +238,25 @@ class TestPrunePersistsToDisk:
         store._loaded = True
         store._save()
 
+        # The gateway routing index must live inside the configured Vault,
+        # not in the legacy sessions_dir root.
+        index_path = store.sessions_dir / "sessions.json"
+        assert index_path == (tmp_path / "06_Automation" / "Hermes" / "GatewayRouting" / "sessions.json")
+        assert not (tmp_path / "sessions.json").exists()
+
         # Verify pre-prune state on disk.
-        saved_pre = json.loads((tmp_path / "sessions.json").read_text())
+        saved_pre = json.loads(index_path.read_text())
         assert set(saved_pre.keys()) == {"stale", "fresh"}
 
         # Prune and check disk.
         store.prune_old_entries(max_age_days=90)
-        saved_post = json.loads((tmp_path / "sessions.json").read_text())
+        saved_post = json.loads(index_path.read_text())
         assert set(saved_post.keys()) == {"fresh"}
+
+        # A new gateway instance must observe the pruned routing index.
+        restored = SessionStore(sessions_dir=tmp_path, config=config, vault_path=tmp_path)
+        restored._ensure_loaded()
+        assert set(restored._entries.keys()) == {"fresh"}
 
 
 class TestGatewayConfigSerialization:

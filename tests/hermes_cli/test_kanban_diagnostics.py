@@ -326,12 +326,26 @@ def test_diagnostics_sorted_critical_first():
 # ---------------------------------------------------------------------------
 
 
-def test_engine_works_on_sqlite_row_objects(kanban_home):
-    """Regression: the rule functions must handle sqlite3.Row (which
-    supports mapping access but not attribute access and isn't a dict)
-    as well as dataclass Task / plain dict. The API layer passes Row
-    objects directly.
+def test_engine_works_on_mapping_row_objects(kanban_home):
+    """Regression: the rule functions must handle mapping-like rows
+    (mapping access but not attribute access, and not a dict) as well
+    as dataclass Task / plain dict. The dashboard layer used to pass
+    sqlite3.Row objects directly; the Vault layer passes dataclasses,
+    but the diagnostic engine must stay representation-tolerant.
     """
+
+    class MappingRow:
+        """Minimal Row-like mapping: keys() + [] access, no attributes."""
+
+        def __init__(self, data):
+            self._data = dict(data)
+
+        def keys(self):
+            return self._data.keys()
+
+        def __getitem__(self, key):
+            return self._data[key]
+
     conn = kb.connect()
     try:
         parent = kb.create_task(conn, title="p", assignee="w")
@@ -341,30 +355,18 @@ def test_engine_works_on_sqlite_row_objects(kanban_home):
                 conn, parent,
                 summary="with phantom", created_cards=[real, "t_deadbeef1"],
             )
-        # Pull Row objects the way the API helper does.
-        row = conn.execute(
-            "SELECT * FROM tasks WHERE id = ?", (parent,),
-        ).fetchone()
-        events = list(conn.execute(
-            "SELECT * FROM task_events WHERE task_id = ? ORDER BY id",
-            (parent,),
-        ).fetchall())
-        runs = list(conn.execute(
-            "SELECT * FROM task_runs WHERE task_id = ? ORDER BY id",
-            (parent,),
-        ).fetchall())
+        task = kb.get_task(conn, parent)
+        row = MappingRow(task.__dict__)
+        events = [
+            MappingRow(e.__dict__) for e in kb.list_events(conn, parent)
+        ]
+        runs = [MappingRow(r.__dict__) for r in kb.list_runs(conn, parent)]
         diags = kd.compute_task_diagnostics(row, events, runs)
         assert len(diags) == 1
         assert diags[0].kind == "hallucinated_cards"
         assert "t_deadbeef1" in diags[0].data["phantom_ids"]
     finally:
         conn.close()
-
-
-# ---------------------------------------------------------------------------
-# Error-tolerance: a broken rule shouldn't 500 the whole compute call
-# ---------------------------------------------------------------------------
-
 
 def test_broken_rule_is_isolated(monkeypatch):
     def _bad_rule(task, events, runs, now, cfg):

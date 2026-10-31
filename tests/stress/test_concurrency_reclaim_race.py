@@ -25,7 +25,6 @@ import json
 import multiprocessing as mp
 import os
 import random
-import sqlite3
 import sys
 import tempfile
 import time
@@ -51,9 +50,8 @@ def worker_loop(worker_id: int, hermes_home: str, result_file: str) -> None:
     while time.monotonic() - start < 40:
         conn = kb.connect()
         try:
-            row = conn.execute(
-                "SELECT id FROM tasks WHERE status='ready' AND claim_lock IS NULL LIMIT 1"
-            ).fetchone()
+            ready = [t for t in kb.list_tasks(conn, status="ready") if t.claim_lock is None]
+            row = ready[0] if ready else None
             if row is None:
                 idle += 1
                 if idle > 30:
@@ -61,12 +59,12 @@ def worker_loop(worker_id: int, hermes_home: str, result_file: str) -> None:
                 time.sleep(0.05)
                 continue
             idle = 0
-            tid = row["id"]
+            tid = row.id
             try:
                 claimed = kb.claim_task(conn, tid, claimer=f"worker-{worker_id}",
                                         ttl_seconds=TTL)
-            except sqlite3.OperationalError as e:
-                events.append({"kind": "sqlite_err", "op": "claim", "err": str(e)[:100]})
+            except Exception as e:
+                events.append({"kind": "store_err", "op": "claim", "err": str(e)[:100]})
                 continue
             if claimed is None:
                 events.append({"kind": "lost_claim", "task": tid})
@@ -86,8 +84,8 @@ def worker_loop(worker_id: int, hermes_home: str, result_file: str) -> None:
                 )
                 events.append({"kind": "complete_ok" if ok else "complete_refused",
                                "task": tid, "worker": worker_id, "run_id": run.id})
-            except sqlite3.OperationalError as e:
-                events.append({"kind": "sqlite_err", "op": "complete", "err": str(e)[:100]})
+            except Exception as e:
+                events.append({"kind": "store_err", "op": "complete", "err": str(e)[:100]})
         finally:
             conn.close()
 
@@ -111,8 +109,8 @@ def reclaimer_loop(hermes_home: str, result_file: str) -> None:
                 if n:
                     events.append({"kind": "reclaimed", "count": n,
                                    "t": time.monotonic() - start})
-            except sqlite3.OperationalError as e:
-                events.append({"kind": "sqlite_err", "err": str(e)[:100]})
+            except Exception as e:
+                events.append({"kind": "store_err", "err": str(e)[:100]})
         finally:
             conn.close()
         time.sleep(0.2)
@@ -179,48 +177,40 @@ def main():
     conn = kb.connect()
     try:
         # Any task stuck with current_run_id pointing at a closed run?
-        bad = conn.execute("""
-            SELECT t.id, t.status, t.current_run_id, r.ended_at, r.outcome
-            FROM tasks t
-            JOIN task_runs r ON r.id = t.current_run_id
-            WHERE r.ended_at IS NOT NULL
-        """).fetchall()
-        for row in bad:
-            failures.append(
-                f"INVARIANT VIOLATION: task {row['id']} status={row['status']} "
-                f"current_run_id={row['current_run_id']} but run ended "
-                f"outcome={row['outcome']}"
-            )
         # Every run with NULL ended_at should still have the task pointing at it
-        orphans = conn.execute("""
-            SELECT r.id, r.task_id
-            FROM task_runs r
-            LEFT JOIN tasks t ON t.current_run_id = r.id
-            WHERE r.ended_at IS NULL AND t.id IS NULL
-        """).fetchall()
-        for row in orphans:
-            failures.append(f"ORPHAN OPEN RUN: run {row['id']} on task {row['task_id']}")
-        # Event counts
-        claim_evts = conn.execute(
-            "SELECT COUNT(*) FROM task_events WHERE kind='claimed'").fetchone()[0]
-        reclaim_evts = conn.execute(
-            "SELECT COUNT(*) FROM task_events WHERE kind='reclaimed'").fetchone()[0]
-        comp_evts = conn.execute(
-            "SELECT COUNT(*) FROM task_events WHERE kind='completed'").fetchone()[0]
+        pointed = set()
+        claim_evts = reclaim_evts = comp_evts = 0
+        unended_reclaims = comp_runs = reclaim_runs = 0
+        for task in kb.list_tasks(conn, include_archived=True):
+            if task.current_run_id is not None:
+                pointed.add(task.current_run_id)
+                run = kb.get_run(conn, task.current_run_id)
+                if run is not None and run.ended_at is not None:
+                    failures.append(
+                        f"INVARIANT VIOLATION: task {task.id} status={task.status} "
+                        f"current_run_id={task.current_run_id} but run ended "
+                        f"outcome={run.outcome}"
+                    )
+            for ev in kb.list_events(conn, task.id):
+                if ev.kind == "claimed":
+                    claim_evts += 1
+                elif ev.kind == "reclaimed":
+                    reclaim_evts += 1
+                elif ev.kind == "completed":
+                    comp_evts += 1
+            for run in kb.list_runs(conn, task.id):
+                if run.ended_at is None:
+                    if run.id not in pointed:
+                        failures.append(f"ORPHAN OPEN RUN: run {run.id} on task {task.id}")
+                if run.outcome == "reclaimed":
+                    reclaim_runs += 1
+                    if run.ended_at is None:
+                        unended_reclaims += 1
+                elif run.outcome == "completed":
+                    comp_runs += 1
         print(f"\nDB event counts: claimed={claim_evts} reclaimed={reclaim_evts} completed={comp_evts}")
-        # Every reclaimed run must have ended_at set
-        unended_reclaims = conn.execute(
-            "SELECT COUNT(*) FROM task_runs WHERE outcome='reclaimed' AND ended_at IS NULL"
-        ).fetchone()[0]
         if unended_reclaims:
             failures.append(f"UNENDED RECLAIMED RUNS: {unended_reclaims}")
-        # Count of completed runs
-        comp_runs = conn.execute(
-            "SELECT COUNT(*) FROM task_runs WHERE outcome='completed'"
-        ).fetchone()[0]
-        reclaim_runs = conn.execute(
-            "SELECT COUNT(*) FROM task_runs WHERE outcome='reclaimed'"
-        ).fetchone()[0]
         print(f"DB run outcomes: completed={comp_runs} reclaimed={reclaim_runs}")
     finally:
         conn.close()

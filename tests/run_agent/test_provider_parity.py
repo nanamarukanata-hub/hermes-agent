@@ -942,12 +942,29 @@ class TestAuxiliaryClientProviderPriority:
         assert "openrouter" in str(mock.call_args.kwargs["base_url"]).lower()
 
     def test_nous_when_no_openrouter(self, monkeypatch):
+        """When Portal has no recommendation, use the stable Nous fallback."""
         monkeypatch.delenv("OPENROUTER_API_KEY", raising=False)
         from agent.auxiliary_client import get_text_auxiliary_client
         with patch("agent.auxiliary_client._read_nous_auth", return_value={"access_token": "nous-tok"}), \
+             patch("hermes_cli.models.get_nous_recommended_aux_model", return_value=None) as recommend, \
              patch("agent.auxiliary_client.OpenAI") as mock:
             client, model = get_text_auxiliary_client()
         assert model == "google/gemini-3-flash-preview"
+        recommend.assert_called_once_with(vision=False)
+        assert mock.called
+
+    def test_nous_uses_portal_recommended_model(self, monkeypatch):
+        """A valid Portal recommendation takes precedence over the fallback."""
+        monkeypatch.delenv("OPENROUTER_API_KEY", raising=False)
+        from agent.auxiliary_client import get_text_auxiliary_client
+        recommended_model = "stepfun/step-3.7-flash:free"
+        with patch("agent.auxiliary_client._read_nous_auth", return_value={"access_token": "nous-tok"}), \
+             patch("hermes_cli.models.get_nous_recommended_aux_model", return_value=recommended_model) as recommend, \
+             patch("agent.auxiliary_client.OpenAI") as mock:
+            client, model = get_text_auxiliary_client()
+        assert model == recommended_model
+        recommend.assert_called_once_with(vision=False)
+        assert mock.called
 
     def test_custom_endpoint_when_no_nous(self, monkeypatch):
         """Custom endpoint is used when no OpenRouter/Nous keys are available.

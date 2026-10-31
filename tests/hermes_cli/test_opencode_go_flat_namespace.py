@@ -145,6 +145,31 @@ def test_deepseek_v4_flash_stays_on_opencode_go():
     assert result.new_model == "deepseek-v4-flash"
 
 
+def test_exact_catalog_match_beats_stale_validation_autocorrection():
+    """A fallback validator must not rewrite an exact current-provider ID.
+
+    The provider catalog lists deepseek-v4-flash, but a different cached
+    catalog may fuzzy-match it to deepseek-v4.1-flash.  The requested model
+    must remain unchanged and no misleading auto-correction warning emitted.
+    """
+    with patch(
+        "hermes_cli.models.validate_requested_model",
+        return_value={
+            "accepted": True,
+            "persist": True,
+            "recognized": True,
+            "corrected_model": "deepseek-v4.1-flash",
+            "message": "Auto-corrected `deepseek-v4-flash` → `deepseek-v4.1-flash`",
+        },
+    ):
+        result = _run_switch("deepseek-v4-flash")
+
+    assert result.success
+    assert result.target_provider == "opencode-go"
+    assert result.new_model == "deepseek-v4-flash"
+    assert "Auto-corrected" not in result.warning_message
+
+
 def test_deepseek_v4_pro_stays_on_opencode_go():
     """Same bug class as the flash variant."""
     result = _run_switch("deepseek-v4-pro")

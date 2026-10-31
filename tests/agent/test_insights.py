@@ -17,11 +17,16 @@ from agent.insights import (
 
 @pytest.fixture()
 def db(tmp_path):
-    """Create a SessionDB with a temp database file."""
-    db_path = tmp_path / "test_insights.db"
-    session_db = SessionDB(db_path=db_path)
+    """Use an isolated, real file-backed Obsidian Vault for each test."""
+    session_db = SessionDB(vault_path=tmp_path)
     yield session_db
     session_db.close()
+
+
+def _set_session_time(db, session_id, field, value):
+    """Backdate a test session using the Vault writer, never SQLite."""
+    assert field in {"started_at", "ended_at"}
+    db._edit(session_id, lambda item: item.update({field: value}))
 
 
 @pytest.fixture()
@@ -36,9 +41,9 @@ def populated_db(db):
         model="anthropic/claude-sonnet-4-20250514", user_id="user1",
     )
     # Backdate the started_at
-    db._conn.execute("UPDATE sessions SET started_at = ? WHERE id = 's1'", (now - 2 * day,))
+    _set_session_time(db, "s1", "started_at", now - 2 * day,)
     db.end_session("s1", end_reason="user_exit")
-    db._conn.execute("UPDATE sessions SET ended_at = ? WHERE id = 's1'", (now - 2 * day + 3600,))
+    _set_session_time(db, "s1", "ended_at", now - 2 * day + 3600,)
     db.update_token_counts("s1", input_tokens=50000, output_tokens=15000)
     db.append_message("s1", role="user", content="Hello, help me fix a bug")
     db.append_message("s1", role="assistant", content="Sure, let me look into that.")
@@ -65,9 +70,9 @@ def populated_db(db):
         session_id="s2", source="telegram",
         model="gpt-4o", user_id="user1",
     )
-    db._conn.execute("UPDATE sessions SET started_at = ? WHERE id = 's2'", (now - 5 * day,))
+    _set_session_time(db, "s2", "started_at", now - 5 * day,)
     db.end_session("s2", end_reason="timeout")
-    db._conn.execute("UPDATE sessions SET ended_at = ? WHERE id = 's2'", (now - 5 * day + 1800,))
+    _set_session_time(db, "s2", "ended_at", now - 5 * day + 1800,)
     db.update_token_counts("s2", input_tokens=20000, output_tokens=8000)
     db.append_message("s2", role="user", content="Search the web for something")
     db.append_message("s2", role="assistant", content="Searching...",
@@ -80,9 +85,9 @@ def populated_db(db):
         session_id="s3", source="cli",
         model="deepseek-chat", user_id="user1",
     )
-    db._conn.execute("UPDATE sessions SET started_at = ? WHERE id = 's3'", (now - 10 * day,))
+    _set_session_time(db, "s3", "started_at", now - 10 * day,)
     db.end_session("s3", end_reason="user_exit")
-    db._conn.execute("UPDATE sessions SET ended_at = ? WHERE id = 's3'", (now - 10 * day + 7200,))
+    _set_session_time(db, "s3", "ended_at", now - 10 * day + 7200,)
     db.update_token_counts("s3", input_tokens=100000, output_tokens=40000)
     db.append_message("s3", role="user", content="Run this terminal command")
     db.append_message("s3", role="assistant", content="Running...",
@@ -106,9 +111,9 @@ def populated_db(db):
         session_id="s4", source="discord",
         model="anthropic/claude-sonnet-4-20250514", user_id="user2",
     )
-    db._conn.execute("UPDATE sessions SET started_at = ? WHERE id = 's4'", (now - 1 * day,))
+    _set_session_time(db, "s4", "started_at", now - 1 * day,)
     db.end_session("s4", end_reason="user_exit")
-    db._conn.execute("UPDATE sessions SET ended_at = ? WHERE id = 's4'", (now - 1 * day + 900,))
+    _set_session_time(db, "s4", "ended_at", now - 1 * day + 900,)
     db.update_token_counts("s4", input_tokens=10000, output_tokens=5000)
     db.append_message("s4", role="user", content="Quick question")
     db.append_message("s4", role="assistant", content="Sure, go ahead")
@@ -127,14 +132,13 @@ def populated_db(db):
         session_id="s_old", source="cli",
         model="gpt-4o-mini", user_id="user1",
     )
-    db._conn.execute("UPDATE sessions SET started_at = ? WHERE id = 's_old'", (now - 45 * day,))
+    _set_session_time(db, "s_old", "started_at", now - 45 * day,)
     db.end_session("s_old", end_reason="user_exit")
-    db._conn.execute("UPDATE sessions SET ended_at = ? WHERE id = 's_old'", (now - 45 * day + 600,))
+    _set_session_time(db, "s_old", "ended_at", now - 45 * day + 600,)
     db.update_token_counts("s_old", input_tokens=5000, output_tokens=2000)
     db.append_message("s_old", role="user", content="old message")
     db.append_message("s_old", role="assistant", content="old reply")
 
-    db._conn.commit()
     return db
 
 
@@ -488,7 +492,7 @@ class TestTerminalFormatting:
         """Cost display is hidden entirely — custom models no longer show 'N/A' either."""
         db.create_session(session_id="s1", source="cli", model="my-custom-model")
         db.update_token_counts("s1", input_tokens=1000, output_tokens=500)
-        db._conn.commit()
+
 
         engine = InsightsEngine(db)
         report = engine.generate(days=30)
@@ -541,7 +545,7 @@ class TestEdgeCases:
     def test_session_with_no_tokens(self, db):
         """Sessions with zero tokens should not crash."""
         db.create_session(session_id="s1", source="cli", model="test-model")
-        db._conn.commit()
+
 
         engine = InsightsEngine(db)
         report = engine.generate(days=30)
@@ -553,7 +557,7 @@ class TestEdgeCases:
         """Active (non-ended) sessions should be included but duration = 0."""
         db.create_session(session_id="s1", source="cli", model="test-model")
         db.update_token_counts("s1", input_tokens=1000, output_tokens=500)
-        db._conn.commit()
+
 
         engine = InsightsEngine(db)
         report = engine.generate(days=30)
@@ -567,7 +571,7 @@ class TestEdgeCases:
         """Sessions with NULL model should not crash."""
         db.create_session(session_id="s1", source="cli")
         db.update_token_counts("s1", input_tokens=1000, output_tokens=500)
-        db._conn.commit()
+
 
         engine = InsightsEngine(db)
         report = engine.generate(days=30)
@@ -582,7 +586,7 @@ class TestEdgeCases:
         """Custom/self-hosted models should show $0 cost, not fake estimates."""
         db.create_session(session_id="s1", source="cli", model="FP16_Hermes_4.5")
         db.update_token_counts("s1", input_tokens=100000, output_tokens=50000)
-        db._conn.commit()
+
 
         engine = InsightsEngine(db)
         report = engine.generate(days=30)
@@ -615,7 +619,7 @@ class TestEdgeCases:
                                        "function": {"name": "search_files", "arguments": "{}"}}])
         db.append_message("s1", role="tool", content="more results",
                           tool_call_id="call_3")
-        db._conn.commit()
+
 
         engine = InsightsEngine(db)
         report = engine.generate(days=30)
@@ -635,7 +639,7 @@ class TestEdgeCases:
         import json as _json
         db.create_session(session_id="s1", source="cli", model="gpt-4o")
         db.create_session(session_id="s2", source="cli", model="my-custom")
-        db._conn.commit()
+
 
         engine = InsightsEngine(db)
         report = engine.generate(days=30)
@@ -657,7 +661,7 @@ class TestEdgeCases:
         )
         db.create_session(session_id="s2", source="cli", model="my-local-llama")
         db.update_token_counts("s2", input_tokens=10000, output_tokens=5000)
-        db._conn.commit()
+
 
         engine = InsightsEngine(db)
         report = engine.generate(days=30)
@@ -680,7 +684,7 @@ class TestEdgeCases:
     def test_single_session_streak(self, db):
         """Single session should have streak of 0 or 1."""
         db.create_session(session_id="s1", source="cli", model="test")
-        db._conn.commit()
+
 
         engine = InsightsEngine(db)
         report = engine.generate(days=30)
@@ -691,7 +695,7 @@ class TestEdgeCases:
         db.create_session(session_id="s1", source="cli", model="test")
         db.append_message("s1", role="user", content="hello")
         db.append_message("s1", role="assistant", content="hi there")
-        db._conn.commit()
+
 
         engine = InsightsEngine(db)
         report = engine.generate(days=30)
@@ -700,7 +704,7 @@ class TestEdgeCases:
     def test_only_one_platform(self, db):
         """Single-platform usage should still work."""
         db.create_session(session_id="s1", source="cli", model="test")
-        db._conn.commit()
+
 
         engine = InsightsEngine(db)
         report = engine.generate(days=30)
@@ -715,7 +719,7 @@ class TestEdgeCases:
     def test_large_days_value(self, db):
         """Very large days value should not crash."""
         db.create_session(session_id="s1", source="cli", model="test")
-        db._conn.commit()
+
 
         engine = InsightsEngine(db)
         report = engine.generate(days=365)
@@ -724,7 +728,7 @@ class TestEdgeCases:
     def test_zero_days(self, db):
         """Zero days should return empty (nothing is in the future)."""
         db.create_session(session_id="s1", source="cli", model="test")
-        db._conn.commit()
+
 
         engine = InsightsEngine(db)
         report = engine.generate(days=0)

@@ -444,7 +444,7 @@ async def test_new_inside_telegram_topic_rewrites_binding_to_new_session(tmp_pat
 
 
 @pytest.mark.asyncio
-async def test_topic_root_command_explicitly_migrates_and_enables_topic_mode(tmp_path, monkeypatch):
+async def test_topic_root_command_enables_persistent_vault_topic_mode(tmp_path, monkeypatch):
     import gateway.run as gateway_run
 
     session_db = SessionDB(db_path=tmp_path / "state.db")
@@ -461,7 +461,7 @@ async def test_topic_root_command_explicitly_migrates_and_enables_topic_mode(tmp
 
     assert "Telegram multi-session topics are enabled" in result
     assert "All Messages" in result
-    assert session_db.get_meta("telegram_dm_topic_schema_version") == "2"
+    assert session_db._read_state_meta()["telegram_topic_modes"]["208214988"]["enabled"] is True
     assert session_db.is_telegram_topic_mode_enabled(chat_id="208214988", user_id="208214988")
     assert runner._telegram_topic_mode_enabled(_make_source()) is True
     runner._run_agent.assert_not_called()
@@ -706,6 +706,22 @@ async def test_first_message_inside_topic_records_topic_binding(tmp_path, monkey
     assert binding["session_key"] == build_session_key(_make_source(thread_id="17585"))
 
 
+def test_topic_capability_hint_first_send_on_recent_boot(monkeypatch):
+    """The first BotFather hint must not be suppressed by low monotonic uptime."""
+    import time
+
+    runner = _make_runner()
+    source = _make_source()
+    monkeypatch.setattr(time, "monotonic", lambda: 15.0)
+
+    assert runner._should_send_telegram_capability_hint(source) is True
+    assert runner._should_send_telegram_capability_hint(source) is False
+
+    # The same chat may receive the hint again after the cooldown.
+    monkeypatch.setattr(time, "monotonic", lambda: 315.0)
+    assert runner._should_send_telegram_capability_hint(source) is True
+
+
 @pytest.mark.asyncio
 async def test_topic_root_command_checks_getme_capabilities_before_enabling(tmp_path, monkeypatch):
     import gateway.run as gateway_run
@@ -905,84 +921,57 @@ def test_lobby_reminder_is_debounced_per_chat(tmp_path):
     assert runner._should_send_telegram_lobby_reminder(other) is True
 
 
-def test_binding_survives_session_deletion_via_cascade(tmp_path):
-    """Deleting a session with a topic binding must not raise FK errors."""
-    import sqlite3
+def test_binding_removed_when_vault_session_deleted(tmp_path):
+    """Deleting a Vault session must also remove its Telegram topic binding."""
     db = SessionDB(db_path=tmp_path / "state.db")
     db.enable_telegram_topic_mode(chat_id="208214988", user_id="208214988")
     db.create_session(session_id="sess-to-delete", source="telegram", user_id="208214988")
     db.bind_telegram_topic(
-        chat_id="208214988",
-        thread_id="17585",
-        user_id="208214988",
+        chat_id="208214988", thread_id="17585", user_id="208214988",
         session_key="agent:main:telegram:dm:208214988:17585",
         session_id="sess-to-delete",
     )
+    assert db.get_telegram_topic_binding("208214988", "17585") is not None
 
-    # Before: binding exists.
-    binding = db.get_telegram_topic_binding(chat_id="208214988", thread_id="17585")
-    assert binding is not None
+    assert db.delete_session("sess-to-delete") is True
 
-    # Delete the session. Without ON DELETE CASCADE this would raise
-    # sqlite3.IntegrityError: FOREIGN KEY constraint failed.
-    db._conn.execute("DELETE FROM sessions WHERE id = ?", ("sess-to-delete",))
-    db._conn.commit()
-
-    # After: binding row automatically cleared.
-    binding_after = db.get_telegram_topic_binding(chat_id="208214988", thread_id="17585")
-    assert binding_after is None
+    reopened = SessionDB(db_path=tmp_path / "state.db")
+    assert reopened.get_telegram_topic_binding("208214988", "17585") is None
+    assert reopened.is_telegram_session_linked_to_topic("sess-to-delete") is False
 
 
-def test_migration_rebuilds_v1_binding_table_with_cascade_fk(tmp_path):
-    """v1 → v2 migration rebuilds the bindings table when FK lacks ON DELETE CASCADE."""
-    import sqlite3
-    db_path = tmp_path / "state.db"
-    db = SessionDB(db_path=db_path)
-
-    # Simulate a v1-shaped DB: migration ran without ON DELETE CASCADE.
-    db.apply_telegram_topic_migration()  # Creates v2 (our new shape)
-    # Drop the v2 bindings table and recreate it in the old v1 shape.
-    with db._lock:
-        db._conn.execute("DROP TABLE telegram_dm_topic_bindings")
-        db._conn.execute(
-            """
-            CREATE TABLE telegram_dm_topic_bindings (
-                chat_id TEXT NOT NULL,
-                thread_id TEXT NOT NULL,
-                user_id TEXT NOT NULL,
-                session_key TEXT NOT NULL,
-                session_id TEXT NOT NULL REFERENCES sessions(id),
-                managed_mode TEXT NOT NULL DEFAULT 'auto',
-                linked_at REAL NOT NULL,
-                updated_at REAL NOT NULL,
-                PRIMARY KEY (chat_id, thread_id)
-            )
-            """
+def test_telegram_topic_bindings_persist_and_enforce_unique_session(tmp_path):
+    """Vault metadata survives restart and prevents one session in two topics."""
+    db = SessionDB(db_path=tmp_path / "state.db")
+    db.enable_telegram_topic_mode(chat_id="208214988", user_id="208214988")
+    db.create_session(session_id="session-one", source="telegram", user_id="208214988")
+    db.bind_telegram_topic(
+        chat_id="208214988", thread_id="111", user_id="208214988",
+        session_key="topic:111", session_id="session-one", managed_mode="restored",
+    )
+    reopened = SessionDB(db_path=tmp_path / "state.db")
+    assert reopened.is_telegram_topic_mode_enabled("208214988", "208214988") is True
+    assert reopened.get_telegram_topic_binding("208214988", "111")["session_id"] == "session-one"
+    assert reopened.get_telegram_topic_binding("208214988", "111")["managed_mode"] == "restored"
+    with pytest.raises(ValueError, match="already linked"):
+        reopened.bind_telegram_topic(
+            chat_id="208214988", thread_id="222", user_id="208214988",
+            session_key="topic:222", session_id="session-one",
         )
-        # Also rewind the version marker so migration treats this as v1.
-        db._conn.execute(
-            "UPDATE state_meta SET value = '1' WHERE key = 'telegram_dm_topic_schema_version'"
-        )
-        db._conn.commit()
+    reopened.disable_telegram_topic_mode("208214988")
+    again = SessionDB(db_path=tmp_path / "state.db")
+    assert again.is_telegram_topic_mode_enabled("208214988", "208214988") is False
+    assert again.get_telegram_topic_binding("208214988", "111") is None
 
-    # Sanity check: FK has no CASCADE action yet.
-    fk_rows = db._conn.execute(
-        "PRAGMA foreign_key_list('telegram_dm_topic_bindings')"
-    ).fetchall()
-    assert any(row[2] == "sessions" and (row[6] or "") != "CASCADE" for row in fk_rows)
 
-    # Re-run migration — should upgrade to v2 shape.
+def test_telegram_topic_migration_is_vault_only(tmp_path):
+    """The legacy migration entry point must never create SQLite state."""
+    db = SessionDB(db_path=tmp_path / "state.db")
+    db.enable_telegram_topic_mode(chat_id="208214988", user_id="208214988")
     db.apply_telegram_topic_migration()
-
-    fk_rows_after = db._conn.execute(
-        "PRAGMA foreign_key_list('telegram_dm_topic_bindings')"
-    ).fetchall()
-    assert any(row[2] == "sessions" and row[6] == "CASCADE" for row in fk_rows_after)
-
-    version = db._conn.execute(
-        "SELECT value FROM state_meta WHERE key = 'telegram_dm_topic_schema_version'"
-    ).fetchone()
-    assert version is not None and version[0] == "2"
+    reopened = SessionDB(db_path=tmp_path / "state.db")
+    assert reopened.is_telegram_topic_mode_enabled("208214988", "208214988")
+    assert list(db.root.rglob("*.db")) == []
 
 
 @pytest.mark.asyncio
@@ -996,14 +985,10 @@ async def test_topic_help_subcommand_returns_usage(tmp_path):
     assert "/topic help" in result
     assert "/topic off" in result
     assert "/topic <id>" in result
-    # No side effects — topic mode tables should not even exist yet.
-    tables = {
-        row[0]
-        for row in db._conn.execute(
-            "SELECT name FROM sqlite_master WHERE type='table' AND name LIKE 'telegram_dm%'"
-        ).fetchall()
-    }
-    assert tables == set()
+    # No side effects: help must not create Vault topic-mode metadata.
+    state = db._read_state_meta()
+    assert "telegram_topic_modes" not in state
+    assert "telegram_topic_bindings" not in state
 
 
 @pytest.mark.asyncio
@@ -1055,7 +1040,8 @@ async def test_topic_refuses_unauthorized_user(tmp_path, monkeypatch):
     """Unauthorized DMs cannot flip multi-session mode on."""
     import gateway.run as gateway_run
 
-    db = SessionDB(db_path=tmp_path / "state.db")
+    # Isolate the test in its own Vault instead of relying on the CI Vault.
+    db = SessionDB(vault_path=tmp_path)
     runner = _make_runner(session_db=db)
     runner._is_user_authorized = lambda _source: False  # Deny
 
@@ -1066,14 +1052,15 @@ async def test_topic_refuses_unauthorized_user(tmp_path, monkeypatch):
     result = await runner._handle_topic_command(_make_event("/topic"))
 
     assert "not authorized" in result.lower()
-    # Tables must not be created for an unauthorized caller.
-    tables = {
-        row[0]
-        for row in db._conn.execute(
-            "SELECT name FROM sqlite_master WHERE type='table' AND name LIKE 'telegram_dm%'"
-        ).fetchall()
-    }
-    assert tables == set()
+    # Unauthorized callers must not persist topic settings or create a DB.
+    assert db._read_state_meta() == {}
+    assert not (db.root / "state_meta.json").exists()
+    assert not list(tmp_path.rglob("*.db"))
+    # The denied setting must remain disabled after a fresh Vault load.
+    reloaded = SessionDB(vault_path=tmp_path)
+    assert reloaded.is_telegram_topic_mode_enabled(
+        chat_id="208214988", user_id="208214988"
+    ) is False
 
 
 def test_capability_hint_is_debounced_per_chat(tmp_path):

@@ -1,0 +1,130 @@
+name: Obsidian session backend
+on:
+  push:
+    branches: [feat/obsidian-session-backend-20261025]
+    paths:
+      - '.github/workflows/obsidian-backend-ci.yml'
+      - 'hermes_obsidian_state.py'
+      - 'hermes_state.py'
+      - 'gateway/session.py'
+      - 'gateway/platforms/helpers.py'
+      - 'gateway/run.py'
+      - 'gateway/platforms/discord.py'
+      - 'gateway/platforms/api_server.py'
+      - 'tests/gateway/conftest.py'
+      - 'tests/gateway/test_api_server_vault_required.py'
+      - 'hermes_hybrid/obsidian_store.py'
+      - 'hermes_hybrid/session_manager.py'
+      - 'hermes_hybrid/gateway_adapter.py'
+      - 'hermes_hybrid/vault_kv.py'
+      - 'tests/test_vault_kv_symlink_guards.py'
+      - 'tests/gateway/test_discord_thread_persistence.py'
+      - 'tests/test_obsidian_session_state.py'
+      - 'scripts/migrate_sessions_to_obsidian.py'
+      - 'tests/test_sqlite_session_verify.py'
+      - 'scripts/migrate_kanban_to_vault.py'
+      - 'scripts/migrate_sqlite_to_vault.py'
+      - 'tests/test_sqlite_migration.py'
+      - 'tests/test_sqlite_migration_atomic_temp.py'
+      - 'tests/test_sqlite_migration_preflight.py'
+      - 'tests/test_holographic_migration_complete.py'
+      - 'tests/test_sqlite_migration_verify_file_sets.py'
+      - 'tests/test_kanban_migration_guards.py'
+      - 'hermes_cli/kanban_db.py'
+      - 'tests/test_kanban_vault_metadata.py'
+      - 'tests/test_kanban_vault_runtime_paths.py'
+      - 'hermes_hybrid/sqlite_audit.py'
+      - 'tools/memory_tool.py'
+      - 'tests/tools/test_memory_tool_vault_required.py'
+      - 'hermes_hybrid/deep_memory.py'
+      - 'tests/test_deep_memory.py'
+      - 'tests/test_obsidian_store_atomic_write.py'
+      - 'tests/test_sqlite_audit.py'
+      - 'plugins/memory/holographic/__init__.py'
+      - 'plugins/memory/holographic/store.py'
+      - 'tests/test_holographic_vault_paths.py'
+  pull_request:
+    branches: [main]
+    paths:
+      - '.github/workflows/obsidian-backend-ci.yml'
+      - 'hermes_obsidian_state.py'
+      - 'hermes_state.py'
+      - 'gateway/session.py'
+      - 'gateway/platforms/helpers.py'
+      - 'gateway/run.py'
+      - 'gateway/platforms/discord.py'
+      - 'gateway/platforms/api_server.py'
+      - 'tests/gateway/conftest.py'
+      - 'tests/gateway/test_api_server_vault_required.py'
+      - 'hermes_hybrid/obsidian_store.py'
+      - 'hermes_hybrid/session_manager.py'
+      - 'hermes_hybrid/gateway_adapter.py'
+      - 'hermes_hybrid/vault_kv.py'
+      - 'tests/test_vault_kv_symlink_guards.py'
+      - 'tests/gateway/test_discord_thread_persistence.py'
+      - 'tests/test_obsidian_session_state.py'
+      - 'scripts/migrate_sessions_to_obsidian.py'
+      - 'tests/test_sqlite_session_verify.py'
+      - 'scripts/migrate_kanban_to_vault.py'
+      - 'scripts/migrate_sqlite_to_vault.py'
+      - 'tests/test_sqlite_migration.py'
+      - 'tests/test_sqlite_migration_atomic_temp.py'
+      - 'tests/test_sqlite_migration_preflight.py'
+      - 'tests/test_holographic_migration_complete.py'
+      - 'tests/test_sqlite_migration_verify_file_sets.py'
+      - 'tests/test_kanban_migration_guards.py'
+      - 'hermes_cli/kanban_db.py'
+      - 'tests/test_kanban_vault_metadata.py'
+      - 'tests/test_kanban_vault_runtime_paths.py'
+      - 'hermes_hybrid/sqlite_audit.py'
+      - 'tools/memory_tool.py'
+      - 'tests/tools/test_memory_tool_vault_required.py'
+      - 'hermes_hybrid/deep_memory.py'
+      - 'tests/test_deep_memory.py'
+      - 'tests/test_obsidian_store_atomic_write.py'
+      - 'tests/test_sqlite_audit.py'
+      - 'plugins/memory/holographic/__init__.py'
+      - 'plugins/memory/holographic/store.py'
+      - 'tests/test_holographic_vault_paths.py'
+  workflow_dispatch:
+jobs:
+  obsidian-storage:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+      - name: Install minimal gateway import dependency
+        run: python -m pip install PyYAML pytest pytest-xdist aiohttp httpx websockets
+      - name: SQLite-free backend regression
+        # -t . keeps tests/gateway from shadowing the real gateway package.
+        run: python -m unittest discover -s tests -t . -p 'test_obsidian_session_state.py' -v
+      - name: Session migration dry-run and verification regression
+        run: python -m unittest discover -s tests -t . -p 'test_sqlite_session_verify.py' -v
+      - name: SQLite to Vault migration regression
+        run: python -m pytest tests/test_sqlite_migration.py tests/test_sqlite_migration_atomic_temp.py tests/test_sqlite_migration_preflight.py tests/test_holographic_migration_complete.py tests/test_sqlite_migration_verify_file_sets.py -q
+      - name: Kanban read-only migration safety regression
+        run: python -m unittest discover -s tests -t . -p 'test_kanban_migration_guards.py' -v
+      - name: Kanban Vault metadata regression
+        run: python -m unittest discover -s tests -t . -p 'test_kanban_vault_metadata.py' -v
+      - name: Kanban Vault runtime path regression
+        run: python -m unittest discover -s tests -t . -p 'test_kanban_vault_runtime_paths.py' -v
+      - name: Gateway thread Vault containment regression
+        run: python -m pytest tests/gateway/test_discord_thread_persistence.py -q -k 'symlinked_vault_parent_rejected_before_mkdir or regular_file_blocks_vault_thread_directory'
+      - name: Runtime SQLite audit regression
+        run: python -m pytest tests/test_sqlite_audit.py -q
+      - name: Curated memory Vault-only persistence regression
+        run: python -m pytest tests/tools/test_memory_tool_vault_required.py -q
+      - name: Deep memory Vault atomic write regression
+        run: python -m pytest tests/test_deep_memory.py -q
+      - name: Hybrid Obsidian Vault atomic write regression
+        run: python -m pytest tests/test_obsidian_store_atomic_write.py -q
+      - name: Holographic memory Vault path and lock regression
+        run: python -m pytest tests/test_holographic_vault_paths.py -q
+      - name: Shared VaultDir read and path safety regression
+        run: python -m pytest tests/test_vault_kv_symlink_guards.py -q
+      - name: API response Vault-only persistence regression
+        run: python -m pytest tests/gateway/test_api_server_vault_required.py -q
+      - name: Syntax verification
+        run: python -m py_compile hermes_state.py hermes_obsidian_state.py hermes_hybrid/sqlite_audit.py scripts/migrate_sessions_to_obsidian.py scripts/migrate_kanban_to_vault.py scripts/migrate_sqlite_to_vault.py gateway/session.py gateway/platforms/helpers.py gateway/platforms/api_server.py

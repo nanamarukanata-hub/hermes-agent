@@ -301,8 +301,14 @@ class TestProviderPersistsAfterModelSave:
             lambda api_key=None, base_url=None, timeout=5.0: ["publisher/model-a"],
         )
 
-        with patch("builtins.input", side_effect=[""]):
+        # Existing keys prompt for Keep/Replace/Clear before the base URL.
+        # Mock both prompts so the test exercises the full persistence path.
+        with patch("builtins.input", side_effect=["", ""]) as mock_input:
             _model_flow_api_key_provider(load_config(), "lmstudio", "old-model")
+
+        assert mock_input.call_count == 2
+        assert "[K]eep" in mock_input.call_args_list[0].args[0]
+        assert "Base URL" in mock_input.call_args_list[1].args[0]
 
         import yaml
 
@@ -403,8 +409,12 @@ class TestBaseUrlValidation:
             return_value="step-3-agent-lite",
         ), patch(
             "hermes_cli.auth.deactivate_provider",
-        ):
+        ), patch("builtins.input", return_value="") as mock_input:
             _model_flow_stepfun(load_config(), "old-model")
+
+        # A configured key still asks whether to keep/replace/clear it.
+        mock_input.assert_called_once()
+        assert "[K]eep" in mock_input.call_args.args[0]
 
         import yaml
 

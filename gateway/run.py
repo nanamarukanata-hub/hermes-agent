@@ -1187,13 +1187,10 @@ class GatewayRunner:
         except Exception:
             pass  # Non-fatal — fail-open at scan time if unavailable
         
-        # Initialize session database for session_search tool support
-        self._session_db = None
-        try:
-            from hermes_state import SessionDB
-            self._session_db = SessionDB()
-        except Exception as e:
-            logger.debug("SQLite session store not available: %s", e)
+        # One canonical Obsidian Vault session backend. Fail at startup if
+        # persistence cannot be configured; never fall back to SQLite.
+        from hermes_state import SessionDB
+        self._session_db = SessionDB()
 
         # Opportunistic state.db maintenance: prune ended sessions older
         # than sessions.retention_days + optional VACUUM. Tracks last-run
@@ -6740,6 +6737,36 @@ class GatewayRunner:
             }
             await self.hooks.emit("agent:start", hook_ctx)
 
+            # --- Hermes hybrid RP hook (Discord Gateway integration) ---
+            # Inbound Discord messages flow through this handler, so this
+            # is where RP processing, Vault memory search, and RP state
+            # updates attach to the real conversation path. The hook is
+            # a no-op when no character card is active for this user or
+            # when HERMES_OBSIDIAN_VAULT is unset, and it never raises
+            # into the gateway: a failure here must not drop a message.
+            # RP state is keyed by (user, character) in the Vault, so it
+            # survives session resets and gateway restarts; conversation
+            # turns themselves stay in the PR #11 SessionDB.
+            _rp_bridge = None
+            try:
+                import os as _rp_os
+                if _rp_os.environ.get("HERMES_RP_ENABLED", "1") not in ("0", "false", "no"):
+                    from hermes_hybrid.gateway_integration import RPConversation as _RPConversation
+                    from hermes_hybrid.obsidian_store import VaultStore as _VaultStore
+                    _rp_vault = _rp_os.environ.get("HERMES_OBSIDIAN_VAULT")
+                    if _rp_vault:
+                        _rp_bridge = _RPConversation(
+                            _VaultStore(_rp_vault),
+                            session_db=getattr(self.session_store, "_db", None),
+                        )
+                    _rp_prompt = _rp_bridge.before_agent(
+                        str(source.user_id or ""), session_entry.session_id, message_text)
+                    if _rp_prompt:
+                        context_prompt = context_prompt + "\n\n" + _rp_prompt
+            except Exception as _rp_err:
+                logger.debug("RP hook before_agent failed (non-fatal): %s", _rp_err)
+                _rp_bridge = None
+
             # Run the agent
             agent_result = await self._run_agent(
                 message=message_text,
@@ -6791,6 +6818,17 @@ class GatewayRunner:
                     "rephrase your question."
                 )
             agent_messages = agent_result.get("messages", [])
+
+            # --- Hermes hybrid RP hook: persist RP state after the turn ---
+            # Conversation turns are persisted by the gateway's SessionDB
+            # below; this only advances RP turn state in the Vault.
+            try:
+                if _rp_bridge is not None:
+                    _rp_bridge.after_agent(
+                        str(source.user_id or ""), session_entry.session_id,
+                        message_text, response)
+            except Exception as _rp_err:
+                logger.debug("RP hook after_agent failed (non-fatal): %s", _rp_err)
             _response_time = time.time() - _msg_start_time
             _api_calls = agent_result.get("api_calls", 0)
             _resp_len = len(response)
@@ -7035,10 +7073,12 @@ class GatewayRunner:
                             {"role": "assistant", "content": response, "timestamp": ts}
                         )
                 else:
-                    # The agent already persisted these messages to SQLite via
-                    # _flush_messages_to_session_db(), so skip the DB write here
-                    # to prevent the duplicate-write bug (#860).  We still write
-                    # to JSONL for backward compatibility and as a backup.
+                    # The agent already persisted these messages to the
+                    # canonical SessionDB via _flush_messages_to_session_db(),
+                    # so skip the DB write here to prevent the duplicate-write
+                    # bug (#860).  append_to_transcript with skip_db=True is
+                    # now a no-op: the legacy JSONL mirror is no longer
+                    # written, so the SessionDB stays the single copy.
                     agent_persisted = self._session_db is not None
                     for msg in new_messages:
                         # Skip system messages (they're rebuilt each run)
@@ -10152,8 +10192,11 @@ class GatewayRunner:
             return True
         import time as _time
         now = _time.monotonic()
-        last = self._telegram_capability_hint_ts.get(chat_id, 0.0)
-        if now - last < self._TELEGRAM_CAPABILITY_HINT_COOLDOWN_S:
+        # No previous hint means this is the first send, even if the
+        # process has been running for less than the cooldown interval.
+        # Using 0.0 as a fallback would suppress the first hint after boot.
+        last = self._telegram_capability_hint_ts.get(chat_id)
+        if last is not None and now - last < self._TELEGRAM_CAPABILITY_HINT_COOLDOWN_S:
             return False
         self._telegram_capability_hint_ts[chat_id] = now
         return True
@@ -10224,8 +10267,8 @@ class GatewayRunner:
             return "Session database not available."
 
         # Authorization: /topic activates multi-session mode and mutates
-        # SQLite side tables. Unauthorized senders (not in allowlist) must
-        # not be able to do that. Gateway routes already authorize the
+        # persistent Vault state. Unauthorized senders (not in allowlist)
+        # must not be able to do that. Gateway routes already authorize the
         # message before reaching here, but defense in depth.
         auth_fn = getattr(self, "_is_user_authorized", None)
         if callable(auth_fn):
