@@ -3,7 +3,11 @@
 All Vaults are temporary; no model, token, or network is used.
 """
 
+import json
+import os
 import random
+
+import pytest
 
 from hermes_hybrid.deep_memory import DeepMemory
 from hermes_hybrid.vault_search import search_vault
@@ -118,3 +122,34 @@ def test_proactive_decisions(tmp_path):
     third = watcher.should_start_topic("c1", last_activity_at=0.0, now=100002.0)
     assert third["start"] is False
     assert watcher.should_start_topic("c1", last_activity_at=99999.0, now=100000.0)["start"] is False
+
+
+def test_deep_memory_atomic_write_avoids_predictable_symlink(tmp_path):
+    """A pre-planted legacy PID temp link must not overwrite Vault-external data."""
+    dm = _deep(tmp_path)
+    target = dm.memories_dir / "safe.json"
+    outside = tmp_path / "outside.json"
+    outside.write_text("untouched", encoding="utf-8")
+    legacy_tmp = target.with_name(f".{target.name}.tmp-{os.getpid()}")
+    legacy_tmp.symlink_to(outside)
+
+    dm._atomic(target, {"value": "safe"})
+
+    assert outside.read_text(encoding="utf-8") == "untouched"
+    assert json.loads(target.read_text(encoding="utf-8")) == {"value": "safe"}
+
+
+def test_deep_memory_atomic_write_cleans_temp_on_replace_failure(tmp_path, monkeypatch):
+    """An interrupted replace must not leave a partially written temp file."""
+    dm = _deep(tmp_path)
+    target = dm.memories_dir / "safe.json"
+
+    def fail_replace(_src, _dst):
+        raise OSError("injected replace failure")
+
+    monkeypatch.setattr("hermes_hybrid.deep_memory.os.replace", fail_replace)
+    with pytest.raises(OSError, match="injected replace failure"):
+        dm._atomic(target, {"value": "safe"})
+
+    assert not target.exists()
+    assert not list(target.parent.glob(f".{target.name}.tmp-*"))
