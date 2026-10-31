@@ -400,6 +400,34 @@ class ObsidianStateTests(unittest.TestCase):
             with self.assertRaises(RuntimeError):
                 self.db.create_session("linked_meta", "discord")
 
+    def test_metadata_symlink_swap_during_open_is_rejected(self):
+        # A path-only symlink check is insufficient when the file changes
+        # immediately before open(). The outside file must never be read.
+        self.db.create_session("swap_meta", "discord")
+        metadata = self.db.root / "swap_meta" / "metadata.json"
+        with tempfile.TemporaryDirectory() as outside:
+            external = Path(outside) / "private.json"
+            original = '{"id": "outside", "messages": []}'
+            external.write_text(original, encoding="utf-8")
+            real_open = os.open
+            swapped = False
+
+            def swap_at_open(path, flags, mode=0o777, *, dir_fd=None):
+                nonlocal swapped
+                if Path(path) == metadata and not swapped:
+                    swapped = True
+                    metadata.unlink()
+                    metadata.symlink_to(external)
+                if dir_fd is None:
+                    return real_open(path, flags, mode)
+                return real_open(path, flags, mode, dir_fd=dir_fd)
+
+            with patch("hermes_obsidian_state.os.open", side_effect=swap_at_open):
+                with self.assertRaisesRegex(RuntimeError, "Unsafe Vault session metadata"):
+                    self.db.get_session("swap_meta")
+            self.assertTrue(swapped)
+            self.assertEqual(external.read_text(encoding="utf-8"), original)
+
     def test_metadata_directory_cannot_be_treated_as_file(self):
         folder = self.db.root / "bad_meta"
         (folder / "metadata.json").mkdir(parents=True)
