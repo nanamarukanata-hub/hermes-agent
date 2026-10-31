@@ -535,7 +535,7 @@ class MemoryManager:
                     provider.name, e,
                 )
 
-    def initialize_all(self, session_id: str, **kwargs) -> None:
+    def initialize_all(self, session_id: str, *, raise_on_failure: bool = False, **kwargs) -> None:
         """Initialize all providers.
 
         Automatically injects ``hermes_home`` into *kwargs* so that every
@@ -553,3 +553,7 @@ class MemoryManager:
                     "Memory provider '%s' initialize failed: %s",
                     provider.name, e,
                 )
+                if raise_on_failure:
+                    raise RuntimeError(
+                        f"Memory provider '{provider.name}' failed to initialize"
+                    ) from e
