@@ -1775,6 +1775,10 @@ class AIAgent:
                     _mp = _load_mem(_mem_provider_name)
                     if _mp and _mp.is_available():
                         self._memory_manager.add_provider(_mp)
+                    else:
+                        raise RuntimeError(
+                            f"Configured memory provider '{_mem_provider_name}' is unavailable"
+                        )
                     if self._memory_manager.providers:
                         _init_kwargs = {
                             "session_id": self.session_id,
@@ -1815,14 +1819,19 @@ class AIAgent:
                             _init_kwargs["agent_workspace"] = "hermes"
                         except Exception:
                             pass
-                        self._memory_manager.initialize_all(**_init_kwargs)
+                        self._memory_manager.initialize_all(
+                            raise_on_failure=True, **_init_kwargs
+                        )
                         logger.info("Memory provider '%s' activated", _mem_provider_name)
                     else:
                         logger.debug("Memory provider '%s' not found or not available", _mem_provider_name)
                         self._memory_manager = None
             except Exception as _mpe:
-                logger.warning("Memory provider plugin init failed: %s", _mpe)
-                self._memory_manager = None
+                # A configured provider is a requested persistence backend.
+                # Do not continue with it silently disabled after failure.
+                raise RuntimeError(
+                    f"Configured memory provider '{_mem_provider_name}' failed to initialize"
+                ) from _mpe
 
         # Inject memory provider tool schemas into the tool surface.
         # Skip tools whose names already exist (plugins may register the
