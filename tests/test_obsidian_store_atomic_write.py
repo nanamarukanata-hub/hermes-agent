@@ -167,9 +167,9 @@ def test_atomic_write_rejects_pinned_parent_after_symlink_swap(tmp_path, monkeyp
     backup = target.parent.with_name("s1-backup")
     original_open = store._open_vault_dir
 
-    def swap_after_open(directory):
-        fd = original_open(directory)
-        if directory == target.parent:
+    def swap_after_open(directory, *, create=True):
+        fd = original_open(directory, create=create)
+        if create and directory == target.parent:
             directory.rename(backup)
             directory.symlink_to(outside, target_is_directory=True)
         return fd
