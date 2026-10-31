@@ -153,7 +153,7 @@ class SyncProvider(FakeProvider):
 
 
 def _run_agent_sync(manager, *, interrupted=False):
-    """Execute the actual AIAgent._sync_memory method without its integrations."""
+    """Execute the actual AIAgent._sync_external_memory_for_turn method without its integrations."""
     source = (Path(__file__).resolve().parents[2] / "run_agent.py").read_text(
         encoding="utf-8"
     )
@@ -164,7 +164,7 @@ def _run_agent_sync(manager, *, interrupted=False):
     )
     method = next(
         node for node in agent.body
-        if isinstance(node, ast.FunctionDef) and node.name == "_sync_memory"
+        if isinstance(node, ast.FunctionDef) and node.name == "_sync_external_memory_for_turn"
     )
     scope = {"Any": object, "logger": logging.getLogger(__name__)}
     exec(
@@ -176,7 +176,7 @@ def _run_agent_sync(manager, *, interrupted=False):
         scope,
     )
     instance = SimpleNamespace(_memory_manager=manager, session_id="session-1")
-    scope["_sync_memory"](
+    scope["_sync_external_memory_for_turn"](
         instance,
         original_user_message="user text",
         final_response="assistant text",
