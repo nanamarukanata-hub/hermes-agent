@@ -394,6 +394,11 @@ class VaultStore:
         return self._locked(_do)
 
     def save_relationship(self, user_id: str, other_id: str, data: dict[str, Any]) -> Path:
+        # Unlike the session and character helpers, this path is constructed
+        # directly below. Validate both components before path construction:
+        # otherwise '..' or slashes could overwrite another Vault document.
+        user_id = validate_id(user_id)
+        other_id = validate_id(other_id)
         payload = json.dumps(data, ensure_ascii=False, indent=2, sort_keys=True)
 
         def _do():
