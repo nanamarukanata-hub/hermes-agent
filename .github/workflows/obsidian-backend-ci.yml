@@ -14,6 +14,7 @@ on:
       - 'hermes_hybrid/session_manager.py'
       - 'hermes_hybrid/gateway_adapter.py'
       - 'hermes_hybrid/vault_kv.py'
+      - 'tests/test_vault_kv_symlink_guards.py'
       - 'tests/gateway/test_discord_thread_persistence.py'
       - 'tests/test_obsidian_session_state.py'
       - 'scripts/migrate_sessions_to_obsidian.py'
@@ -48,6 +49,7 @@ on:
       - 'hermes_hybrid/session_manager.py'
       - 'hermes_hybrid/gateway_adapter.py'
       - 'hermes_hybrid/vault_kv.py'
+      - 'tests/test_vault_kv_symlink_guards.py'
       - 'tests/gateway/test_discord_thread_persistence.py'
       - 'tests/test_obsidian_session_state.py'
       - 'scripts/migrate_sessions_to_obsidian.py'
@@ -98,5 +100,7 @@ jobs:
         run: python -m pytest tests/test_sqlite_audit.py -q
       - name: Holographic memory Vault path and lock regression
         run: python -m pytest tests/test_holographic_vault_paths.py -q
+      - name: Shared VaultDir read and path safety regression
+        run: python -m pytest tests/test_vault_kv_symlink_guards.py -q
       - name: Syntax verification
         run: python -m py_compile hermes_state.py hermes_obsidian_state.py hermes_hybrid/sqlite_audit.py scripts/migrate_sessions_to_obsidian.py scripts/migrate_kanban_to_vault.py scripts/migrate_sqlite_to_vault.py gateway/session.py gateway/platforms/helpers.py
