@@ -40,7 +40,7 @@ import stat
 import json
 import os
 import re
-import tempfile
+import secrets
 import time
 from pathlib import Path
 from typing import Any, Iterable
@@ -117,54 +117,96 @@ class VaultStore:
     def gateway_sessions_path(self) -> Path:
         return self._unified(*_TREE, "GatewayRouting", "sessions.json")
 
-    def _atomic_write(self, path: Path, text: str) -> None:
-        path.parent.mkdir(parents=True, exist_ok=True)
-        # A PID-based name is predictable and can be pre-planted as a symlink.
-        # mkstemp creates a fresh file exclusively in the destination directory.
-        fd, tmp_name = tempfile.mkstemp(prefix=f".{path.name}.tmp-", dir=path.parent)
-        tmp = Path(tmp_name)
-        try:
-            with os.fdopen(fd, "w", encoding="utf-8") as f:
-                f.write(text)
-                f.flush()
-                os.fsync(f.fileno())
-            os.replace(tmp, path)
-        finally:
-            tmp.unlink(missing_ok=True)
+    def _open_vault_dir(self, directory: Path) -> int:
+        """Open a Vault directory through no-follow directory descriptors.
 
-    def _locked(self, fn):
-        # A pre-planted symlink or FIFO must not redirect or block the
-        # shared Vault writer lock. Revalidate its inode after flock too:
-        # a replaced pathname would otherwise let writers use different locks.
-        lock_path = self._unified(*_TREE, ".vault-writer.lock")
-        lock_path.parent.mkdir(parents=True, exist_ok=True)
-        if lock_path.is_symlink():
-            raise ValueError("symlink in vault path is rejected")
+        Do not use a pathname-based mkdir/open sequence here: a symlink
+        planted between validation and file creation could redirect writes.
+        The returned descriptor must be closed by the caller.
+        """
+        parts = directory.relative_to(self.root).parts
+        flags = os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW
+        try:
+            fd = os.open(self.root, flags)
+        except OSError as exc:
+            if exc.errno in (errno.ELOOP, errno.ENOTDIR):
+                raise ValueError("symlink or non-directory in vault path is rejected") from exc
+            raise
+        try:
+            for part in parts:
+                try:
+                    os.mkdir(part, dir_fd=fd)
+                except FileExistsError:
+                    pass
+                try:
+                    next_fd = os.open(part, flags, dir_fd=fd)
+                except OSError as exc:
+                    if exc.errno in (errno.ELOOP, errno.ENOTDIR):
+                        raise ValueError("symlink or non-directory in vault path is rejected") from exc
+                    raise
+                os.close(fd)
+                fd = next_fd
+            return fd
+        except BaseException:
+            os.close(fd)
+            raise
+
+    def _atomic_write(self, path: Path, text: str) -> None:
+        # Pin the parent directory by descriptor so a concurrent symlink
+        # substitution cannot redirect temporary-file creation or replace.
+        dir_fd = self._open_vault_dir(path.parent)
+        tmp_name = f".{path.name}.tmp-{secrets.token_hex(16)}"
         try:
             fd = os.open(
-                lock_path,
-                os.O_RDWR | os.O_CREAT | os.O_NOFOLLOW | os.O_NONBLOCK,
-                0o600,
+                tmp_name, os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW,
+                0o600, dir_fd=dir_fd,
             )
-        except OSError as exc:
-            if exc.errno in (errno.ELOOP, errno.ENXIO):
-                raise ValueError("unsafe vault writer lock") from exc
-            raise
-        # Check the raw descriptor before wrapping it as a seekable text
-        # stream: fdopen("r+") raises on a FIFO before our guard can run.
-        if not stat.S_ISREG(os.fstat(fd).st_mode):
-            os.close(fd)
-            raise ValueError("vault writer lock must be a regular file")
-        with os.fdopen(fd, "r+", encoding="utf-8") as lock:
-            fcntl.flock(lock.fileno(), fcntl.LOCK_EX)
+            with os.fdopen(fd, "w", encoding="utf-8") as stream:
+                stream.write(text)
+                stream.flush()
+                os.fsync(stream.fileno())
+            os.replace(tmp_name, path.name, src_dir_fd=dir_fd, dst_dir_fd=dir_fd)
+            os.fsync(dir_fd)
+        finally:
             try:
-                held = os.fstat(lock.fileno())
-                current = os.stat(lock_path, follow_symlinks=False)
-                if (held.st_dev, held.st_ino) != (current.st_dev, current.st_ino):
-                    raise RuntimeError("vault writer lock changed during acquisition")
-                return fn()
-            finally:
-                fcntl.flock(lock.fileno(), fcntl.LOCK_UN)
+                os.unlink(tmp_name, dir_fd=dir_fd)
+            except FileNotFoundError:
+                pass
+            os.close(dir_fd)
+
+    def _locked(self, fn):
+        # Lock the inode in a pinned Vault directory, not a pathname that
+        # could be swapped to a different directory after validation.
+        lock_path = self._unified(*_TREE, ".vault-writer.lock")
+        dir_fd = self._open_vault_dir(lock_path.parent)
+        try:
+            try:
+                fd = os.open(
+                    lock_path.name,
+                    os.O_RDWR | os.O_CREAT | os.O_NOFOLLOW | os.O_NONBLOCK,
+                    0o600, dir_fd=dir_fd,
+                )
+            except OSError as exc:
+                if exc.errno in (errno.ELOOP, errno.ENXIO):
+                    raise ValueError("unsafe vault writer lock symlink") from exc
+                raise
+            if not stat.S_ISREG(os.fstat(fd).st_mode):
+                os.close(fd)
+                raise ValueError("vault writer lock must be a regular file")
+            with os.fdopen(fd, "r+", encoding="utf-8") as lock:
+                fcntl.flock(lock.fileno(), fcntl.LOCK_EX)
+                try:
+                    held = os.fstat(lock.fileno())
+                    current = os.stat(
+                        lock_path.name, dir_fd=dir_fd, follow_symlinks=False,
+                    )
+                    if (held.st_dev, held.st_ino) != (current.st_dev, current.st_ino):
+                        raise RuntimeError("vault writer lock changed during acquisition")
+                    return fn()
+                finally:
+                    fcntl.flock(lock.fileno(), fcntl.LOCK_UN)
+        finally:
+            os.close(dir_fd)
 
     # -- PR #11 session format ---------------------------------------
     def _render_transcript(self, item: dict[str, Any]) -> str:
