@@ -90,15 +90,32 @@ class VaultDir:
         self._assert_contained()
         self.dir.mkdir(parents=True, exist_ok=True)
         self._assert_contained()
-        # A lock symlink must never redirect the writer outside the Vault.
-        flags = os.O_CREAT | os.O_RDWR | os.O_NOFOLLOW
+        # Do not follow lock symlinks or block on an attacker-created FIFO.
+        flags = os.O_CREAT | os.O_RDWR | os.O_NOFOLLOW | os.O_NONBLOCK | os.O_CLOEXEC
         fd = os.open(self.lock_file, flags, 0o600)
-        with os.fdopen(fd, "a+", encoding="utf-8") as lock:
-            fcntl.flock(lock.fileno(), fcntl.LOCK_EX)
-            try:
-                return fn()
-            finally:
-                fcntl.flock(lock.fileno(), fcntl.LOCK_UN)
+        try:
+            if not stat.S_ISREG(os.fstat(fd).st_mode):
+                raise ValueError("vault lock is not a regular file")
+            with os.fdopen(fd, "a+", encoding="utf-8") as lock:
+                fd = -1  # fdopen owns the descriptor
+                fcntl.flock(lock.fileno(), fcntl.LOCK_EX)
+                try:
+                    # A replaced lock inode can let another process acquire a
+                    # different lock and overwrite our concurrent updates.
+                    opened = os.fstat(lock.fileno())
+                    named = os.stat(self.lock_file, follow_symlinks=False)
+                    if (
+                        (opened.st_dev, opened.st_ino) != (named.st_dev, named.st_ino)
+                        or not stat.S_ISREG(named.st_mode)
+                    ):
+                        raise ValueError("vault lock changed during acquisition")
+                    self._assert_contained()
+                    return fn()
+                finally:
+                    fcntl.flock(lock.fileno(), fcntl.LOCK_UN)
+        finally:
+            if fd >= 0:
+                os.close(fd)
 
     @staticmethod
     def _atomic_write(path: Path, text: str) -> None:
