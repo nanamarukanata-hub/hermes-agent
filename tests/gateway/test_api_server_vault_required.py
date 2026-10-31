@@ -116,3 +116,22 @@ def test_invalid_conversation_index_is_not_overwritten(monkeypatch, tmp_path):
     with pytest.raises(ValueError, match="invalid vault record"):
         store.set_conversation("new", "resp_5")
     assert store._conversations_path.read_text(encoding="utf-8") == '{"chat": '
+
+
+def test_predictable_temp_symlink_cannot_overwrite_external_file(monkeypatch, tmp_path):
+    """A pre-planted legacy PID temp symlink must not redirect index writes."""
+    import os
+
+    monkeypatch.setenv("HERMES_OBSIDIAN_VAULT", str(tmp_path / "vault"))
+    store = ResponseStore()
+    outside = tmp_path / "external.txt"
+    outside.write_text("untouched", encoding="utf-8")
+    legacy_temp = store._conversations_path.with_name(
+        f".conversations.json.tmp-{os.getpid()}"
+    )
+    legacy_temp.symlink_to(outside)
+
+    store.set_conversation("chat", "resp_6")
+    assert store.get_conversation("chat") == "resp_6"
+    assert outside.read_text(encoding="utf-8") == "untouched"
+    assert legacy_temp.is_symlink()
