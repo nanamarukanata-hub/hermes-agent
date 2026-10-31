@@ -120,14 +120,23 @@ class SessionDB:
         # Check the opened inode, not just the pathname: a symlink can be
         # swapped in after an is_symlink() check but before read_text().
         try:
-            fd = os.open(metadata, os.O_RDONLY | os.O_NOFOLLOW | os.O_CLOEXEC)
+            fd = os.open(
+                metadata, os.O_RDONLY | os.O_NOFOLLOW | os.O_CLOEXEC | os.O_NONBLOCK
+            )
         except FileNotFoundError:
             return None
         except OSError as exc:
             raise RuntimeError(f"Unsafe Vault session metadata: {sid}") from exc
-        with os.fdopen(fd, "r", encoding="utf-8") as stream:
-            if not stat.S_ISREG(os.fstat(stream.fileno()).st_mode):
+        # Validate the descriptor before fdopen: wrapping a directory as a
+        # text stream raises IsADirectoryError rather than our fail-closed
+        # RuntimeError. O_NONBLOCK also prevents a FIFO from hanging reads.
+        try:
+            if not stat.S_ISREG(os.fstat(fd).st_mode):
                 raise RuntimeError(f"Invalid Vault session metadata: {sid}")
+        except BaseException:
+            os.close(fd)
+            raise
+        with os.fdopen(fd, "r", encoding="utf-8") as stream:
             return json.load(stream)
 
     def _save(self, sid, item):
