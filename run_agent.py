@@ -4951,10 +4951,10 @@ class AIAgent:
         the same intent, and a prefetch keyed on the interrupted turn
         would fire against stale context.
 
-        Normal completed turns still sync as before.  The whole body is
-        wrapped in ``try/except Exception`` because external memory
-        providers are strictly best-effort — a misconfigured or offline
-        backend must not block the user from seeing their response.
+        A completed turn requests strict sync error reporting.  Memory
+        provider failures are logged with their traceback, but do not block
+        the user from seeing the response.  A failed sync does not trigger
+        prefetch for that turn.
         """
         if interrupted:
             return
@@ -4964,13 +4964,18 @@ class AIAgent:
             self._memory_manager.sync_all(
                 original_user_message, final_response,
                 session_id=self.session_id or "",
+                raise_on_failure=True,
             )
             self._memory_manager.queue_prefetch_all(
                 original_user_message,
                 session_id=self.session_id or "",
             )
         except Exception:
-            pass
+            logger.error(
+                "Memory provider turn sync failed for session %s",
+                self.session_id,
+                exc_info=True,
+            )
 
     def release_clients(self) -> None:
         """Release LLM client resources WITHOUT tearing down session tool state.
