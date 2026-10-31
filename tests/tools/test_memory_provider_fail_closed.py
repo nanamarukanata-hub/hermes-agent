@@ -135,3 +135,97 @@ def test_skip_memory_does_not_initialize_provider(monkeypatch):
     instance = _run_agent_provider_init(monkeypatch, provider, skip=True)
     assert instance._memory_manager is None
     assert not provider.initialized
+
+
+class SyncProvider(FakeProvider):
+    def __init__(self, *, fail_sync=False):
+        super().__init__()
+        self.fail_sync = fail_sync
+        self.events = []
+
+    def sync_turn(self, user_content, assistant_content, *, session_id=""):
+        self.events.append(("sync", session_id))
+        if self.fail_sync:
+            raise OSError("vault write unavailable")
+
+    def queue_prefetch(self, query, *, session_id=""):
+        self.events.append(("prefetch", session_id))
+
+
+def _run_agent_sync(manager, *, interrupted=False):
+    """Execute the actual AIAgent._sync_memory method without its integrations."""
+    source = (Path(__file__).resolve().parents[2] / "run_agent.py").read_text(
+        encoding="utf-8"
+    )
+    tree = ast.parse(source)
+    agent = next(
+        node for node in tree.body
+        if isinstance(node, ast.ClassDef) and node.name == "AIAgent"
+    )
+    method = next(
+        node for node in agent.body
+        if isinstance(node, ast.FunctionDef) and node.name == "_sync_memory"
+    )
+    scope = {"Any": object, "logger": logging.getLogger(__name__)}
+    exec(
+        compile(
+            ast.fix_missing_locations(ast.Module(body=[method], type_ignores=[])),
+            "<memory-sync>",
+            "exec",
+        ),
+        scope,
+    )
+    instance = SimpleNamespace(_memory_manager=manager, session_id="session-1")
+    scope["_sync_memory"](
+        instance,
+        original_user_message="user text",
+        final_response="assistant text",
+        interrupted=interrupted,
+    )
+
+
+def test_manager_default_sync_keeps_best_effort_compatibility(caplog):
+    provider = SyncProvider(fail_sync=True)
+    manager = MemoryManager()
+    manager.add_provider(provider)
+    manager.sync_all("user", "assistant", session_id="session-1")
+    assert provider.events == [("sync", "session-1")]
+    assert "sync_turn failed" in caplog.text
+
+
+def test_manager_strict_sync_propagates_write_failure():
+    manager = MemoryManager()
+    manager.add_provider(SyncProvider(fail_sync=True))
+    with pytest.raises(RuntimeError, match="failed to sync turn"):
+        manager.sync_all(
+            "user", "assistant", session_id="session-1", raise_on_failure=True
+        )
+
+
+def test_agent_failed_sync_is_logged_without_prefetch(caplog):
+    provider = SyncProvider(fail_sync=True)
+    manager = MemoryManager()
+    manager.add_provider(provider)
+    with caplog.at_level(logging.ERROR):
+        _run_agent_sync(manager)
+    assert "Memory provider turn sync failed" in caplog.text
+    assert "vault write unavailable" in caplog.text
+    assert provider.events == [("sync", "session-1")]
+
+
+def test_agent_successful_sync_prefetches_next_turn():
+    provider = SyncProvider()
+    manager = MemoryManager()
+    manager.add_provider(provider)
+    _run_agent_sync(manager)
+    assert provider.events == [
+        ("sync", "session-1"), ("prefetch", "session-1")
+    ]
+
+
+def test_agent_interrupted_turn_skips_sync_and_prefetch():
+    provider = SyncProvider()
+    manager = MemoryManager()
+    manager.add_provider(provider)
+    _run_agent_sync(manager, interrupted=True)
+    assert provider.events == []
