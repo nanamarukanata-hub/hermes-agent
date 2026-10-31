@@ -132,8 +132,9 @@ class VaultDir:
             if os.path.lexists(tmp):
                 os.unlink(tmp)
 
-    def read(self, record_id: str) -> dict[str, Any] | None:
-        p = self.path(record_id)
+    @staticmethod
+    def _read_regular_json(p: Path) -> dict[str, Any] | None:
+        """Read a JSON object without following a replaced final-component link."""
         # A pathname symlink check followed by read_text() is racy. Open the
         # final component without following links; O_NONBLOCK also prevents
         # an attacker-controlled FIFO from hanging a gateway worker.
@@ -154,6 +155,9 @@ class VaultDir:
             if fd >= 0:
                 os.close(fd)
         return data if isinstance(data, dict) else None
+
+    def read(self, record_id: str) -> dict[str, Any] | None:
+        return self._read_regular_json(self.path(record_id))
 
     def write(self, record_id: str, data: dict[str, Any]) -> None:
         text = json.dumps(data, indent=2, ensure_ascii=False) + "\n"
@@ -225,11 +229,23 @@ class VaultDir:
             if counter.is_symlink():
                 raise ValueError("symlink in vault path is rejected")
             current = 0
-            if counter.exists():
-                try:
-                    current = int(json.loads(counter.read_text(encoding="utf-8")).get("next", 0))
-                except (OSError, ValueError, json.JSONDecodeError, AttributeError):
-                    current = 0
+            if os.path.lexists(counter):
+                # The counter is authoritative: never reset a present but
+                # unreadable file and risk reissuing a previously allocated ID.
+                # Reuse the O_NOFOLLOW reader to reject open-time link swaps.
+                record = self._read_regular_json(counter)
+                if record is None:
+                    raise ValueError(f"invalid vault counter: {counter_name!r}")
+                value = record.get("next")
+                if (
+                    isinstance(value, bool)
+                    or not isinstance(value, (int, str))
+                    or (isinstance(value, str) and not value.isdecimal())
+                ):
+                    raise ValueError(f"invalid vault counter: {counter_name!r}")
+                current = int(value)
+                if current < 0:
+                    raise ValueError(f"invalid vault counter: {counter_name!r}")
             if current == 0:
                 for record_id in self.list_ids():
                     if record_id.isdigit():
