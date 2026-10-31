@@ -70,5 +70,58 @@ class KanbanVaultMetadataTests(unittest.TestCase):
                 self.assertFalse(outside.exists())
 
 
+    def test_selector_open_time_symlink_swap_does_not_overwrite_outside(self):
+        with tempfile.TemporaryDirectory() as root:
+            vault = Path(root) / "vault"
+            outside = Path(root) / "outside-selector"
+            vault.mkdir()
+            outside.write_text("untouched", encoding="utf-8")
+            with patch.dict(os.environ, {"HERMES_OBSIDIAN_VAULT": str(vault)}, clear=True):
+                original_replace = os.replace
+
+                def swap_before_replace(src, dst):
+                    Path(dst).symlink_to(outside)
+                    return original_replace(src, dst)
+
+                with patch.object(kb.os, "replace", side_effect=swap_before_replace):
+                    selector = kb.set_current_board("default")
+                self.assertEqual(outside.read_text(encoding="utf-8"), "untouched")
+                self.assertFalse(selector.is_symlink())
+                self.assertEqual(selector.read_text(encoding="utf-8"), "default\\n")
+
+    def test_metadata_open_time_symlink_swap_does_not_overwrite_outside(self):
+        with tempfile.TemporaryDirectory() as root:
+            vault = Path(root) / "vault"
+            outside = Path(root) / "outside-board.json"
+            vault.mkdir()
+            outside.write_text("untouched", encoding="utf-8")
+            with patch.dict(os.environ, {"HERMES_OBSIDIAN_VAULT": str(vault)}, clear=True):
+                original_replace = os.replace
+
+                def swap_before_replace(src, dst):
+                    Path(dst).symlink_to(outside)
+                    return original_replace(src, dst)
+
+                with patch.object(kb.os, "replace", side_effect=swap_before_replace):
+                    meta = kb.write_board_metadata("test", name="Protected")
+                path = kb.board_metadata_path("test")
+                self.assertEqual(outside.read_text(encoding="utf-8"), "untouched")
+                self.assertFalse(path.is_symlink())
+                self.assertEqual(meta["name"], "Protected")
+                self.assertEqual(__import__("json").loads(path.read_text(encoding="utf-8"))["name"], "Protected")
+
+    def test_failed_atomic_replace_cleans_temporary_file(self):
+        with tempfile.TemporaryDirectory() as root:
+            vault = Path(root) / "vault"
+            vault.mkdir()
+            with patch.dict(os.environ, {"HERMES_OBSIDIAN_VAULT": str(vault)}, clear=True):
+                selector = kb.current_board_path()
+                with patch.object(kb.os, "replace", side_effect=OSError("injected failure")):
+                    with self.assertRaisesRegex(OSError, "injected failure"):
+                        kb.set_current_board("default")
+                self.assertFalse(selector.exists())
+                self.assertEqual(list(selector.parent.glob(".current-board.tmp-*")), [])
+
+
 if __name__ == "__main__":
     unittest.main()
