@@ -150,9 +150,12 @@ class VaultStore:
             if exc.errno in (errno.ELOOP, errno.ENXIO):
                 raise ValueError("unsafe vault writer lock") from exc
             raise
+        # Check the raw descriptor before wrapping it as a seekable text
+        # stream: fdopen("r+") raises on a FIFO before our guard can run.
+        if not stat.S_ISREG(os.fstat(fd).st_mode):
+            os.close(fd)
+            raise ValueError("vault writer lock must be a regular file")
         with os.fdopen(fd, "r+", encoding="utf-8") as lock:
-            if not stat.S_ISREG(os.fstat(lock.fileno()).st_mode):
-                raise ValueError("vault writer lock must be a regular file")
             fcntl.flock(lock.fileno(), fcntl.LOCK_EX)
             try:
                 held = os.fstat(lock.fileno())
