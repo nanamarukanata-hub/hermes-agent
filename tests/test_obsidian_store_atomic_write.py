@@ -107,3 +107,32 @@ def test_writer_lock_inode_swap_after_flock_aborts_write(tmp_path, monkeypatch):
 
     assert replaced
     assert not store.session_path("s1").exists()
+
+
+@pytest.mark.parametrize(
+    ("user_id", "other_id"),
+    [
+        ("..", "Sessions/s1/metadata"),
+        ("alice", "../Sessions/s1/metadata"),
+        ("../Sessions", "s1/metadata"),
+        ("alice", "x/y"),
+        ("alice", ".."),
+    ],
+)
+def test_relationship_path_components_cannot_escape_namespace(tmp_path, user_id, other_id):
+    store = VaultStore(tmp_path / "vault")
+    store.save_session("alice", "s1", {"messages": [{"role": "user", "content": "keep"}]})
+    session_path = store.session_path("s1")
+    original = session_path.read_bytes()
+
+    with pytest.raises(ValueError, match="invalid identifier"):
+        store.save_relationship(user_id, other_id, {"messages": [], "user_id": "mallory"})
+
+    assert session_path.read_bytes() == original
+
+
+def test_relationship_valid_ids_still_roundtrip(tmp_path):
+    store = VaultStore(tmp_path / "vault")
+    saved = store.save_relationship("alice_1", "bob-2", {"score": 3})
+    assert saved.is_file()
+    assert store.load_document("Relationships", "alice_1", "bob-2") == {"score": 3}
