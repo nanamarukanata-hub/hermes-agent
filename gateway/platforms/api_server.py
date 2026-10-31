@@ -338,20 +338,9 @@ class ResponseStore:
         self._conversations_path = self._store.dir / "conversations.json"
 
     def _conversations(self) -> Dict[str, str]:
-        try:
-            data = json.loads(self._conversations_path.read_text(encoding="utf-8"))
-        except (OSError, json.JSONDecodeError):
-            return {}
-        return data if isinstance(data, dict) else {}
-
-    def _save_conversations(self, mapping: Dict[str, str]) -> None:
-        self._store.dir.mkdir(parents=True, exist_ok=True)
-        tmp = self._conversations_path.with_name(f".conversations.json.tmp-{os.getpid()}")
-        with open(tmp, "w", encoding="utf-8") as f:
-            f.write(json.dumps(mapping, indent=2, ensure_ascii=False) + "\n")
-            f.flush()
-            os.fsync(f.fileno())
-        os.replace(tmp, self._conversations_path)
+        # VaultDir.read refuses symlinked records and does not follow a
+        # substituted final-component symlink between check and open.
+        return self._store.read("conversations") or {}
 
     def get(self, response_id: str) -> Optional[Dict[str, Any]]:
         """Retrieve a stored response by ID (updates access time for LRU)."""
@@ -391,10 +380,11 @@ class ResponseStore:
         return self._conversations().get(name)
 
     def set_conversation(self, name: str, response_id: str) -> None:
-        """Map a conversation name to its latest response_id."""
-        mapping = self._conversations()
-        mapping[name] = response_id
-        self._save_conversations(mapping)
+        """Map a name to its latest response without losing concurrent writes."""
+        self._store.update(
+            "conversations",
+            lambda mapping: {**mapping, name: response_id},
+        )
 
     def close(self) -> None:
         """Close the store (removes a temporary in-memory directory)."""
