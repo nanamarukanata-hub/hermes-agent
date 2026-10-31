@@ -1,7 +1,5 @@
 """Curated MEMORY.md/USER.md must persist exclusively inside the Obsidian Vault."""
 
-from pathlib import Path
-
 import pytest
 
 from tools.memory_tool import MemoryStore, get_memory_dir
