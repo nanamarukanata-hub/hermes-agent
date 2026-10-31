@@ -16,6 +16,9 @@ from hermes_hybrid.sqlite_audit import audit
     "module = __import__('aiosqlite')\n",
     "import importlib as il\nconn = il.import_module('sqlite3')\n",
     "from importlib import import_module as load\nconn = load('aiosqlite')\n",
+    "import importlib\nconn = importlib.import_module(name='sqlite3')\n",
+    "conn = __import__(name='aiosqlite')\n",
+    "from importlib import import_module as load\nconn = load(name='sqlite3')\n",
 ])
 def test_detects_nested_aliased_and_dynamic_imports(tmp_path, source):
     path = tmp_path / "runtime.py"
@@ -30,6 +33,9 @@ def test_detects_nested_aliased_and_dynamic_imports(tmp_path, source):
     "import sqlalchemy as sa\ndb = sa.create_engine('sqlite:///:memory:')\n",
     "from sqlalchemy.ext.asyncio import create_async_engine as ae\ndb = ae('sqlite+aiosqlite:///session.db')\n",
     "import sqlalchemy.ext.asyncio as sa\ndb = sa.create_async_engine('sqlite+aiosqlite:///session.db')\n",
+    "from sqlalchemy import create_engine\ndb = create_engine(url='sqlite:///session.db')\n",
+    "import sqlalchemy\ndb = sqlalchemy.ext.asyncio.create_async_engine('sqlite+aiosqlite:///session.db')\n",
+    "import sqlalchemy.ext.asyncio\ndb = sqlalchemy.ext.asyncio.create_async_engine(url='sqlite+aiosqlite:///session.db')\n",
 ])
 def test_sqlalchemy_sqlite_engine_without_sqlite_import_is_detected(tmp_path, source):
     path = tmp_path / "runtime.py"
@@ -41,6 +47,8 @@ def test_sqlalchemy_sqlite_engine_without_sqlite_import_is_detected(tmp_path, so
     "from sqlalchemy import create_engine\ndb = create_engine('postgresql+psycopg://localhost/db')\n",
     "example = 'sqlite:///session.db'\n",
     "def create_engine(url): return url\ndb = create_engine('sqlite:///not_sqlalchemy.db')\n",
+    "from sqlalchemy import create_engine\ndb = create_engine(url='postgresql://localhost/db')\n",
+    "def create_engine(url): return url\ndb = create_engine(url='sqlite:///not_sqlalchemy.db')\n",
 ])
 def test_sqlalchemy_audit_avoids_unrelated_strings_and_engines(tmp_path, source):
     path = tmp_path / "runtime.py"
