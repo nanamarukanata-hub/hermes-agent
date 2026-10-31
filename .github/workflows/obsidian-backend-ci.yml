@@ -34,6 +34,8 @@ on:
       - 'tests/test_kanban_vault_metadata.py'
       - 'tests/test_kanban_vault_runtime_paths.py'
       - 'hermes_hybrid/sqlite_audit.py'
+      - 'tools/memory_tool.py'
+      - 'tests/tools/test_memory_tool_vault_required.py'
       - 'hermes_hybrid/deep_memory.py'
       - 'tests/test_deep_memory.py'
       - 'tests/test_obsidian_store_atomic_write.py'
@@ -75,6 +77,8 @@ on:
       - 'tests/test_kanban_vault_metadata.py'
       - 'tests/test_kanban_vault_runtime_paths.py'
       - 'hermes_hybrid/sqlite_audit.py'
+      - 'tools/memory_tool.py'
+      - 'tests/tools/test_memory_tool_vault_required.py'
       - 'hermes_hybrid/deep_memory.py'
       - 'tests/test_deep_memory.py'
       - 'tests/test_obsidian_store_atomic_write.py'
@@ -110,6 +114,8 @@ jobs:
         run: python -m pytest tests/gateway/test_discord_thread_persistence.py -q -k 'symlinked_vault_parent_rejected_before_mkdir or regular_file_blocks_vault_thread_directory'
       - name: Runtime SQLite audit regression
         run: python -m pytest tests/test_sqlite_audit.py -q
+      - name: Curated memory Vault-only persistence regression
+        run: python -m pytest tests/tools/test_memory_tool_vault_required.py -q
       - name: Deep memory Vault atomic write regression
         run: python -m pytest tests/test_deep_memory.py -q
       - name: Hybrid Obsidian Vault atomic write regression
