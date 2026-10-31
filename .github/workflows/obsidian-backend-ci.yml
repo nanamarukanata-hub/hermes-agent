@@ -37,6 +37,8 @@ on:
       - 'tools/memory_tool.py'
       - 'tests/tools/test_memory_tool_vault_required.py'
       - 'tests/tools/test_agent_curated_memory_init.py'
+      - 'tests/tools/test_memory_provider_fail_closed.py'
+      - 'agent/memory_manager.py'
       - 'run_agent.py'
       - 'hermes_hybrid/deep_memory.py'
       - 'tests/test_deep_memory.py'
@@ -82,6 +84,8 @@ on:
       - 'tools/memory_tool.py'
       - 'tests/tools/test_memory_tool_vault_required.py'
       - 'tests/tools/test_agent_curated_memory_init.py'
+      - 'tests/tools/test_memory_provider_fail_closed.py'
+      - 'agent/memory_manager.py'
       - 'run_agent.py'
       - 'hermes_hybrid/deep_memory.py'
       - 'tests/test_deep_memory.py'
@@ -122,6 +126,8 @@ jobs:
         run: python -m pytest tests/tools/test_memory_tool_vault_required.py -q
       - name: Agent curated memory fail-closed startup regression
         run: python -m pytest tests/tools/test_agent_curated_memory_init.py -q
+      - name: Configured memory provider fail-closed startup regression
+        run: python -m pytest tests/tools/test_memory_provider_fail_closed.py -q
       - name: Deep memory Vault atomic write regression
         run: python -m pytest tests/test_deep_memory.py -q
       - name: Hybrid Obsidian Vault atomic write regression
