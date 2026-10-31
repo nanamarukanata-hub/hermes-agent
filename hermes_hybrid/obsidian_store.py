@@ -38,6 +38,7 @@ import fcntl
 import json
 import os
 import re
+import tempfile
 import time
 from pathlib import Path
 from typing import Any, Iterable
@@ -116,12 +117,18 @@ class VaultStore:
 
     def _atomic_write(self, path: Path, text: str) -> None:
         path.parent.mkdir(parents=True, exist_ok=True)
-        tmp = path.with_name(f".{path.name}.tmp-{os.getpid()}")
-        with open(tmp, "w", encoding="utf-8") as f:
-            f.write(text)
-            f.flush()
-            os.fsync(f.fileno())
-        os.replace(tmp, path)
+        # A PID-based name is predictable and can be pre-planted as a symlink.
+        # mkstemp creates a fresh file exclusively in the destination directory.
+        fd, tmp_name = tempfile.mkstemp(prefix=f".{path.name}.tmp-", dir=path.parent)
+        tmp = Path(tmp_name)
+        try:
+            with os.fdopen(fd, "w", encoding="utf-8") as f:
+                f.write(text)
+                f.flush()
+                os.fsync(f.fileno())
+            os.replace(tmp, path)
+        finally:
+            tmp.unlink(missing_ok=True)
 
     def _locked(self, fn):
         self.lock_file.parent.mkdir(parents=True, exist_ok=True)
