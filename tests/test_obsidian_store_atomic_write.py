@@ -39,7 +39,7 @@ def test_replace_failure_keeps_original_and_removes_temp(tmp_path, monkeypatch):
     target = store.session_path("s1")
     before = target.read_text(encoding="utf-8")
 
-    def fail_replace(source, destination):
+    def fail_replace(source, destination, **kwargs):
         raise OSError("simulated atomic replace failure")
 
     monkeypatch.setattr(obsidian_store.os, "replace", fail_replace)
@@ -136,3 +136,64 @@ def test_relationship_valid_ids_still_roundtrip(tmp_path):
     saved = store.save_relationship("alice_1", "bob-2", {"score": 3})
     assert saved.is_file()
     assert store.load_document("Relationships", "alice_1", "bob-2") == {"score": 3}
+
+
+def test_atomic_write_rejects_parent_swapped_to_symlink_before_open(tmp_path, monkeypatch):
+    store = VaultStore(tmp_path / "vault")
+    target = store.session_path("s1")
+    target.parent.mkdir(parents=True)
+    outside = tmp_path / "outside"
+    outside.mkdir()
+    original_open = store._open_vault_dir
+
+    def swap_before_open(directory):
+        if directory == target.parent:
+            directory.rename(directory.with_name("s1-backup"))
+            directory.symlink_to(outside, target_is_directory=True)
+        return original_open(directory)
+
+    monkeypatch.setattr(store, "_open_vault_dir", swap_before_open)
+    with pytest.raises(ValueError, match="symlink"):
+        store._atomic_write(target, "test")
+    assert list(outside.iterdir()) == []
+
+
+def test_atomic_write_uses_pinned_parent_after_symlink_swap(tmp_path, monkeypatch):
+    store = VaultStore(tmp_path / "vault")
+    target = store.session_path("s1")
+    target.parent.mkdir(parents=True)
+    outside = tmp_path / "outside"
+    outside.mkdir()
+    backup = target.parent.with_name("s1-backup")
+    original_open = store._open_vault_dir
+
+    def swap_after_open(directory):
+        fd = original_open(directory)
+        if directory == target.parent:
+            directory.rename(backup)
+            directory.symlink_to(outside, target_is_directory=True)
+        return fd
+
+    monkeypatch.setattr(store, "_open_vault_dir", swap_after_open)
+    store._atomic_write(target, "pinned")
+    assert list(outside.iterdir()) == []
+    assert (backup / target.name).read_text(encoding="utf-8") == "pinned"
+
+
+def test_writer_lock_rejects_parent_swapped_to_symlink(tmp_path, monkeypatch):
+    store = VaultStore(tmp_path / "vault")
+    store.tree.mkdir(parents=True)
+    outside = tmp_path / "outside"
+    outside.mkdir()
+    original_open = store._open_vault_dir
+
+    def swap_before_open(directory):
+        if directory == store.tree:
+            directory.rename(directory.with_name("Hermes-backup"))
+            directory.symlink_to(outside, target_is_directory=True)
+        return original_open(directory)
+
+    monkeypatch.setattr(store, "_open_vault_dir", swap_before_open)
+    with pytest.raises(ValueError, match="symlink"):
+        store._locked(lambda: None)
+    assert list(outside.iterdir()) == []
