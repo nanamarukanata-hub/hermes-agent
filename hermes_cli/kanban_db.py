@@ -177,7 +177,7 @@ def set_current_board(slug: str) -> Path:
         raise ValueError("board slug is required")
     path = current_board_path()
     path.parent.mkdir(parents=True, exist_ok=True)
-    path.write_text(normed + "\n", encoding="utf-8")
+    _write_vault_text_atomic(path, normed + "\n")
     return path
 
 
@@ -306,6 +306,30 @@ def _checked_kanban_file(path: Path) -> Path:
     return path
 
 
+def _write_vault_text_atomic(path: Path, text: str) -> None:
+    """Atomically replace Vault metadata without following a swapped file link.
+
+    A plain Path.write_text() follows a final-component symlink introduced
+    after the containment check, potentially overwriting a file outside Vault.
+    A random exclusive temporary file and os.replace() replace the directory
+    entry itself rather than opening the existing destination for writing.
+    """
+    import tempfile
+
+    _checked_kanban_file(path)
+    fd, temporary = tempfile.mkstemp(prefix=f".{path.name}.tmp-", dir=path.parent)
+    try:
+        with os.fdopen(fd, "w", encoding="utf-8") as stream:
+            stream.write(text)
+            stream.flush()
+            os.fsync(stream.fileno())
+        _checked_kanban_file(path)
+        os.replace(temporary, path)
+    finally:
+        if os.path.lexists(temporary):
+            os.unlink(temporary)
+
+
 def board_metadata_path(board: Optional[str] = None) -> Path:
     """Keep board metadata in the same Vault directory as its task store."""
     slug = _normalize_board_slug(board) or DEFAULT_BOARD
@@ -369,9 +393,8 @@ def write_board_metadata(
         meta["created_at"] = int(time.time())
     path = board_metadata_path(slug)
     path.parent.mkdir(parents=True, exist_ok=True)
-    path.write_text(
-        json.dumps(meta, indent=2, ensure_ascii=False) + "\n",
-        encoding="utf-8",
+    _write_vault_text_atomic(
+        path, json.dumps(meta, indent=2, ensure_ascii=False) + "\n"
     )
     meta["db_path"] = str(kanban_db_path(slug))
     return meta
