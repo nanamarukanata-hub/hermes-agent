@@ -48,3 +48,62 @@ def test_replace_failure_keeps_original_and_removes_temp(tmp_path, monkeypatch):
 
     assert target.read_text(encoding="utf-8") == before
     assert list(target.parent.glob(f".{target.name}.tmp-*")) == []
+
+
+def test_writer_lock_symlink_cannot_target_outside_vault(tmp_path):
+    store = VaultStore(tmp_path / "vault")
+    store.lock_file.parent.mkdir(parents=True)
+    outside = tmp_path / "outside.txt"
+    outside.write_text("unchanged", encoding="utf-8")
+    store.lock_file.symlink_to(outside)
+
+    with pytest.raises(ValueError, match="symlink"):
+        store.save_session("alice", "s1", {"messages": []})
+
+    assert outside.read_text(encoding="utf-8") == "unchanged"
+    assert not store.session_path("s1").exists()
+
+
+def test_writer_lock_rejects_symlinked_parent(tmp_path):
+    store = VaultStore(tmp_path / "vault")
+    outside = tmp_path / "outside"
+    outside.mkdir()
+    (store.root / "06_Automation").symlink_to(outside, target_is_directory=True)
+
+    with pytest.raises(ValueError, match="symlink"):
+        store.save_session("alice", "s1", {"messages": []})
+
+    assert list(outside.iterdir()) == []
+
+
+def test_writer_lock_rejects_fifo_without_blocking(tmp_path):
+    store = VaultStore(tmp_path / "vault")
+    store.lock_file.parent.mkdir(parents=True)
+    os.mkfifo(store.lock_file)
+
+    with pytest.raises(ValueError, match="regular file"):
+        store.save_session("alice", "s1", {"messages": []})
+
+    assert not store.session_path("s1").exists()
+
+
+def test_writer_lock_inode_swap_after_flock_aborts_write(tmp_path, monkeypatch):
+    store = VaultStore(tmp_path / "vault")
+    original_flock = obsidian_store.fcntl.flock
+    replaced = False
+
+    def swap_after_lock(fd, operation):
+        nonlocal replaced
+        original_flock(fd, operation)
+        if operation == obsidian_store.fcntl.LOCK_EX and not replaced:
+            replaced = True
+            replacement = store.tree / ".replacement-lock"
+            replacement.write_text("replacement", encoding="utf-8")
+            os.replace(replacement, store.lock_file)
+
+    monkeypatch.setattr(obsidian_store.fcntl, "flock", swap_after_lock)
+    with pytest.raises(RuntimeError, match="changed during acquisition"):
+        store.save_session("alice", "s1", {"messages": []})
+
+    assert replaced
+    assert not store.session_path("s1").exists()
