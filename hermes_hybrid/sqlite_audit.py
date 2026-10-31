@@ -55,8 +55,14 @@ def _uses_sqlite(source: str, filename: str) -> bool:
         elif isinstance(node, ast.ImportFrom):
             if node.module and node.module.split(".", 1)[0] in _SQLITE_MODULES:
                 return True
-        elif isinstance(node, ast.Call) and node.args:
-            first = node.args[0]
+        elif isinstance(node, ast.Call):
+            # Both importlib and SQLAlchemy accept the relevant argument by
+            # keyword. An audit must not miss import_module(name="sqlite3")
+            # or create_engine(url="sqlite:///memory.db").
+            first = node.args[0] if node.args else next(
+                (kw.value for kw in node.keywords if kw.arg in {"name", "url"}),
+                None,
+            )
             if not isinstance(first, ast.Constant) or not isinstance(first.value, str):
                 continue
             module = first.value.split(".", 1)[0]
@@ -72,9 +78,14 @@ def _uses_sqlite(source: str, filename: str) -> bool:
             if first.value.startswith(("sqlite:", "sqlite+")) and "://" in first.value:
                 if isinstance(func, ast.Name) and func.id in engine_names:
                     return True
-                if (isinstance(func, ast.Attribute) and func.attr in _ENGINE_FACTORIES
-                        and isinstance(func.value, ast.Name) and func.value.id in sqlalchemy_names):
-                    return True
+                if isinstance(func, ast.Attribute) and func.attr in _ENGINE_FACTORIES:
+                    # Support both sqlalchemy.create_engine(...) and the
+                    # nested sqlalchemy.ext.asyncio.create_async_engine(...).
+                    root = func.value
+                    while isinstance(root, ast.Attribute):
+                        root = root.value
+                    if isinstance(root, ast.Name) and root.id in sqlalchemy_names:
+                        return True
     return False
 
 
