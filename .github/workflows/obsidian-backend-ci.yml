@@ -10,6 +10,9 @@ on:
       - 'gateway/platforms/helpers.py'
       - 'gateway/run.py'
       - 'gateway/platforms/discord.py'
+      - 'gateway/platforms/api_server.py'
+      - 'tests/gateway/conftest.py'
+      - 'tests/gateway/test_api_server_vault_required.py'
       - 'hermes_hybrid/obsidian_store.py'
       - 'hermes_hybrid/session_manager.py'
       - 'hermes_hybrid/gateway_adapter.py'
@@ -45,6 +48,9 @@ on:
       - 'gateway/platforms/helpers.py'
       - 'gateway/run.py'
       - 'gateway/platforms/discord.py'
+      - 'gateway/platforms/api_server.py'
+      - 'tests/gateway/conftest.py'
+      - 'tests/gateway/test_api_server_vault_required.py'
       - 'hermes_hybrid/obsidian_store.py'
       - 'hermes_hybrid/session_manager.py'
       - 'hermes_hybrid/gateway_adapter.py'
@@ -80,7 +86,7 @@ jobs:
         with:
           python-version: '3.11'
       - name: Install minimal gateway import dependency
-        run: python -m pip install PyYAML pytest pytest-xdist
+        run: python -m pip install PyYAML pytest pytest-xdist aiohttp
       - name: SQLite-free backend regression
         # -t . keeps tests/gateway from shadowing the real gateway package.
         run: python -m unittest discover -s tests -t . -p 'test_obsidian_session_state.py' -v
@@ -102,5 +108,7 @@ jobs:
         run: python -m pytest tests/test_holographic_vault_paths.py -q
       - name: Shared VaultDir read and path safety regression
         run: python -m pytest tests/test_vault_kv_symlink_guards.py -q
+      - name: API response Vault-only persistence regression
+        run: python -m pytest tests/gateway/test_api_server_vault_required.py -q
       - name: Syntax verification
-        run: python -m py_compile hermes_state.py hermes_obsidian_state.py hermes_hybrid/sqlite_audit.py scripts/migrate_sessions_to_obsidian.py scripts/migrate_kanban_to_vault.py scripts/migrate_sqlite_to_vault.py gateway/session.py gateway/platforms/helpers.py
+        run: python -m py_compile hermes_state.py hermes_obsidian_state.py hermes_hybrid/sqlite_audit.py scripts/migrate_sessions_to_obsidian.py scripts/migrate_kanban_to_vault.py scripts/migrate_sqlite_to_vault.py gateway/session.py gateway/platforms/helpers.py gateway/platforms/api_server.py
