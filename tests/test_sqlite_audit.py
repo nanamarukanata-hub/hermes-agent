@@ -155,3 +155,24 @@ def test_core_runtime_modules_do_not_import_sqlite(relative_path):
     assert not _uses_sqlite(path.read_text(encoding="utf-8"), str(path)), (
         f"SQLite runtime import reintroduced in {relative_path}"
     )
+
+@pytest.mark.parametrize("module", [
+    "pysqlite3", "pysqlite3.dbapi2", "apsw", "sqlcipher3", "pysqlcipher3",
+])
+def test_third_party_sqlite_drivers_cannot_bypass_runtime_audit(tmp_path, module):
+    """Alternative SQLite/SQLCipher DB-API drivers must fail the Vault-only audit."""
+    path = tmp_path / "runtime.py"
+    path.write_text(f"import {module}\n", encoding="utf-8")
+    assert audit(tmp_path)["sqlite_imports"] == [str(path)]
+
+
+@pytest.mark.parametrize("source", [
+    "from pysqlite3 import dbapi2 as sqlite\n",
+    "import importlib\nconn = importlib.import_module('apsw')\n",
+    "from importlib import import_module as load\nconn = load('sqlcipher3')\n",
+])
+def test_dynamic_and_from_imports_of_alternative_sqlite_drivers(tmp_path, source):
+    path = tmp_path / "runtime.py"
+    path.write_text(source, encoding="utf-8")
+    assert audit(tmp_path)["sqlite_imports"] == [str(path)]
+

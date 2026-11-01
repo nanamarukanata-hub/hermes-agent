@@ -10,7 +10,8 @@ from __future__ import annotations
 import ast
 from pathlib import Path
 
-_SQLITE_MODULES = frozenset({"sqlite3", "aiosqlite"})
+# Common Python SQLite drivers, including third-party replacements and SQLCipher.
+_SQLITE_MODULES = frozenset({"sqlite3", "aiosqlite", "pysqlite3", "apsw", "sqlcipher3", "pysqlcipher3"})
 _ENGINE_FACTORIES = frozenset({"create_engine", "create_async_engine"})
 
 
