@@ -144,6 +144,17 @@ _RUNTIME_SQLITE_FREE_MODULES = (
     "tools/memory_tool.py",
     "plugins/memory/holographic/store.py",
     "hermes_hybrid/deep_memory.py",
+    "agent/insights.py",
+    "hermes_cli/web_server.py",
+    "hermes_cli/doctor.py",
+    "hermes_cli/backup.py",
+    "hermes_cli/kanban.py",
+    "hermes_cli/kanban_diagnostics.py",
+    "hermes_cli/main.py",
+    "hermes_cli/model_switch.py",
+    "tools/session_search_tool.py",
+    "plugins/memory/retaindb/__init__.py",
+    "plugins/platforms/google_chat/adapter.py",
 )
 
 
