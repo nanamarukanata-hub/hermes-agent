@@ -676,7 +676,11 @@ class SessionStore:
         vault = vault_path or os.environ.get("HERMES_OBSIDIAN_VAULT")
         if not vault:
             raise RuntimeError("HERMES_OBSIDIAN_VAULT is required; legacy session storage is disabled")
-        self.sessions_dir = Path(vault).expanduser().resolve() / "06_Automation" / "Hermes" / "GatewayRouting"
+        vault_root = Path(vault).expanduser()
+        if vault_root.is_symlink():
+            raise RuntimeError("Obsidian Vault routing path contains a symlink")
+        self._vault_root = vault_root.resolve()
+        self.sessions_dir = self._vault_root / "06_Automation" / "Hermes" / "GatewayRouting"
         self.config = config
         self._entries: Dict[str, SessionEntry] = {}
         self._loaded = False
@@ -687,6 +691,22 @@ class SessionStore:
         from hermes_state import SessionDB
         self._db = SessionDB(vault_path=vault)
     
+    def _assert_routing_path_safe(self) -> None:
+        """Reject symlink redirects before touching the Vault routing index.
+
+        Checking before mkdir matters: mkdir(parents=True) follows an existing
+        symlink and can create directories outside the configured Vault.
+        """
+        if self._vault_root.is_symlink():
+            raise RuntimeError("Obsidian Vault routing path contains a symlink")
+        current = self._vault_root
+        for component in ("06_Automation", "Hermes", "GatewayRouting"):
+            current = current / component
+            if current.is_symlink() or not current.resolve(strict=False).is_relative_to(self._vault_root):
+                raise RuntimeError("Obsidian Vault routing path contains a symlink")
+        if (self.sessions_dir / "sessions.json").is_symlink():
+            raise RuntimeError("Obsidian Vault routing index is a symlink")
+
     def _ensure_loaded(self) -> None:
         """Load sessions index from disk if not already loaded."""
         with self._lock:
@@ -697,7 +717,9 @@ class SessionStore:
         if self._loaded:
             return
 
+        self._assert_routing_path_safe()
         self.sessions_dir.mkdir(parents=True, exist_ok=True)
+        self._assert_routing_path_safe()
         sessions_file = self.sessions_dir / "sessions.json"
 
         if sessions_file.exists():
@@ -726,7 +748,9 @@ class SessionStore:
     def _save(self) -> None:
         """Save sessions index to disk (kept for session key -> ID mapping)."""
         import tempfile
+        self._assert_routing_path_safe()
         self.sessions_dir.mkdir(parents=True, exist_ok=True)
+        self._assert_routing_path_safe()
         sessions_file = self.sessions_dir / "sessions.json"
 
         data = {key: entry.to_dict() for key, entry in self._entries.items()}
@@ -738,6 +762,7 @@ class SessionStore:
                 json.dump(data, f, indent=2)
                 f.flush()
                 os.fsync(f.fileno())
+            self._assert_routing_path_safe()
             atomic_replace(tmp_path, sessions_file)
         except BaseException:
             try:
