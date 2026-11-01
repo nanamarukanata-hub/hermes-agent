@@ -25,7 +25,7 @@ logger = logging.getLogger(__name__)
 
 
 @contextmanager
-def _gateway_index_lock(lock_path: Path):
+def _gateway_index_lock(lock_path: Path, *, dir_fd: Optional[int] = None):
     """Serialize gateway routing index commits across cooperating processes.
 
     The lock file is persistent inside the Vault, so replacing sessions.json
@@ -35,13 +35,17 @@ def _gateway_index_lock(lock_path: Path):
     if lock_path.is_symlink():
         raise RuntimeError("Obsidian Vault routing lock is a symlink")
     flags = os.O_RDWR | os.O_CREAT | getattr(os, "O_NOFOLLOW", 0)
-    fd = os.open(lock_path, flags, 0o600)
+    name = lock_path.name if dir_fd is not None else lock_path
+    fd = (
+        os.open(name, flags, 0o600, dir_fd=dir_fd)
+        if dir_fd is not None else os.open(name, flags, 0o600)
+    )
     acquired = False
     try:
         opened = os.fstat(fd)
         if not stat.S_ISREG(opened.st_mode):
             raise RuntimeError("Obsidian Vault routing lock must be a regular file")
-        linked = os.stat(lock_path, follow_symlinks=False)
+        linked = os.stat(name, dir_fd=dir_fd, follow_symlinks=False)
         if (linked.st_dev, linked.st_ino) != (opened.st_dev, opened.st_ino):
             raise RuntimeError("Obsidian Vault routing lock changed during open")
 
@@ -60,7 +64,7 @@ def _gateway_index_lock(lock_path: Path):
         # the now-unlinked inode would not serialize writers opening its
         # replacement, so verify the inode again after acquiring the lock.
         try:
-            current = os.stat(lock_path, follow_symlinks=False)
+            current = os.stat(name, dir_fd=dir_fd, follow_symlinks=False)
         except OSError as exc:
             raise RuntimeError(
                 "Obsidian Vault routing lock changed during acquisition"
@@ -85,22 +89,23 @@ def _gateway_index_lock(lock_path: Path):
             os.close(fd)
 
 
-def _read_routing_index_bytes(path: Path) -> Optional[bytes]:
+def _read_routing_index_bytes(path: Path, *, dir_fd: Optional[int] = None) -> Optional[bytes]:
     """Read the Vault index without following a swapped final symlink.
 
     O_NONBLOCK prevents a substituted FIFO from blocking before fstat can
     reject it. The inode check also protects platforms without O_NOFOLLOW.
     """
     flags = os.O_RDONLY | getattr(os, "O_NOFOLLOW", 0) | getattr(os, "O_NONBLOCK", 0)
+    name = path.name if dir_fd is not None else path
     try:
-        fd = os.open(path, flags)
+        fd = os.open(name, flags, dir_fd=dir_fd) if dir_fd is not None else os.open(name, flags)
     except FileNotFoundError:
         return None
     try:
         opened = os.fstat(fd)
         if not stat.S_ISREG(opened.st_mode):
             raise RuntimeError("Obsidian Vault routing index must be a regular file")
-        linked = os.stat(path, follow_symlinks=False)
+        linked = os.stat(name, dir_fd=dir_fd, follow_symlinks=False)
         if (
             not stat.S_ISREG(linked.st_mode)
             or (linked.st_dev, linked.st_ino) != (opened.st_dev, opened.st_ino)
@@ -845,7 +850,8 @@ class SessionStore:
         sessions_file = self.sessions_dir / "sessions.json"
 
         try:
-            raw = _read_routing_index_bytes(sessions_file)
+            with _gateway_routing_dirfd(self._vault_root) as routing_fd:
+                raw = _read_routing_index_bytes(sessions_file, dir_fd=routing_fd)
         except Exception as e:
             raise RuntimeError(
                 "Cannot load Obsidian gateway session index; refusing to overwrite it"
@@ -877,9 +883,9 @@ class SessionStore:
     def _save(self) -> None:
         """Commit the routing index without silently losing another writer's changes.
 
-        A process-local lock protects _entries; this Vault-local file lock
-        serializes the digest check and atomic replacement across processes.
-        Stale SessionStore instances fail closed and must be re-created.
+        The POSIX routing dirfd pins lock, read, and replace operations to the
+        same Vault directory. Stale instances fail closed and must be re-created.
+        Windows retains path-based I/O pending a separate containment audit.
         """
         import tempfile
 
@@ -888,19 +894,21 @@ class SessionStore:
         self._assert_routing_path_safe()
         sessions_file = self.sessions_dir / "sessions.json"
 
-        with _gateway_index_lock(self.sessions_dir / ".sessions.lock"):
-            self._assert_routing_path_safe()
-            current = _read_routing_index_bytes(sessions_file)
-            current_digest = hashlib.sha256(current).digest() if current is not None else None
-            if current_digest != self._index_digest:
-                raise RuntimeError(
-                    "Obsidian gateway session index changed on disk; "
-                    "refusing to overwrite concurrent updates"
-                )
+        with _gateway_routing_dirfd(self._vault_root) as routing_fd:
+            with _gateway_index_lock(
+                self.sessions_dir / ".sessions.lock", dir_fd=routing_fd
+            ):
+                self._assert_routing_path_safe()
+                current = _read_routing_index_bytes(sessions_file, dir_fd=routing_fd)
+                current_digest = hashlib.sha256(current).digest() if current is not None else None
+                if current_digest != self._index_digest:
+                    raise RuntimeError(
+                        "Obsidian gateway session index changed on disk; "
+                        "refusing to overwrite concurrent updates"
+                    )
 
-            data = {key: entry.to_dict() for key, entry in self._entries.items()}
-            payload = json.dumps(data, indent=2).encode("utf-8")
-            with _gateway_routing_dirfd(self._vault_root) as routing_fd:
+                data = {key: entry.to_dict() for key, entry in self._entries.items()}
+                payload = json.dumps(data, indent=2).encode("utf-8")
                 if routing_fd is None:
                     fd, tmp_path = tempfile.mkstemp(
                         dir=str(self.sessions_dir), suffix=".tmp", prefix=".sessions_"
