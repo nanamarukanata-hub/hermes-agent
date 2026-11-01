@@ -344,3 +344,43 @@ def test_index_symlink_swapped_during_open_fails_closed(tmp_path, monkeypatch, p
     assert index.is_symlink()
     assert backup.is_file()
     assert outside.read_bytes() == outside_payload
+
+
+@pytest.mark.skipif(os.name == "nt", reason="POSIX symlink race regression")
+def test_final_index_symlink_swap_before_replace_stays_inside_vault(tmp_path, monkeypatch):
+    """A late symlink swap must not redirect the atomic index replacement."""
+    store = _store(tmp_path)
+    source = SessionSource(platform=Platform.DISCORD, chat_id="room", user_id="42")
+    entry = store.get_or_create_session(source)
+    index = store.sessions_dir / "sessions.json"
+    backup = index.with_name("sessions-before-swap.json")
+    outside = tmp_path / "outside-index.json"
+    outside_payload = b'{"outside": "do-not-overwrite"}'
+    outside.write_bytes(outside_payload)
+
+    original_check = store._assert_routing_path_safe
+    swapped = False
+
+    def swap_after_final_path_check():
+        nonlocal swapped
+        original_check()
+        # The save has written its temporary file and is about to replace
+        # sessions.json; earlier path checks must remain unaffected.
+        if not swapped and any(
+            p.name.startswith(".sessions_") and p.suffix == ".tmp"
+            for p in store.sessions_dir.iterdir()
+        ):
+            index.rename(backup)
+            index.symlink_to(outside)
+            swapped = True
+
+    monkeypatch.setattr(store, "_assert_routing_path_safe", swap_after_final_path_check)
+    store.update_session(entry.session_key, last_prompt_tokens=123)
+
+    assert swapped
+    assert outside.read_bytes() == outside_payload
+    assert backup.is_file()
+    assert index.is_file() and not index.is_symlink()
+    assert json.loads(index.read_text(encoding="utf-8"))[entry.session_key][
+        "last_prompt_tokens"
+    ] == 123
