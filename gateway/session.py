@@ -156,7 +156,6 @@ from .whatsapp_identity import (
     canonical_whatsapp_identifier,
     normalize_whatsapp_identifier,  # noqa: F401 - re-exported for gateway.session callers
 )
-# Routing index replacement must not resolve final-component symlinks.
 
 
 @dataclass
