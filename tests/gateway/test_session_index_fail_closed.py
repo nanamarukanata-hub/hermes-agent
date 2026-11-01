@@ -186,3 +186,33 @@ def test_symlinked_gateway_lock_cannot_redirect_index_write(tmp_path):
 
     assert outside.read_bytes() == b"outside"
     assert not (store.sessions_dir / "sessions.json").exists()
+
+
+@pytest.mark.skipif(__import__("os").name == "nt", reason="fcntl-specific inode replacement simulation")
+def test_lock_inode_replaced_during_acquisition_fails_closed(tmp_path, monkeypatch):
+    """A lock replaced while a writer waits cannot protect the index."""
+    import fcntl
+
+    store = _store(tmp_path)
+    lock_path = store.sessions_dir / ".sessions.lock"
+    lock_path.parent.mkdir(parents=True, exist_ok=True)
+    lock_path.write_bytes(b"original")
+    original_flock = fcntl.flock
+    replaced = False
+
+    def replace_before_lock_returns(fd, operation):
+        nonlocal replaced
+        if operation == fcntl.LOCK_EX and not replaced:
+            replaced = True
+            lock_path.unlink()
+            lock_path.write_bytes(b"replacement")
+        return original_flock(fd, operation)
+
+    monkeypatch.setattr(fcntl, "flock", replace_before_lock_returns)
+    source = SessionSource(platform=Platform.DISCORD, chat_id="room", user_id="42")
+    with pytest.raises(RuntimeError, match="lock changed during acquisition"):
+        store.get_or_create_session(source)
+
+    assert replaced
+    assert lock_path.read_bytes() == b"replacement"
+    assert not (store.sessions_dir / "sessions.json").exists()
