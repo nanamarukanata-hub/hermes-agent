@@ -573,7 +573,7 @@ class ObsidianStateTests(unittest.TestCase):
             real_open = os.open
 
             def swap_at_open(path, flags, mode=0o777, *, dir_fd=None):
-                if Path(path) == self.db._lockfile:
+                if path == self.db._lockfile.name and dir_fd is not None:
                     self.db._lockfile.symlink_to(external)
                 if dir_fd is None:
                     return real_open(path, flags, mode)
@@ -584,6 +584,53 @@ class ObsidianStateTests(unittest.TestCase):
                     self.db.create_session("race_blocked", "discord")
             self.assertEqual(external.read_text(encoding="utf-8"), "unchanged")
             self.assertFalse((self.db.root / "race_blocked").exists())
+
+    def test_writer_lock_parent_swap_cannot_create_outside_vault(self):
+        # A parent replaced between directory pinning and lock open must not
+        # redirect O_CREAT to an external directory.
+        with tempfile.TemporaryDirectory() as outside_temp:
+            outside = Path(outside_temp)
+            backup = self.db.root.with_name("Sessions_backup")
+            real_open = os.open
+            swapped = False
+
+            def swap_parent_at_lock(path, flags, mode=0o777, *, dir_fd=None):
+                nonlocal swapped
+                if path == self.db._lockfile.name and dir_fd is not None and not swapped:
+                    swapped = True
+                    self.db.root.rename(backup)
+                    self.db.root.symlink_to(outside, target_is_directory=True)
+                if dir_fd is None:
+                    return real_open(path, flags, mode)
+                return real_open(path, flags, mode, dir_fd=dir_fd)
+
+            with patch("hermes_obsidian_state.os.open", side_effect=swap_parent_at_lock):
+                with self.assertRaisesRegex(RuntimeError, "directory moved during write"):
+                    self.db.create_session("parent_swapped", "discord")
+            self.assertTrue(swapped)
+            self.assertEqual(list(outside.iterdir()), [])
+            self.assertFalse((backup / "parent_swapped").exists())
+
+    def test_writer_lock_parent_rename_after_flock_is_rejected(self):
+        # A held lock on an orphaned Sessions directory must not be accepted.
+        import fcntl
+
+        backup = self.db.root.with_name("Sessions_moved")
+        real_flock = fcntl.flock
+        moved = False
+
+        def move_after_lock(fd, operation):
+            nonlocal moved
+            real_flock(fd, operation)
+            if operation == fcntl.LOCK_EX and not moved:
+                moved = True
+                self.db.root.rename(backup)
+
+        with patch("hermes_obsidian_state.fcntl.flock", side_effect=move_after_lock):
+            with self.assertRaisesRegex(RuntimeError, "directory moved during write"):
+                self.db.create_session("parent_moved", "discord")
+        self.assertTrue(moved)
+        self.assertFalse((backup / "parent_moved").exists())
 
     def test_writer_lock_replacement_after_flock_is_rejected(self):
         # Locking an unlinked inode does not serialize writers opening a
