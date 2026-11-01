@@ -22,8 +22,9 @@ class ObsidianStateTests(unittest.TestCase):
 
     def test_session_write_rejects_symlink_swap_before_directory_open(self):
         # A rename/symlink race must never create metadata outside the Vault.
-        outside = Path(self.temp.name) / "outside"
-        outside.mkdir()
+        outside_temp = tempfile.TemporaryDirectory()
+        self.addCleanup(outside_temp.cleanup)
+        outside = Path(outside_temp.name)
         parent = self.db.root / "race_before_open"
         backup = self.db.root / "race_before_open_backup"
         real_open = os.open
