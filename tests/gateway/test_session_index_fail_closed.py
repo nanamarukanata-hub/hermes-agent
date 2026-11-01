@@ -278,3 +278,48 @@ def test_separate_process_stale_gateway_writer_cannot_overwrite(tmp_path):
             worker.terminate()
         worker.join(timeout=5)
         result.close()
+
+
+@pytest.mark.skipif(os.name == "nt", reason="symlink race regression uses POSIX symlinks")
+@pytest.mark.parametrize("phase", ["load", "save"])
+def test_index_symlink_swapped_during_open_fails_closed(tmp_path, monkeypatch, phase):
+    """The final index component cannot be redirected after the path check."""
+    store = _store(tmp_path)
+    source = SessionSource(platform=Platform.DISCORD, chat_id="room", user_id="42")
+    if phase == "save":
+        entry = store.get_or_create_session(source)
+    index = store.sessions_dir / "sessions.json"
+    index.parent.mkdir(parents=True, exist_ok=True)
+    if phase == "load":
+        index.write_text("{}", encoding="utf-8")
+
+    backup = index.with_name("sessions-original.json")
+    outside = tmp_path / "outside-index.json"
+    outside_payload = b'{"outside": "must-not-read-or-write"}'
+    outside.write_bytes(outside_payload)
+    original_open = os.open
+    swapped = False
+
+    def swap_before_open(path, flags, mode=0o777, *, dir_fd=None):
+        nonlocal swapped
+        if os.fspath(path) == os.fspath(index) and not swapped:
+            swapped = True
+            index.rename(backup)
+            index.symlink_to(outside)
+        if dir_fd is None:
+            return original_open(path, flags, mode)
+        return original_open(path, flags, mode, dir_fd=dir_fd)
+
+    monkeypatch.setattr(os, "open", swap_before_open)
+    if phase == "load":
+        with pytest.raises(RuntimeError, match="refusing to overwrite"):
+            store._ensure_loaded()
+        assert store._loaded is False
+    else:
+        with pytest.raises((OSError, RuntimeError)):
+            store.update_session(entry.session_key)
+
+    assert swapped
+    assert index.is_symlink()
+    assert backup.is_file()
+    assert outside.read_bytes() == outside_payload
