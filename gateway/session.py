@@ -85,6 +85,35 @@ def _gateway_index_lock(lock_path: Path):
             os.close(fd)
 
 
+def _read_routing_index_bytes(path: Path) -> Optional[bytes]:
+    """Read the Vault index without following a swapped final symlink.
+
+    O_NONBLOCK prevents a substituted FIFO from blocking before fstat can
+    reject it. The inode check also protects platforms without O_NOFOLLOW.
+    """
+    flags = os.O_RDONLY | getattr(os, "O_NOFOLLOW", 0) | getattr(os, "O_NONBLOCK", 0)
+    try:
+        fd = os.open(path, flags)
+    except FileNotFoundError:
+        return None
+    try:
+        opened = os.fstat(fd)
+        if not stat.S_ISREG(opened.st_mode):
+            raise RuntimeError("Obsidian Vault routing index must be a regular file")
+        linked = os.stat(path, follow_symlinks=False)
+        if (
+            not stat.S_ISREG(linked.st_mode)
+            or (linked.st_dev, linked.st_ino) != (opened.st_dev, opened.st_ino)
+        ):
+            raise RuntimeError("Obsidian Vault routing index changed during open")
+        with os.fdopen(fd, "rb") as file:
+            fd = -1
+            return file.read()
+    finally:
+        if fd >= 0:
+            os.close(fd)
+
+
 def _now() -> datetime:
     """Return the current local time."""
     return datetime.now()
@@ -788,10 +817,15 @@ class SessionStore:
         self._assert_routing_path_safe()
         sessions_file = self.sessions_dir / "sessions.json"
 
-        if sessions_file.exists():
+        try:
+            raw = _read_routing_index_bytes(sessions_file)
+        except Exception as e:
+            raise RuntimeError(
+                "Cannot load Obsidian gateway session index; refusing to overwrite it"
+            ) from e
+
+        if raw is not None:
             try:
-                with open(sessions_file, "rb") as f:
-                    raw = f.read()
                 data = json.loads(raw)
                 if not isinstance(data, dict):
                     raise ValueError("Gateway session index must be a JSON object")
@@ -829,10 +863,7 @@ class SessionStore:
 
         with _gateway_index_lock(self.sessions_dir / ".sessions.lock"):
             self._assert_routing_path_safe()
-            try:
-                current = sessions_file.read_bytes()
-            except FileNotFoundError:
-                current = None
+            current = _read_routing_index_bytes(sessions_file)
             current_digest = hashlib.sha256(current).digest() if current is not None else None
             if current_digest != self._index_digest:
                 raise RuntimeError(
