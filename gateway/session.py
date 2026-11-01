@@ -621,12 +621,9 @@ class SessionEntry:
         if "origin" in data and data["origin"]:
             origin = SessionSource.from_dict(data["origin"])
         
-        platform = None
-        if data.get("platform"):
-            try:
-                platform = Platform(data["platform"])
-            except ValueError as e:
-                logger.debug("Unknown platform value %r: %s", data["platform"], e)
+        # A removed/unknown platform must invalidate the whole routing index.
+        # Silently coercing it to None would discard its routing metadata on save.
+        platform = Platform(data["platform"]) if data.get("platform") else None
 
         last_resume_marked_at = None
         _lrma = data.get("last_resume_marked_at")
