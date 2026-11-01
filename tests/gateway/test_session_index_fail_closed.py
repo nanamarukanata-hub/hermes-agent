@@ -217,3 +217,64 @@ def test_lock_inode_replaced_during_acquisition_fails_closed(tmp_path, monkeypat
     assert replaced
     assert lock_path.read_bytes() == b"replacement"
     assert not (store.sessions_dir / "sessions.json").exists()
+
+
+def _stale_gateway_writer_process(vault, ready, proceed, result):
+    """Load the index before another process commits, then attempt a stale save."""
+    try:
+        store = SessionStore(
+            sessions_dir=vault.parent / "unused-legacy-sessions",
+            config=GatewayConfig(),
+            vault_path=vault,
+        )
+        store._ensure_loaded()
+        ready.set()
+        if not proceed.wait(timeout=15):
+            result.put("worker timed out waiting for parent")
+            return
+        source = SessionSource(platform=Platform.DISCORD, chat_id="child", user_id="2")
+        try:
+            store.get_or_create_session(source)
+        except RuntimeError as exc:
+            result.put(str(exc))
+        else:
+            result.put("unexpected stale write success")
+    except Exception as exc:
+        result.put(f"worker exception: {type(exc).__name__}: {exc}")
+
+
+@pytest.mark.skipif(os.name == "nt", reason="POSIX fork process isolation regression")
+def test_separate_process_stale_gateway_writer_cannot_overwrite(tmp_path):
+    """Two real OS processes must not lose a committed routing index update."""
+    import multiprocessing
+
+    ctx = multiprocessing.get_context("fork")
+    vault = tmp_path / "vault"
+    vault.mkdir()
+    ready, proceed = ctx.Event(), ctx.Event()
+    result = ctx.Queue()
+    worker = ctx.Process(
+        target=_stale_gateway_writer_process,
+        args=(vault, ready, proceed, result),
+    )
+    worker.start()
+    try:
+        assert ready.wait(timeout=15), "child did not load the original index"
+        parent = _store(tmp_path)
+        source = SessionSource(platform=Platform.DISCORD, chat_id="parent", user_id="1")
+        entry = parent.get_or_create_session(source)
+        index = parent.sessions_dir / "sessions.json"
+        committed = index.read_bytes()
+
+        proceed.set()
+        worker.join(timeout=15)
+        assert worker.exitcode == 0, "child did not finish cleanly"
+        assert "changed on disk" in result.get(timeout=3)
+        assert index.read_bytes() == committed
+        assert set(json.loads(committed)) == {entry.session_key}
+    finally:
+        proceed.set()
+        if worker.is_alive():
+            worker.terminate()
+        worker.join(timeout=5)
+        result.close()
