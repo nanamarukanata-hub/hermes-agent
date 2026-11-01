@@ -1,6 +1,7 @@
 """A damaged Obsidian gateway routing index must never be silently replaced."""
 
 import json
+import os
 
 import pytest
 
@@ -188,7 +189,7 @@ def test_symlinked_gateway_lock_cannot_redirect_index_write(tmp_path):
     assert not (store.sessions_dir / "sessions.json").exists()
 
 
-@pytest.mark.skipif(__import__("os").name == "nt", reason="fcntl-specific inode replacement simulation")
+@pytest.mark.skipif(os.name == "nt", reason="fcntl-specific inode replacement simulation")
 def test_lock_inode_replaced_during_acquisition_fails_closed(tmp_path, monkeypatch):
     """A lock replaced while a writer waits cannot protect the index."""
     import fcntl
