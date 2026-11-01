@@ -65,6 +65,27 @@ def test_partial_index_load_does_not_leave_recovered_entries(tmp_path, invalid_r
     assert index.read_bytes() == damaged
 
 
+
+def test_unknown_platform_in_complete_record_fails_closed(tmp_path):
+    """A valid entry with a removed platform must not be silently rewritten."""
+    store = _store(tmp_path)
+    source = SessionSource(platform=Platform.DISCORD, chat_id="room", user_id="42")
+    entry = store.get_or_create_session(source)
+    index = store.sessions_dir / "sessions.json"
+    data = json.loads(index.read_text(encoding="utf-8"))
+    data[entry.session_key]["platform"] = "uninstalled-platform"
+    damaged = json.dumps(data, ensure_ascii=False).encode("utf-8")
+    index.write_bytes(damaged)
+
+    restarted = _store(tmp_path)
+    with pytest.raises(RuntimeError, match="refusing to overwrite"):
+        restarted._ensure_loaded()
+
+    assert restarted._entries == {}
+    assert restarted._loaded is False
+    assert index.read_bytes() == damaged
+
+
 def test_symlinked_vault_root_is_rejected_before_initialization(tmp_path):
     real_vault = tmp_path / "real-vault"
     real_vault.mkdir()
