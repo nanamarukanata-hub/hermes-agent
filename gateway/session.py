@@ -156,7 +156,7 @@ from .whatsapp_identity import (
     canonical_whatsapp_identifier,
     normalize_whatsapp_identifier,  # noqa: F401 - re-exported for gateway.session callers
 )
-from utils import atomic_replace
+# Routing index replacement must not resolve final-component symlinks.
 
 
 @dataclass
@@ -879,7 +879,11 @@ class SessionStore:
                     f.flush()
                     os.fsync(f.fileno())
                 self._assert_routing_path_safe()
-                atomic_replace(tmp_path, sessions_file)
+                # Unlike utils.atomic_replace, os.replace never resolves a
+                # symlink target. If sessions.json is swapped after the
+                # preceding path check, replace the link itself rather than
+                # writing to a file outside the Obsidian Vault.
+                os.replace(tmp_path, sessions_file)
                 self._index_digest = hashlib.sha256(payload).digest()
             except BaseException:
                 try:
