@@ -114,6 +114,37 @@ def _read_routing_index_bytes(path: Path) -> Optional[bytes]:
             os.close(fd)
 
 
+@contextmanager
+def _gateway_routing_dirfd(vault_root: Path):
+    """Pin routing-directory writes to a directory descriptor on POSIX.
+
+    Each component is opened relative to the previously verified directory,
+    rejecting a parent symlink swap before a later file replacement.
+    Windows retains the existing path-based implementation.
+    """
+    if not (
+        os.name == "posix"
+        and hasattr(os, "O_DIRECTORY")
+        and hasattr(os, "O_NOFOLLOW")
+        and os.open in os.supports_dir_fd
+        and os.rename in os.supports_dir_fd
+        and os.unlink in os.supports_dir_fd
+    ):
+        yield None
+        return
+
+    flags = os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW
+    fd = os.open(vault_root, flags)
+    try:
+        for component in ("06_Automation", "Hermes", "GatewayRouting"):
+            child_fd = os.open(component, flags, dir_fd=fd)
+            os.close(fd)
+            fd = child_fd
+        yield fd
+    finally:
+        os.close(fd)
+
+
 def _now() -> datetime:
     """Return the current local time."""
     return datetime.now()
@@ -869,27 +900,47 @@ class SessionStore:
 
             data = {key: entry.to_dict() for key, entry in self._entries.items()}
             payload = json.dumps(data, indent=2).encode("utf-8")
-            fd, tmp_path = tempfile.mkstemp(
-                dir=str(self.sessions_dir), suffix=".tmp", prefix=".sessions_"
-            )
-            try:
-                with os.fdopen(fd, "wb") as f:
-                    f.write(payload)
-                    f.flush()
-                    os.fsync(f.fileno())
-                self._assert_routing_path_safe()
-                # Unlike utils.atomic_replace, os.replace never resolves a
-                # symlink target. If sessions.json is swapped after the
-                # preceding path check, replace the link itself rather than
-                # writing to a file outside the Obsidian Vault.
-                os.replace(tmp_path, sessions_file)
-                self._index_digest = hashlib.sha256(payload).digest()
-            except BaseException:
+            with _gateway_routing_dirfd(self._vault_root) as routing_fd:
+                if routing_fd is None:
+                    fd, tmp_path = tempfile.mkstemp(
+                        dir=str(self.sessions_dir), suffix=".tmp", prefix=".sessions_"
+                    )
+                    tmp_name = None
+                else:
+                    tmp_name = f".sessions_{uuid.uuid4().hex}.tmp"
+                    fd = os.open(
+                        tmp_name,
+                        os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW,
+                        0o600,
+                        dir_fd=routing_fd,
+                    )
+                    tmp_path = None
                 try:
-                    os.unlink(tmp_path)
-                except OSError as e:
-                    logger.debug("Could not remove temp file %s: %s", tmp_path, e)
-                raise
+                    with os.fdopen(fd, "wb") as f:
+                        f.write(payload)
+                        f.flush()
+                        os.fsync(f.fileno())
+                    self._assert_routing_path_safe()
+                    # Keep source and destination relative to the same opened
+                    # directory. A late parent symlink swap cannot redirect
+                    # either path outside the pinned routing directory.
+                    if routing_fd is None:
+                        os.replace(tmp_path, sessions_file)
+                    else:
+                        os.replace(
+                            tmp_name, "sessions.json",
+                            src_dir_fd=routing_fd, dst_dir_fd=routing_fd,
+                        )
+                    self._index_digest = hashlib.sha256(payload).digest()
+                except BaseException:
+                    try:
+                        if routing_fd is None:
+                            os.unlink(tmp_path)
+                        else:
+                            os.unlink(tmp_name, dir_fd=routing_fd)
+                    except OSError as e:
+                        logger.debug("Could not remove routing temp file: %s", e)
+                    raise
 
     def _generate_session_key(self, source: SessionSource) -> str:
         """Generate a session key from a source."""
