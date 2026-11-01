@@ -20,6 +20,54 @@ class ObsidianStateTests(unittest.TestCase):
         self.patch.stop()
         self.temp.cleanup()
 
+    def test_session_write_rejects_symlink_swap_before_directory_open(self):
+        # A rename/symlink race must never create metadata outside the Vault.
+        outside = Path(self.temp.name) / "outside"
+        outside.mkdir()
+        parent = self.db.root / "race_before_open"
+        backup = self.db.root / "race_before_open_backup"
+        real_open = os.open
+        swapped = False
+
+        def swap_at_open(path, flags, mode=0o777, *, dir_fd=None):
+            nonlocal swapped
+            if path == "race_before_open" and dir_fd is not None and not swapped:
+                swapped = True
+                parent.rename(backup)
+                parent.symlink_to(outside, target_is_directory=True)
+            if dir_fd is None:
+                return real_open(path, flags, mode)
+            return real_open(path, flags, mode, dir_fd=dir_fd)
+
+        with patch("hermes_obsidian_state.os.open", side_effect=swap_at_open):
+            with self.assertRaises(OSError):
+                self.db.create_session("race_before_open", "discord")
+        self.assertTrue(swapped)
+        self.assertEqual(list(outside.iterdir()), [])
+        self.assertFalse((backup / "metadata.json").exists())
+
+    def test_session_write_reports_parent_rename_after_replace(self):
+        # The pinned inode is safe, but an orphaned successful write is not.
+        parent = self.db.root / "race_after_replace"
+        backup = self.db.root / "race_after_replace_backup"
+        real_replace = os.replace
+        moved = False
+
+        def rename_after_replace(source, destination, **kwargs):
+            nonlocal moved
+            result = real_replace(source, destination, **kwargs)
+            if kwargs.get("src_dir_fd") is not None and not moved:
+                moved = True
+                parent.rename(backup)
+            return result
+
+        with patch("hermes_obsidian_state.os.replace", side_effect=rename_after_replace):
+            with self.assertRaisesRegex(RuntimeError, "directory moved during write"):
+                self.db.create_session("race_after_replace", "discord")
+        self.assertTrue(moved)
+        self.assertFalse(parent.exists())
+        self.assertTrue((backup / "metadata.json").is_file())
+
     def test_tool_call_arguments_and_function_names_search_after_restart(self):
         self.db.create_session("tool_search", "discord")
         self.db.append_message(
