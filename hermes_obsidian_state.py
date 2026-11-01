@@ -56,27 +56,38 @@ class SessionDB:
 
     @contextmanager
     def _guard(self):
-        # Path.is_symlink() followed by Path.open() is a TOCTOU race:
-        # the lock can be replaced with a symlink between the two calls.
-        # Open the final component without following links, then verify
-        # that the pathname still names the inode we locked.
+        # Anchor the lock to a no-follow directory descriptor. Opening the
+        # lock by its absolute pathname would follow a swapped parent link
+        # before O_NOFOLLOW could protect the final lockfile component.
         flags = os.O_RDWR | os.O_CREAT | os.O_NOFOLLOW | os.O_CLOEXEC
         try:
-            raw_fd = os.open(self._lockfile, flags, 0o600)
+            root_fd = self._open_write_dir(self.root)
         except OSError as exc:
-            raise RuntimeError("Unsafe Vault session lockfile") from exc
-        with os.fdopen(raw_fd, "a+b") as fd:
-            if not stat.S_ISREG(os.fstat(fd.fileno()).st_mode):
-                raise RuntimeError("Unsafe Vault session lockfile")
-            fcntl.flock(fd, fcntl.LOCK_EX)
+            raise RuntimeError("Unsafe Vault session directory") from exc
+        try:
+            self._assert_write_dir_attached(self.root, root_fd)
             try:
-                opened = os.fstat(fd.fileno())
-                current = os.stat(self._lockfile, follow_symlinks=False)
-                if (opened.st_dev, opened.st_ino) != (current.st_dev, current.st_ino):
-                    raise RuntimeError("Vault session lockfile changed during acquisition")
-                yield
-            finally:
-                fcntl.flock(fd, fcntl.LOCK_UN)
+                raw_fd = os.open(self._lockfile.name, flags, 0o600, dir_fd=root_fd)
+            except OSError as exc:
+                raise RuntimeError("Unsafe Vault session lockfile") from exc
+            with os.fdopen(raw_fd, "a+b") as fd:
+                if not stat.S_ISREG(os.fstat(fd.fileno()).st_mode):
+                    raise RuntimeError("Unsafe Vault session lockfile")
+                fcntl.flock(fd, fcntl.LOCK_EX)
+                try:
+                    opened = os.fstat(fd.fileno())
+                    current = os.stat(
+                        self._lockfile.name, dir_fd=root_fd, follow_symlinks=False
+                    )
+                    if (opened.st_dev, opened.st_ino) != (current.st_dev, current.st_ino):
+                        raise RuntimeError("Vault session lockfile changed during acquisition")
+                    self._assert_write_dir_attached(self.root, root_fd)
+                    yield
+                    self._assert_write_dir_attached(self.root, root_fd)
+                finally:
+                    fcntl.flock(fd, fcntl.LOCK_UN)
+        finally:
+            os.close(root_fd)
 
     def _folder(self, session_id):
         # A valid filename is not necessarily a safe child directory: "." and
