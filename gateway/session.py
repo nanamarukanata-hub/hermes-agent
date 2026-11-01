@@ -23,6 +23,17 @@ from typing import Dict, List, Optional, Any
 
 logger = logging.getLogger(__name__)
 
+# Capture capability before tests or instrumentation monkeypatch os.open.
+# A temporary wrapper must not silently downgrade pinned Vault I/O to paths.
+_ROUTING_DIRFD_AVAILABLE = (
+    os.name == "posix"
+    and hasattr(os, "O_DIRECTORY")
+    and hasattr(os, "O_NOFOLLOW")
+    and os.open in os.supports_dir_fd
+    and os.rename in os.supports_dir_fd
+    and os.unlink in os.supports_dir_fd
+)
+
 
 @contextmanager
 def _gateway_index_lock(lock_path: Path, *, dir_fd: Optional[int] = None):
@@ -127,14 +138,7 @@ def _gateway_routing_dirfd(vault_root: Path):
     rejecting a parent symlink swap before a later file replacement.
     Windows retains the existing path-based implementation.
     """
-    if not (
-        os.name == "posix"
-        and hasattr(os, "O_DIRECTORY")
-        and hasattr(os, "O_NOFOLLOW")
-        and os.open in os.supports_dir_fd
-        and os.rename in os.supports_dir_fd
-        and os.unlink in os.supports_dir_fd
-    ):
+    if not _ROUTING_DIRFD_AVAILABLE:
         yield None
         return
 
