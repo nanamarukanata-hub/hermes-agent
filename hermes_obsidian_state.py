@@ -13,7 +13,6 @@ import os
 import re
 import shutil
 import stat
-import tempfile
 import time
 import uuid
 from contextlib import contextmanager
@@ -95,24 +94,66 @@ class SessionDB:
             raise RuntimeError(f"Session directory escapes Vault: {session_id}")
         return folder
 
-    @staticmethod
-    def _write(path, content):
-        path.parent.mkdir(parents=True, exist_ok=True)
-        fd, temporary = tempfile.mkstemp(dir=path.parent, prefix=".pending-", suffix=".tmp")
+    def _open_write_dir(self, directory, *, create=False):
+        """Open a Vault-relative directory without following symlink components."""
+        flags = os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW | os.O_CLOEXEC
+        fd = os.open(self.vault, flags)
         try:
+            for component in directory.relative_to(self.vault).parts:
+                if component in (".", ".."):
+                    raise RuntimeError("Unsafe Vault session directory")
+                if create:
+                    try:
+                        os.mkdir(component, dir_fd=fd)
+                    except FileExistsError:
+                        pass
+                next_fd = os.open(component, flags, dir_fd=fd)
+                os.close(fd)
+                fd = next_fd
+            return fd
+        except BaseException:
+            os.close(fd)
+            raise
+
+    def _assert_write_dir_attached(self, directory, held_fd):
+        """Reject success if a pinned directory was renamed or replaced."""
+        try:
+            current_fd = self._open_write_dir(directory)
+        except (OSError, ValueError) as exc:
+            raise RuntimeError("Vault session directory moved during write") from exc
+        try:
+            held = os.fstat(held_fd)
+            current = os.fstat(current_fd)
+            if (held.st_dev, held.st_ino) != (current.st_dev, current.st_ino):
+                raise RuntimeError("Vault session directory moved during write")
+        finally:
+            os.close(current_fd)
+
+    def _write(self, path, content):
+        # Descriptor-relative writes keep a swapped parent from redirecting
+        # the temporary file or atomic replacement outside the Vault.
+        dir_fd = self._open_write_dir(path.parent, create=True)
+        temporary = f".pending-{uuid.uuid4().hex}.tmp"
+        try:
+            fd = os.open(
+                temporary,
+                os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW | os.O_CLOEXEC,
+                0o600, dir_fd=dir_fd,
+            )
             with os.fdopen(fd, "w", encoding="utf-8") as file:
                 file.write(content)
                 file.flush()
                 os.fsync(file.fileno())
-            os.replace(temporary, path)
-            dirfd = os.open(path.parent, os.O_RDONLY | os.O_DIRECTORY)
-            try:
-                os.fsync(dirfd)
-            finally:
-                os.close(dirfd)
+            self._assert_write_dir_attached(path.parent, dir_fd)
+            os.replace(temporary, path.name, src_dir_fd=dir_fd, dst_dir_fd=dir_fd)
+            os.fsync(dir_fd)
+            self._assert_write_dir_attached(path.parent, dir_fd)
         finally:
-            if os.path.exists(temporary):
-                os.unlink(temporary)
+            try:
+                os.unlink(temporary, dir_fd=dir_fd)
+            except FileNotFoundError:
+                pass
+            os.close(dir_fd)
 
     def _load(self, sid):
         folder = self._folder(sid)
