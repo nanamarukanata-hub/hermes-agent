@@ -40,14 +40,18 @@ def test_corrupt_vault_routing_index_fails_closed_without_overwrite(tmp_path, pa
     assert not (tmp_path / "unused-legacy-sessions").exists()
 
 
-def test_partial_index_load_does_not_leave_recovered_entries(tmp_path):
+@pytest.mark.parametrize("invalid_record", [
+    None,
+    {"session_key": "removed", "session_id": "old", "platform": "uninstalled-platform", "chat_type": "dm"},
+])
+def test_partial_index_load_does_not_leave_recovered_entries(tmp_path, invalid_record):
     store = _store(tmp_path)
     source = SessionSource(platform=Platform.DISCORD, chat_id="room", user_id="42")
     original = store.get_or_create_session(source)
     index = store.sessions_dir / "sessions.json"
     data = json.loads(index.read_text(encoding="utf-8"))
     assert original.session_key in data
-    data["malformed"] = None
+    data["malformed"] = invalid_record
     damaged = json.dumps(data).encode("utf-8")
     index.write_bytes(damaged)
 
