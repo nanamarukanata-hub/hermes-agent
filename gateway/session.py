@@ -664,7 +664,7 @@ class SessionStore:
     Manages session storage and retrieval.
     
     Uses the Obsidian-native SessionDB for all session state and transcripts.
-    Falls back to legacy JSONL files if SQLite is unavailable.
+    Requires the Obsidian Vault; a damaged routing index fails closed.
     """
     
     def __init__(self, sessions_dir: Path, config: GatewayConfig,
@@ -704,14 +704,24 @@ class SessionStore:
             try:
                 with open(sessions_file, "r", encoding="utf-8") as f:
                     data = json.load(f)
-                    for key, entry_data in data.items():
-                        try:
-                            self._entries[key] = SessionEntry.from_dict(entry_data)
-                        except (ValueError, KeyError):
-                            # Skip entries with unknown/removed platform values
-                            continue
+                if not isinstance(data, dict):
+                    raise ValueError("Gateway session index must be a JSON object")
+                # Stage entries so a failed load cannot leave a partially
+                # restored in-memory index behind.
+                loaded_entries: Dict[str, SessionEntry] = {}
+                for key, entry_data in data.items():
+                    try:
+                        loaded_entries[key] = SessionEntry.from_dict(entry_data)
+                    except (ValueError, KeyError):
+                        # Preserve compatibility with removed platform values.
+                        continue
+                self._entries.update(loaded_entries)
             except Exception as e:
-                print(f"[gateway] Warning: Failed to load sessions: {e}")
+                # Treat a damaged/unreadable Vault index as fatal. Continuing
+                # with an empty index would overwrite the original on _save().
+                raise RuntimeError(
+                    "Cannot load Obsidian gateway session index; refusing to overwrite it"
+                ) from e
 
         self._loaded = True
     
