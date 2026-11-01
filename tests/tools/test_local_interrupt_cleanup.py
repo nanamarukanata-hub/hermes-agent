@@ -218,3 +218,34 @@ def test_execute_cleans_up_when_interrupt_precedes_poll_guard(monkeypatch, inter
         assert killed == [proc]
     finally:
         env.cleanup()
+
+@pytest.mark.skipif(os.name == "nt", reason="POSIX process-group cleanup")
+@pytest.mark.parametrize("interrupt", [KeyboardInterrupt, SystemExit])
+def test_local_spawn_cleans_up_interrupt_during_post_spawn_setup(monkeypatch, interrupt):
+    """An interrupt between Popen and execute's guard must kill the child.
+
+    Inject at the PGID lookup rather than relying on thread scheduling. This
+    reproduces the post-spawn gap without launching or leaking a real process.
+    """
+    env = object.__new__(LocalEnvironment)
+    env.cwd = "/tmp"
+    env.env = {}
+    proc = SimpleNamespace(pid=12345)
+    killed = []
+
+    monkeypatch.setattr(
+        "tools.environments.local.subprocess.Popen", lambda *args, **kwargs: proc
+    )
+
+    def interrupt_during_pgid_lookup(_pid):
+        raise interrupt
+
+    monkeypatch.setattr(
+        "tools.environments.local.os.getpgid", interrupt_during_pgid_lookup
+    )
+    monkeypatch.setattr(env, "_kill_process", killed.append)
+
+    with pytest.raises(interrupt):
+        env._run_bash("sleep 30")
+
+    assert killed == [proc]
