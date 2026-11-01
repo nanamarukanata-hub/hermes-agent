@@ -12,14 +12,61 @@ import hashlib
 import logging
 import os
 import json
+import stat
 import threading
 import uuid
+from contextlib import contextmanager
 from pathlib import Path
 from datetime import datetime, timedelta
 from dataclasses import dataclass
 from typing import Dict, List, Optional, Any
 
 logger = logging.getLogger(__name__)
+
+
+@contextmanager
+def _gateway_index_lock(lock_path: Path):
+    """Serialize gateway routing index commits across cooperating processes.
+
+    The lock file is persistent inside the Vault, so replacing sessions.json
+    never releases the lock prematurely. A symlink or non-regular lock file
+    is rejected instead of following an untrusted path.
+    """
+    if lock_path.is_symlink():
+        raise RuntimeError("Obsidian Vault routing lock is a symlink")
+    flags = os.O_RDWR | os.O_CREAT | getattr(os, "O_NOFOLLOW", 0)
+    fd = os.open(lock_path, flags, 0o600)
+    acquired = False
+    try:
+        opened = os.fstat(fd)
+        if not stat.S_ISREG(opened.st_mode):
+            raise RuntimeError("Obsidian Vault routing lock must be a regular file")
+        linked = os.stat(lock_path, follow_symlinks=False)
+        if (linked.st_dev, linked.st_ino) != (opened.st_dev, opened.st_ino):
+            raise RuntimeError("Obsidian Vault routing lock changed during open")
+
+        if os.name == "nt":
+            import msvcrt
+            # msvcrt locks a byte range; ensure the lock byte exists.
+            if opened.st_size == 0:
+                os.write(fd, b"\0")
+            os.lseek(fd, 0, os.SEEK_SET)
+            msvcrt.locking(fd, msvcrt.LK_LOCK, 1)
+        else:
+            import fcntl
+            fcntl.flock(fd, fcntl.LOCK_EX)
+        acquired = True
+        yield
+    finally:
+        try:
+            if acquired:
+                if os.name == "nt":
+                    os.lseek(fd, 0, os.SEEK_SET)
+                    msvcrt.locking(fd, msvcrt.LK_UNLCK, 1)
+                else:
+                    fcntl.flock(fd, fcntl.LOCK_UN)
+        finally:
+            os.close(fd)
 
 
 def _now() -> datetime:
@@ -684,6 +731,7 @@ class SessionStore:
         self.config = config
         self._entries: Dict[str, SessionEntry] = {}
         self._loaded = False
+        self._index_digest = None  # Hash of the last loaded/saved routing index.
         self._lock = threading.Lock()
         self._has_active_processes_fn = has_active_processes_fn
 
@@ -706,6 +754,8 @@ class SessionStore:
                 raise RuntimeError("Obsidian Vault routing path contains a symlink")
         if (self.sessions_dir / "sessions.json").is_symlink():
             raise RuntimeError("Obsidian Vault routing index is a symlink")
+        if (self.sessions_dir / ".sessions.lock").is_symlink():
+            raise RuntimeError("Obsidian Vault routing lock is a symlink")
 
     def _ensure_loaded(self) -> None:
         """Load sessions index from disk if not already loaded."""
@@ -724,8 +774,9 @@ class SessionStore:
 
         if sessions_file.exists():
             try:
-                with open(sessions_file, "r", encoding="utf-8") as f:
-                    data = json.load(f)
+                with open(sessions_file, "rb") as f:
+                    raw = f.read()
+                data = json.loads(raw)
                 if not isinstance(data, dict):
                     raise ValueError("Gateway session index must be a JSON object")
                 # Stage entries so a failed load cannot leave a partially
@@ -736,6 +787,7 @@ class SessionStore:
                     # them would silently discard their routing entries on save.
                     loaded_entries[key] = SessionEntry.from_dict(entry_data)
                 self._entries.update(loaded_entries)
+                self._index_digest = hashlib.sha256(raw).digest()
             except Exception as e:
                 # Treat a damaged/unreadable Vault index as fatal. Continuing
                 # with an empty index would overwrite the original on _save().
@@ -746,31 +798,52 @@ class SessionStore:
         self._loaded = True
     
     def _save(self) -> None:
-        """Save sessions index to disk (kept for session key -> ID mapping)."""
+        """Commit the routing index without silently losing another writer's changes.
+
+        A process-local lock protects _entries; this Vault-local file lock
+        serializes the digest check and atomic replacement across processes.
+        Stale SessionStore instances fail closed and must be re-created.
+        """
         import tempfile
+
         self._assert_routing_path_safe()
         self.sessions_dir.mkdir(parents=True, exist_ok=True)
         self._assert_routing_path_safe()
         sessions_file = self.sessions_dir / "sessions.json"
 
-        data = {key: entry.to_dict() for key, entry in self._entries.items()}
-        fd, tmp_path = tempfile.mkstemp(
-            dir=str(self.sessions_dir), suffix=".tmp", prefix=".sessions_"
-        )
-        try:
-            with os.fdopen(fd, "w", encoding="utf-8") as f:
-                json.dump(data, f, indent=2)
-                f.flush()
-                os.fsync(f.fileno())
+        with _gateway_index_lock(self.sessions_dir / ".sessions.lock"):
             self._assert_routing_path_safe()
-            atomic_replace(tmp_path, sessions_file)
-        except BaseException:
             try:
-                os.unlink(tmp_path)
-            except OSError as e:
-                logger.debug("Could not remove temp file %s: %s", tmp_path, e)
-            raise
-    
+                current = sessions_file.read_bytes()
+            except FileNotFoundError:
+                current = None
+            current_digest = hashlib.sha256(current).digest() if current is not None else None
+            if current_digest != self._index_digest:
+                raise RuntimeError(
+                    "Obsidian gateway session index changed on disk; "
+                    "refusing to overwrite concurrent updates"
+                )
+
+            data = {key: entry.to_dict() for key, entry in self._entries.items()}
+            payload = json.dumps(data, indent=2).encode("utf-8")
+            fd, tmp_path = tempfile.mkstemp(
+                dir=str(self.sessions_dir), suffix=".tmp", prefix=".sessions_"
+            )
+            try:
+                with os.fdopen(fd, "wb") as f:
+                    f.write(payload)
+                    f.flush()
+                    os.fsync(f.fileno())
+                self._assert_routing_path_safe()
+                atomic_replace(tmp_path, sessions_file)
+                self._index_digest = hashlib.sha256(payload).digest()
+            except BaseException:
+                try:
+                    os.unlink(tmp_path)
+                except OSError as e:
+                    logger.debug("Could not remove temp file %s: %s", tmp_path, e)
+                raise
+
     def _generate_session_key(self, source: SessionSource) -> str:
         """Generate a session key from a source."""
         return build_session_key(
