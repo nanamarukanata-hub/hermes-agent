@@ -384,3 +384,38 @@ def test_final_index_symlink_swap_before_replace_stays_inside_vault(tmp_path, mo
     assert json.loads(index.read_text(encoding="utf-8"))[entry.session_key][
         "last_prompt_tokens"
     ] == 123
+
+
+@pytest.mark.skipif(os.name != "posix", reason="POSIX dirfd replacement regression")
+def test_parent_symlink_swap_during_replace_cannot_redirect_index(tmp_path, monkeypatch):
+    """Atomic replacement must stay in the opened routing directory."""
+    store = _store(tmp_path)
+    source = SessionSource(platform=Platform.DISCORD, chat_id="room", user_id="42")
+    entry = store.get_or_create_session(source)
+    original_dir = store.sessions_dir.with_name("GatewayRouting-original")
+    outside = tmp_path / "outside"
+    outside.mkdir()
+    outside_index = outside / "sessions.json"
+    outside_payload = b'{"outside": "must-not-overwrite"}'
+    outside_index.write_bytes(outside_payload)
+
+    original_replace = os.replace
+    swapped = False
+
+    def swap_parent_before_replace(src, dst, **kwargs):
+        nonlocal swapped
+        if not swapped and os.fspath(dst) in ("sessions.json", os.fspath(store.sessions_dir / "sessions.json")):
+            swapped = True
+            store.sessions_dir.rename(original_dir)
+            store.sessions_dir.symlink_to(outside, target_is_directory=True)
+        return original_replace(src, dst, **kwargs)
+
+    monkeypatch.setattr(os, "replace", swap_parent_before_replace)
+    store.update_session(entry.session_key, last_prompt_tokens=456)
+
+    assert swapped
+    assert outside_index.read_bytes() == outside_payload
+    assert (original_dir / "sessions.json").is_file()
+    assert json.loads((original_dir / "sessions.json").read_text(encoding="utf-8"))[
+        entry.session_key
+    ]["last_prompt_tokens"] == 456
