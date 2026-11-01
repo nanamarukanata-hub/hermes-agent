@@ -136,6 +136,8 @@ jobs:
         run: python -m pytest tests/test_holographic_vault_paths.py -q
       - name: Shared VaultDir read and path safety regression
         run: python -m pytest tests/test_vault_kv_symlink_guards.py -q
+      - name: Gateway routing index corruption fail-closed regression
+        run: python -m pytest tests/gateway/test_session_index_fail_closed.py -q
       - name: API response Vault-only persistence regression
         run: python -m pytest tests/gateway/test_api_server_vault_required.py -q
       - name: Syntax verification
