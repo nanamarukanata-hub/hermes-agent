@@ -56,6 +56,22 @@ def _gateway_index_lock(lock_path: Path):
             import fcntl
             fcntl.flock(fd, fcntl.LOCK_EX)
         acquired = True
+        # The pathname can be replaced while flock/msvcrt waits. A lock on
+        # the now-unlinked inode would not serialize writers opening its
+        # replacement, so verify the inode again after acquiring the lock.
+        try:
+            current = os.stat(lock_path, follow_symlinks=False)
+        except OSError as exc:
+            raise RuntimeError(
+                "Obsidian Vault routing lock changed during acquisition"
+            ) from exc
+        if (
+            not stat.S_ISREG(current.st_mode)
+            or (current.st_dev, current.st_ino) != (opened.st_dev, opened.st_ino)
+        ):
+            raise RuntimeError(
+                "Obsidian Vault routing lock changed during acquisition"
+            )
         yield
     finally:
         try:
