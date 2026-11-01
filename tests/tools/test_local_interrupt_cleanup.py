@@ -90,18 +90,24 @@ def test_kill_process_uses_cached_pgid_if_wrapper_already_exited(monkeypatch):
     assert killpg_calls == [(67890, signal.SIGTERM), (67890, 0)]
 
 
-def test_wait_for_process_kills_subprocess_on_keyboardinterrupt():
+def test_wait_for_process_kills_subprocess_on_keyboardinterrupt(monkeypatch):
     """When KeyboardInterrupt arrives mid-poll, the subprocess group must be
     killed before the exception is re-raised."""
     env = LocalEnvironment(cwd="/tmp")
     try:
         result_holder = {}
-        proc_holder = {}
-        started = threading.Event()
-        raise_at = [None]  # set by the main thread to tell worker when
+        interrupt_requested = threading.Event()
 
-        # Drive execute() on a separate thread so we can SIGNAL-interrupt it
-        # via a thread-targeted exception without killing our test process.
+        # Drive execute() on a separate thread, but inject the interrupt at
+        # the poll checkpoint rather than at an arbitrary Python bytecode.
+        # PyThreadState_SetAsyncExc can interrupt the cleanup itself and
+        # leave a child alive for reasons unrelated to the guarded poll path.
+        def interrupt_at_poll():
+            if interrupt_requested.is_set() and threading.current_thread() is t:
+                raise KeyboardInterrupt
+            return False
+
+        monkeypatch.setattr("tools.environments.base.is_interrupted", interrupt_at_poll)
         def worker():
             # Spawn a subprocess that will definitely be alive long enough
             # to observe the cleanup, via env.execute(...) — the normal path
@@ -151,19 +157,9 @@ def test_wait_for_process_kills_subprocess_on_keyboardinterrupt():
         pgid = os.getpgid(target_pid)
         assert _pgid_still_alive(pgid), "sanity: subprocess should be alive"
 
-        # Now inject a KeyboardInterrupt into the worker thread the same
-        # way CPython's signal machinery would.  We use ctypes.PyThreadState_SetAsyncExc
-        # which is how signal delivery to non-main threads is simulated.
-        import ctypes
-        import sys as _sys
-        # py-thread-state exception targets need the ident, not the Thread
-        tid = t.ident
-        assert tid is not None
-        # Fire KeyboardInterrupt into the worker thread
-        ret = ctypes.pythonapi.PyThreadState_SetAsyncExc(
-            ctypes.c_ulong(tid), ctypes.py_object(KeyboardInterrupt),
-        )
-        assert ret == 1, f"SetAsyncExc returned {ret}, expected 1"
+        # Trigger KeyboardInterrupt on the next guarded poll iteration.
+        # This exercises the real subprocess-group cleanup deterministically.
+        interrupt_requested.set()
 
         # Give the worker a moment to: hit the exception at the next poll,
         # run the except-block cleanup (_kill_process), and exit.
