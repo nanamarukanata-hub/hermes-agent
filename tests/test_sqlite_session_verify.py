@@ -151,5 +151,62 @@ class SessionMigrationVerificationTests(unittest.TestCase):
         self.assertFalse(list(self.vault.rglob("*.db")))
 
 
+    def test_message_id_timestamp_order_and_content_parity(self):
+        """Equal-timestamp messages must preserve ID order and verify every field."""
+        with sqlite3.connect(self.source) as conn:
+            conn.execute("DELETE FROM messages")
+            # Insert out of ID order to prove migration does not use insertion order.
+            for message_id, content in (
+                (30, "最後の発言"),
+                (10, "最初の発言"),
+                (20, "途中の発言"),
+            ):
+                conn.execute(
+                    "INSERT INTO messages VALUES (?, ?, ?, ?, ?, ?)",
+                    (message_id, "legacy1", "user", content, 101.0, None),
+                )
+        source_before = self.source.read_bytes()
+        committed = migrate(self.source, commit=True)
+        self.assertEqual(committed["written"], 1)
+        self.assertEqual(committed["messages"], 3)
+        store = SessionDB()
+        expected = store.get_messages("legacy1")
+        self.assertEqual([m["id"] for m in expected], [10, 20, 30])
+        self.assertEqual(
+            [m["content"] for m in expected],
+            ["最初の発言", "途中の発言", "最後の発言"],
+        )
+        self.assertEqual([m["timestamp"] for m in expected], [101.0] * 3)
+        self.assertEqual(migrate(self.source, verify=True)["verified"], 1)
+
+        metadata = (
+            self.vault / "06_Automation/Hermes/Sessions/legacy1/metadata.json"
+        )
+        for change in ("id", "timestamp", "content", "order"):
+            with self.subTest(change=change):
+                def tamper(record):
+                    msgs = record["messages"]
+                    if change == "id":
+                        msgs[0]["id"] = 999
+                    elif change == "timestamp":
+                        msgs[0]["timestamp"] = 999.0
+                    elif change == "content":
+                        msgs[0]["content"] = "改ざん"
+                    else:
+                        msgs.reverse()
+
+                store._edit("legacy1", tamper)
+                before_verify = metadata.read_bytes()
+                with self.assertRaisesRegex(RuntimeError, "Conflicting Vault session"):
+                    migrate(self.source, verify=True)
+                # Verification is read-only, even on a mismatching Vault record.
+                self.assertEqual(metadata.read_bytes(), before_verify)
+                store._edit("legacy1", lambda record: record.update(
+                    messages=[dict(message) for message in expected]
+                ))
+                self.assertEqual(migrate(self.source, verify=True)["verified"], 1)
+        self.assertEqual(self.source.read_bytes(), source_before)
+
+
 if __name__ == "__main__":
     unittest.main()
