@@ -710,11 +710,9 @@ class SessionStore:
                 # restored in-memory index behind.
                 loaded_entries: Dict[str, SessionEntry] = {}
                 for key, entry_data in data.items():
-                    try:
-                        loaded_entries[key] = SessionEntry.from_dict(entry_data)
-                    except (ValueError, KeyError):
-                        # Preserve compatibility with removed platform values.
-                        continue
+                    # Unknown/removed platforms must also fail closed: skipping
+                    # them would silently discard their routing entries on save.
+                    loaded_entries[key] = SessionEntry.from_dict(entry_data)
                 self._entries.update(loaded_entries)
             except Exception as e:
                 # Treat a damaged/unreadable Vault index as fatal. Continuing
