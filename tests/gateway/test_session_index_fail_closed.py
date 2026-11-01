@@ -128,3 +128,61 @@ def test_symlink_swap_after_load_blocks_subsequent_index_save(tmp_path):
 
     assert not (outside / "sessions.json").exists()
     assert (original_dir / "sessions.json").exists()
+
+
+def test_two_gateway_instances_cannot_overwrite_each_others_new_sessions(tmp_path):
+    """A stale instance must not replace the index after another writer commits."""
+    first = _store(tmp_path)
+    second = _store(tmp_path)
+    first._ensure_loaded()
+    second._ensure_loaded()
+
+    alice = SessionSource(platform=Platform.DISCORD, chat_id="alice", user_id="1")
+    bob = SessionSource(platform=Platform.DISCORD, chat_id="bob", user_id="2")
+    first_entry = first.get_or_create_session(alice)
+    index = first.sessions_dir / "sessions.json"
+    committed = index.read_bytes()
+
+    with pytest.raises(RuntimeError, match="changed on disk"):
+        second.get_or_create_session(bob)
+
+    assert index.read_bytes() == committed
+    assert list(json.loads(committed)) == [first_entry.session_key]
+    # A stale in-memory index must not be reused to overwrite the newer file.
+    with pytest.raises(RuntimeError, match="changed on disk"):
+        second.update_session(second._generate_session_key(bob))
+
+
+def test_stale_gateway_instance_cannot_discard_later_session(tmp_path):
+    first = _store(tmp_path)
+    initial = SessionSource(platform=Platform.DISCORD, chat_id="initial", user_id="1")
+    initial_entry = first.get_or_create_session(initial)
+
+    second = _store(tmp_path)
+    second._ensure_loaded()
+    later = SessionSource(platform=Platform.DISCORD, chat_id="later", user_id="2")
+    later_entry = first.get_or_create_session(later)
+    committed = (first.sessions_dir / "sessions.json").read_bytes()
+
+    other = SessionSource(platform=Platform.DISCORD, chat_id="other", user_id="3")
+    with pytest.raises(RuntimeError, match="changed on disk"):
+        second.get_or_create_session(other)
+
+    assert (first.sessions_dir / "sessions.json").read_bytes() == committed
+    assert set(json.loads(committed)) == {initial_entry.session_key, later_entry.session_key}
+
+
+def test_symlinked_gateway_lock_cannot_redirect_index_write(tmp_path):
+    store = _store(tmp_path)
+    outside = tmp_path / "outside-lock"
+    outside.write_bytes(b"outside")
+    lock_path = store.sessions_dir / ".sessions.lock"
+    lock_path.parent.mkdir(parents=True, exist_ok=True)
+    lock_path.symlink_to(outside)
+
+    source = SessionSource(platform=Platform.DISCORD, chat_id="room", user_id="42")
+    with pytest.raises(RuntimeError, match="symlink"):
+        store.get_or_create_session(source)
+
+    assert outside.read_bytes() == b"outside"
+    assert not (store.sessions_dir / "sessions.json").exists()
