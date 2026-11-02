@@ -32,7 +32,7 @@ class ObsidianStateTests(unittest.TestCase):
 
         def swap_at_open(path, flags, mode=0o777, *, dir_fd=None):
             nonlocal swapped
-            if path == "race_before_open" and dir_fd is not None and not swapped:
+            if path == "race_before_open" and dir_fd is not None and parent.is_dir() and not swapped:
                 swapped = True
                 parent.rename(backup)
                 parent.symlink_to(outside, target_is_directory=True)
