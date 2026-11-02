@@ -72,6 +72,48 @@ def _system_package_install_cmd(pkg: str) -> str:
     return f"sudo apt install {pkg}"
 
 
+def _check_vault_curated_memory(vault_root, hermes_home, check_ok, check_info, check_warn):
+    """Inspect canonical curated memory without creating or modifying any files."""
+    legacy = hermes_home / "memories"
+    if any((legacy / name).exists() or (legacy / name).is_symlink()
+           for name in ("MEMORY.md", "USER.md")):
+        check_info("Legacy HERMES_HOME/memories files retained; reconcile with Vault manually")
+
+    if not vault_root:
+        check_warn("HERMES_OBSIDIAN_VAULT is required for curated memory")
+        return
+
+    root = Path(vault_root).expanduser()
+    if root.is_symlink() or not root.is_dir():
+        check_warn("Obsidian Vault missing or unsafe; curated memory unavailable")
+        return
+
+    directory = root
+    for component in ("06_Automation", "Hermes", "CuratedMemory"):
+        directory = directory / component
+        if directory.is_symlink() or (directory.exists() and not directory.is_dir()):
+            check_warn("Unsafe Obsidian Vault curated-memory directory")
+            return
+
+    if not directory.is_dir():
+        check_info("Vault CuratedMemory not created yet (created on first memory load)")
+        return
+
+    for name in ("MEMORY.md", "USER.md"):
+        path = directory / name
+        if path.is_symlink() or (path.exists() and not path.is_file()):
+            check_warn(f"Unsafe Vault {name} file")
+        elif path.is_file():
+            try:
+                size = path.stat().st_size
+            except OSError:
+                check_warn(f"Cannot inspect Vault {name}")
+            else:
+                check_ok(f"Vault {name} exists ({size} bytes)")
+        else:
+            check_info(f"Vault {name} not created yet")
+
+
 def _safe_which(cmd: str) -> str | None:
     """shutil.which wrapper resilient to platform monkeypatching in tests."""
     try:
@@ -722,7 +764,7 @@ def run_doctor(args):
             check_warn(f"{_DHH} not found", "(will be created on first use)")
     
     # Check expected subdirectories
-    expected_subdirs = ["cron", "sessions", "logs", "skills", "memories"]
+    expected_subdirs = ["cron", "logs", "skills"]
     for subdir_name in expected_subdirs:
         subdir_path = hermes_home / subdir_name
         if subdir_path.exists():
@@ -758,29 +800,13 @@ def run_doctor(args):
             check_ok(f"Created {_DHH}/SOUL.md with basic template")
             fixed_count += 1
     
-    # Check memory directory
-    memories_dir = hermes_home / "memories"
-    if memories_dir.exists():
-        check_ok(f"{_DHH}/memories/ directory exists")
-        memory_file = memories_dir / "MEMORY.md"
-        user_file = memories_dir / "USER.md"
-        if memory_file.exists():
-            size = len(memory_file.read_text(encoding="utf-8").strip())
-            check_ok(f"MEMORY.md exists ({size} chars)")
-        else:
-            check_info("MEMORY.md not created yet (will be created when the agent first writes a memory)")
-        if user_file.exists():
-            size = len(user_file.read_text(encoding="utf-8").strip())
-            check_ok(f"USER.md exists ({size} chars)")
-        else:
-            check_info("USER.md not created yet (will be created when the agent first writes a memory)")
-    else:
-        check_warn(f"{_DHH}/memories/ not found", "(will be created on first use)")
-        if should_fix:
-            memories_dir.mkdir(parents=True, exist_ok=True)
-            check_ok(f"Created {_DHH}/memories/")
-            fixed_count += 1
-    
+    # Curated MEMORY.md and USER.md live in the Vault, not HERMES_HOME.
+    # Doctor is read-only here, including when --fix is requested.
+    _check_vault_curated_memory(
+        os.environ.get("HERMES_OBSIDIAN_VAULT", "").strip(),
+        hermes_home, check_ok, check_info, check_warn,
+    )
+
     # Check Obsidian Vault session store (canonical since the SQLite
     # session store was replaced).  A legacy state.db is never opened
     # here — it is reported as a legacy artifact only.
