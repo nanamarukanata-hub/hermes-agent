@@ -149,6 +149,21 @@ jobs:
       - name: Syntax verification
         run: python -m py_compile hermes_state.py hermes_obsidian_state.py hermes_hybrid/sqlite_audit.py scripts/migrate_sessions_to_obsidian.py scripts/migrate_kanban_to_vault.py scripts/migrate_sqlite_to_vault.py gateway/session.py gateway/platforms/helpers.py gateway/platforms/api_server.py
 
+  # This guard MUST block CI: an unsupported Windows backend must reject
+  # startup without writing Vault data or silently restoring SQLite.
+  # Keep separate from the expected-to-fail persistence diagnostic below.
+  windows-fail-closed-guard:
+    name: Windows Vault fail-closed safety regression (required)
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+      - name: Reject unsafe Windows startup and SQLite fallback
+        shell: pwsh
+        run: python -m unittest discover -s tests -t . -p 'test_obsidian_windows_fail_closed.py' -v
+
   # Diagnostic only: the current SessionDB uses POSIX fcntl/dir_fd primitives.
   # Keep this non-blocking until a Windows-safe Vault implementation is reviewed.
   windows-compatibility-probe:
@@ -160,9 +175,6 @@ jobs:
       - uses: actions/setup-python@v5
         with:
           python-version: '3.11'
-      - name: Windows fail-closed guard regression
-        shell: pwsh
-        run: python -m unittest discover -s tests -t . -p 'test_obsidian_windows_fail_closed.py' -v
       - name: Probe Vault-only session persistence and restart
         shell: pwsh
         run: |
