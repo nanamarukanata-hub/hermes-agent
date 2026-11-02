@@ -551,7 +551,7 @@ class ObsidianStateTests(unittest.TestCase):
 
             def swap_at_open(path, flags, mode=0o777, *, dir_fd=None):
                 nonlocal swapped
-                if Path(path) == meta and not swapped:
+                if path == "state_meta.json" and dir_fd is not None and not swapped:
                     swapped = True
                     meta.unlink()
                     meta.symlink_to(external)
@@ -564,6 +564,38 @@ class ObsidianStateTests(unittest.TestCase):
                     self.db.get_meta("private")
             self.assertTrue(swapped)
             self.assertEqual(external.read_text(encoding="utf-8"), original)
+
+    def test_state_meta_parent_swap_cannot_read_outside_vault(self):
+        # A swapped Sessions/ parent must never redirect the metadata read.
+        self.db.set_meta("safe", "vault")
+        parent = self.db.root
+        backup = parent.with_name("Sessions_backup")
+        with tempfile.TemporaryDirectory() as outside:
+            external = Path(outside) / "state_meta.json"
+            original = '{"private": "outside"}'
+            external.write_text(original, encoding="utf-8")
+            real_open = os.open
+            swapped = False
+
+            def swap_parent_at_open(path, flags, mode=0o777, *, dir_fd=None):
+                nonlocal swapped
+                if path == "state_meta.json" and dir_fd is not None and not swapped:
+                    swapped = True
+                    parent.rename(backup)
+                    parent.symlink_to(outside, target_is_directory=True)
+                if dir_fd is None:
+                    return real_open(path, flags, mode)
+                return real_open(path, flags, mode, dir_fd=dir_fd)
+
+            with patch("hermes_obsidian_state.os.open", side_effect=swap_parent_at_open):
+                with self.assertRaisesRegex(RuntimeError, "directory moved during write"):
+                    self.db.get_meta("private")
+            self.assertTrue(swapped)
+            self.assertEqual(external.read_text(encoding="utf-8"), original)
+            self.assertEqual(
+                (backup / "state_meta.json").read_text(encoding="utf-8"),
+                '{"safe": "vault"}',
+            )
 
     def test_state_meta_fifo_is_rejected_without_blocking(self):
         # O_NONBLOCK must prevent a named pipe from hanging the reader.
