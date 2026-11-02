@@ -210,6 +210,11 @@ class SessionDB:
                     dir_fd=dir_fd,
                 )
             except FileNotFoundError:
+                # An existing session directory containing a transcript or
+                # interrupted write is not a new session. Refuse to overwrite
+                # orphaned Vault data when metadata.json is missing.
+                if os.listdir(dir_fd):
+                    raise RuntimeError(f"Incomplete Vault session metadata: {sid}")
                 self._assert_write_dir_attached(folder, dir_fd)
                 return None
             except OSError as exc:
