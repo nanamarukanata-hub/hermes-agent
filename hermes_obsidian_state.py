@@ -218,6 +218,12 @@ class SessionDB:
             # A parent renamed while the read was in progress must not be
             # accepted as a successful read from the canonical Vault path.
             self._assert_write_dir_attached(folder, dir_fd)
+            # A corrupt or mislabelled record must never be interpreted as
+            # another session, silently hidden, or accepted for mutation.
+            if (not isinstance(item, dict) or item.get("id") != sid
+                    or not isinstance(item.get("messages"), list)
+                    or any(not isinstance(msg, dict) for msg in item["messages"])):
+                raise RuntimeError(f"Invalid Vault session metadata: {sid}")
             return item
         finally:
             os.close(dir_fd)
