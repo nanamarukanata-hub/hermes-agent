@@ -1,4 +1,5 @@
 """Regression tests for the SQLite-free Obsidian session backend."""
+import json
 import os
 import sqlite3
 import tempfile
@@ -534,6 +535,29 @@ class ObsidianStateTests(unittest.TestCase):
             self.assertTrue(swapped)
             self.assertEqual(external.read_text(encoding="utf-8"), external_text)
             self.assertTrue((original_parent / "metadata.json").is_file())
+
+    def test_invalid_session_metadata_fails_closed_without_rewriting(self):
+        # Session identity and message structure must survive restart exactly.
+        self.db.create_session("integrity", "discord")
+        metadata = self.db.root / "integrity" / "metadata.json"
+        invalid_payloads = (
+            ("mismatched_id", {"id": "another_session", "messages": []}),
+            ("non_object", []),
+            ("non_list_messages", {"id": "integrity", "messages": {}}),
+            ("non_object_message", {"id": "integrity", "messages": [None]}),
+        )
+        for label, payload in invalid_payloads:
+            with self.subTest(case=label):
+                original = json.dumps(payload, ensure_ascii=False)
+                metadata.write_text(original, encoding="utf-8")
+                reopened = SessionDB()
+                with self.assertRaisesRegex(RuntimeError, "Invalid Vault session metadata"):
+                    reopened.get_session("integrity")
+                with self.assertRaisesRegex(RuntimeError, "Invalid Vault session metadata"):
+                    reopened.session_count()
+                with self.assertRaisesRegex(RuntimeError, "Invalid Vault session metadata"):
+                    reopened.append_message("integrity", "user", "must not write")
+                self.assertEqual(metadata.read_text(encoding="utf-8"), original)
 
     def test_metadata_directory_cannot_be_treated_as_file(self):
         folder = self.db.root / "bad_meta"
