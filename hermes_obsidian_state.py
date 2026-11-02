@@ -51,6 +51,11 @@ class SessionDB:
         self.vault = Path(base).expanduser().resolve()
         if not self.vault.is_dir():
             raise RuntimeError(f"Obsidian Vault directory is missing: {self.vault}")
+        # Pin the Vault root itself. O_NOFOLLOW only protects the final
+        # pathname component; a replaced real directory (or swapped ancestor)
+        # could otherwise redirect descriptor-relative traversal to a new root.
+        vault_stat = os.stat(self.vault, follow_symlinks=False)
+        self._vault_identity = (vault_stat.st_dev, vault_stat.st_ino)
         # Validate every path component BEFORE mkdir: a symlinked parent
         # could otherwise cause mkdir(parents=True) to create directories
         # outside the Vault before the final root check rejects it.
@@ -125,6 +130,9 @@ class SessionDB:
         flags = os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW | os.O_CLOEXEC
         fd = os.open(self.vault, flags)
         try:
+            root_stat = os.fstat(fd)
+            if (root_stat.st_dev, root_stat.st_ino) != self._vault_identity:
+                raise RuntimeError("Obsidian Vault root changed during session operation")
             for component in directory.relative_to(self.vault).parts:
                 if component in (".", ".."):
                     raise RuntimeError("Unsafe Vault session directory")
