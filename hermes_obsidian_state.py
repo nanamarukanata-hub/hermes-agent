@@ -769,26 +769,38 @@ class SessionDB:
             return finalized
 
     def _read_state_meta(self):
-        path = self.root / "state_meta.json"
-        # Validate the opened descriptor rather than a pathname precheck:
-        # another process can replace state_meta.json with a symlink between
-        # is_symlink() and read_text(). O_NONBLOCK prevents FIFO read hangs.
+        # Pin every Vault parent component before opening global metadata.
+        # O_NOFOLLOW alone protects only the final filename: a replaced
+        # Sessions/ directory must not redirect reads outside the Vault.
         try:
-            fd = os.open(
-                path, os.O_RDONLY | os.O_NOFOLLOW | os.O_CLOEXEC | os.O_NONBLOCK
-            )
-        except FileNotFoundError:
-            return {}
+            root_fd = self._open_write_dir(self.root)
         except OSError as exc:
             raise RuntimeError("Unsafe Vault state metadata") from exc
         try:
-            if not stat.S_ISREG(os.fstat(fd).st_mode):
-                raise RuntimeError("Unsafe Vault state metadata")
-        except BaseException:
-            os.close(fd)
-            raise
-        with os.fdopen(fd, "r", encoding="utf-8") as stream:
-            data = json.load(stream)
+            self._assert_write_dir_attached(self.root, root_fd)
+            try:
+                fd = os.open(
+                    "state_meta.json",
+                    os.O_RDONLY | os.O_NOFOLLOW | os.O_CLOEXEC | os.O_NONBLOCK,
+                    dir_fd=root_fd,
+                )
+            except FileNotFoundError:
+                self._assert_write_dir_attached(self.root, root_fd)
+                return {}
+            except OSError as exc:
+                raise RuntimeError("Unsafe Vault state metadata") from exc
+            try:
+                if not stat.S_ISREG(os.fstat(fd).st_mode):
+                    raise RuntimeError("Unsafe Vault state metadata")
+                with os.fdopen(fd, "r", encoding="utf-8") as stream:
+                    fd = -1
+                    data = json.load(stream)
+            finally:
+                if fd >= 0:
+                    os.close(fd)
+            self._assert_write_dir_attached(self.root, root_fd)
+        finally:
+            os.close(root_fd)
         if not isinstance(data, dict):
             raise RuntimeError("Invalid Vault state metadata")
         return data
