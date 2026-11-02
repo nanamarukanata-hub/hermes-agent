@@ -169,27 +169,43 @@ class SessionDB:
     def _load(self, sid):
         folder = self._folder(sid)
         metadata = folder / "metadata.json"
-        # Check the opened inode, not just the pathname: a symlink can be
-        # swapped in after an is_symlink() check but before read_text().
+        # O_NOFOLLOW only protects the final component. Pin the parent folder
+        # with descriptor-relative traversal, so a swapped directory symlink
+        # cannot redirect the metadata read outside the Vault.
         try:
-            fd = os.open(
-                metadata, os.O_RDONLY | os.O_NOFOLLOW | os.O_CLOEXEC | os.O_NONBLOCK
-            )
+            dir_fd = self._open_write_dir(folder)
         except FileNotFoundError:
             return None
         except OSError as exc:
-            raise RuntimeError(f"Unsafe Vault session metadata: {sid}") from exc
-        # Validate the descriptor before fdopen: wrapping a directory as a
-        # text stream raises IsADirectoryError rather than our fail-closed
-        # RuntimeError. O_NONBLOCK also prevents a FIFO from hanging reads.
+            raise RuntimeError(f"Unsafe Vault session directory: {sid}") from exc
         try:
-            if not stat.S_ISREG(os.fstat(fd).st_mode):
-                raise RuntimeError(f"Invalid Vault session metadata: {sid}")
-        except BaseException:
-            os.close(fd)
-            raise
-        with os.fdopen(fd, "r", encoding="utf-8") as stream:
-            return json.load(stream)
+            self._assert_write_dir_attached(folder, dir_fd)
+            try:
+                fd = os.open(
+                    metadata.name,
+                    os.O_RDONLY | os.O_NOFOLLOW | os.O_CLOEXEC | os.O_NONBLOCK,
+                    dir_fd=dir_fd,
+                )
+            except FileNotFoundError:
+                self._assert_write_dir_attached(folder, dir_fd)
+                return None
+            except OSError as exc:
+                raise RuntimeError(f"Unsafe Vault session metadata: {sid}") from exc
+            try:
+                if not stat.S_ISREG(os.fstat(fd).st_mode):
+                    raise RuntimeError(f"Invalid Vault session metadata: {sid}")
+                with os.fdopen(fd, "r", encoding="utf-8") as stream:
+                    fd = -1
+                    item = json.load(stream)
+            finally:
+                if fd >= 0:
+                    os.close(fd)
+            # A parent renamed while the read was in progress must not be
+            # accepted as a successful read from the canonical Vault path.
+            self._assert_write_dir_attached(folder, dir_fd)
+            return item
+        finally:
+            os.close(dir_fd)
 
     def _save(self, sid, item):
         folder = self._folder(sid)
