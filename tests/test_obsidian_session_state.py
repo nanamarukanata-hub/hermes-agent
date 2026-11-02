@@ -463,7 +463,7 @@ class ObsidianStateTests(unittest.TestCase):
 
             def swap_at_open(path, flags, mode=0o777, *, dir_fd=None):
                 nonlocal swapped
-                if Path(path) == metadata and not swapped:
+                if path == "metadata.json" and dir_fd is not None and not swapped:
                     swapped = True
                     metadata.unlink()
                     metadata.symlink_to(external)
@@ -476,6 +476,36 @@ class ObsidianStateTests(unittest.TestCase):
                     self.db.get_session("swap_meta")
             self.assertTrue(swapped)
             self.assertEqual(external.read_text(encoding="utf-8"), original)
+
+    def test_metadata_parent_swap_during_read_does_not_follow_external_directory(self):
+        # A final-component O_NOFOLLOW is insufficient if a parent directory
+        # is swapped to a symlink just before metadata.json is opened.
+        self.db.create_session("parent_read_race", "discord")
+        parent = self.db.root / "parent_read_race"
+        original_parent = self.db.root / "parent_read_race_original"
+        with tempfile.TemporaryDirectory() as outside:
+            external = Path(outside) / "metadata.json"
+            external_text = '{"id": "external_secret", "messages": []}'
+            external.write_text(external_text, encoding="utf-8")
+            real_open = os.open
+            swapped = False
+
+            def swap_parent_at_metadata_open(path, flags, mode=0o777, *, dir_fd=None):
+                nonlocal swapped
+                if path == "metadata.json" and dir_fd is not None and not swapped:
+                    swapped = True
+                    parent.rename(original_parent)
+                    parent.symlink_to(outside, target_is_directory=True)
+                if dir_fd is None:
+                    return real_open(path, flags, mode)
+                return real_open(path, flags, mode, dir_fd=dir_fd)
+
+            with patch("hermes_obsidian_state.os.open", side_effect=swap_parent_at_metadata_open):
+                with self.assertRaisesRegex(RuntimeError, "directory moved during write"):
+                    self.db.get_session("parent_read_race")
+            self.assertTrue(swapped)
+            self.assertEqual(external.read_text(encoding="utf-8"), external_text)
+            self.assertTrue((original_parent / "metadata.json").is_file())
 
     def test_metadata_directory_cannot_be_treated_as_file(self):
         folder = self.db.root / "bad_meta"
