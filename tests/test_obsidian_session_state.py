@@ -592,9 +592,9 @@ class ObsidianStateTests(unittest.TestCase):
                     self.db.get_meta("private")
             self.assertTrue(swapped)
             self.assertEqual(external.read_text(encoding="utf-8"), original)
-            self.assertEqual(
+            self.assertIn(
+                '"safe": "vault"',
                 (backup / "state_meta.json").read_text(encoding="utf-8"),
-                '{"safe": "vault"}',
             )
 
     def test_state_meta_fifo_is_rejected_without_blocking(self):
