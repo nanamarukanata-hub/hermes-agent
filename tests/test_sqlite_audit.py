@@ -121,6 +121,33 @@ def test_sqlite_sidecars_are_detected_even_without_main_db(tmp_path):
     assert {Path(p).name for p in audit(tmp_path)["db_files"]} == names
     assert {p.name: p.read_bytes() for p in tmp_path.iterdir() if p.is_file()} == before
 
+@pytest.mark.parametrize("source", [
+    "from sqlalchemy import create_engine\ndb = create_engine(f'sqlite:///{db_path}')\n",
+    "from sqlalchemy import create_engine\ndb = create_engine('sqlite:///' + db_path)\n",
+    "from sqlalchemy import create_engine\nurl = f'sqlite:///{db_path}'\ndb = create_engine(url)\n",
+    "from sqlalchemy import create_engine\nurl = 'sqlite' + ':///session.db'\ndb = create_engine(url)\n",
+    "from sqlalchemy.ext.asyncio import create_async_engine\ndb = create_async_engine(f'sqlite+aiosqlite:///{db_path}')\n",
+    "import importlib\ndb = importlib.import_module('sqlite' + '3')\n",
+    "db = __import__('sql' + 'ite3')\n",
+])
+def test_runtime_audit_detects_composed_sqlite_urls_and_imports(tmp_path, source):
+    path = tmp_path / "runtime.py"
+    path.write_text(source, encoding="utf-8")
+    assert audit(tmp_path)["sqlite_imports"] == [str(path)]
+
+
+@pytest.mark.parametrize("source", [
+    "from sqlalchemy import create_engine\ndb = create_engine(f'postgresql:///{db_path}')\n",
+    "from sqlalchemy import create_engine\ndb = create_engine(f'{dialect}:///session.db')\n",
+    "from sqlalchemy import create_engine\nurl = 'sqlite:///old.db'\nurl = 'postgresql:///new.db'\ndb = create_engine(url)\n",
+    "import importlib\ndb = importlib.import_module('sqlite3' + suffix)\n",
+])
+def test_runtime_audit_does_not_guess_dynamic_dialects_or_imports(tmp_path, source):
+    path = tmp_path / "runtime.py"
+    path.write_text(source, encoding="utf-8")
+    assert audit(tmp_path)["sqlite_imports"] == []
+
+
 # These are active Discord/session/Vault runtime entry points, not offline
 # SQLite-to-Vault migration tools. A regression here would reintroduce a
 # database dependency even when the synthetic audit fixtures still pass.
