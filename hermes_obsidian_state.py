@@ -6,7 +6,13 @@ No database, WAL, FTS, or non-Vault persistent index is created.
 """
 from __future__ import annotations
 
-import fcntl
+try:
+    import fcntl
+except ImportError:
+    # Windows has no fcntl. Keep the module importable for diagnostics,
+    # but reject SessionDB construction until secure native I/O exists.
+    fcntl = None
+
 import json
 import math
 import os
@@ -26,6 +32,15 @@ class SessionDB:
     """Hermes SessionDB-compatible file backend for the Discord/CLI core."""
 
     def __init__(self, db_path=None, vault_path=None, create_dirs=True):
+        # POSIX dir_fd/O_NOFOLLOW/flock guarantees do not have safe
+        # drop-in equivalents on Windows. Never silently fall back to
+        # unsafe path-based I/O or the retired SQLite runtime.
+        if fcntl is None or os.name == "nt":
+            raise RuntimeError(
+                "Windows Obsidian SessionDB is not yet supported: secure "
+                "Windows-native locking and no-follow directory I/O are required; "
+                "SQLite fallback is disabled"
+            )
         # vault_path is an explicit override for tests and embedders;
         # otherwise HERMES_OBSIDIAN_VAULT is required.  db_path is a
         # legacy compatibility argument and is ignored (it used to
