@@ -238,7 +238,12 @@ class SessionDB:
 
     def _items(self):
         for folder in sorted(self.root.iterdir()):
-            if not folder.is_dir() or folder.is_symlink():
+            # A linked session must not disappear silently from search, counts,
+            # export, or resume: callers could mistake hidden data for loss.
+            # Fail closed just as direct _load() does for unsafe folders.
+            if folder.is_symlink():
+                raise RuntimeError(f"Unsafe Vault session directory: {folder.name}")
+            if not folder.is_dir():
                 continue
             try:
                 item = self._load(folder.name)
