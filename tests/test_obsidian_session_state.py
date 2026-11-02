@@ -844,6 +844,15 @@ class ObsidianStateTests(unittest.TestCase):
                 self.db.create_session("replaced_lock", "discord")
         self.assertFalse((self.db.root / "replaced_lock").exists())
 
+    def test_writer_lock_replacement_during_guard_is_reported(self):
+        # A second writer could lock a new inode if the lockfile pathname is
+        # replaced after acquisition. Detect lost exclusion on guard exit.
+        with self.assertRaisesRegex(RuntimeError, "changed during operation"):
+            with self.db._guard():
+                self.db._lockfile.unlink()
+                self.db._lockfile.write_text("replacement", encoding="utf-8")
+        self.assertEqual(list(self.db.root.glob("*/metadata.json")), [])
+
     def test_global_state_meta_normal_roundtrip(self):
         self.assertIsNone(self.db.get_meta("last_auto_prune"))
         self.db.set_meta("last_auto_prune", "123")
