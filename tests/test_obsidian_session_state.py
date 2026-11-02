@@ -596,6 +596,26 @@ class ObsidianStateTests(unittest.TestCase):
             self.assertEqual(external.read_text(encoding="utf-8"), external_text)
             self.assertTrue((original_parent / "metadata.json").is_file())
 
+    def test_orphaned_transcript_without_metadata_is_not_overwritten(self):
+        # A crash or partial migration can leave a transcript without JSON.
+        # Treat it as incomplete data, not as a new empty session.
+        sid = "orphaned_transcript"
+        folder = self.db.root / sid
+        folder.mkdir()
+        transcript = folder / "Transcript.md"
+        original = "# Conversation that must survive\\n"
+        transcript.write_text(original, encoding="utf-8")
+
+        reopened = SessionDB()
+        with self.assertRaisesRegex(RuntimeError, "Incomplete Vault session metadata"):
+            reopened.get_session(sid)
+        with self.assertRaisesRegex(RuntimeError, "Incomplete Vault session metadata"):
+            reopened.session_count()
+        with self.assertRaisesRegex(RuntimeError, "Incomplete Vault session metadata"):
+            reopened.create_session(sid, "discord")
+        self.assertEqual(transcript.read_text(encoding="utf-8"), original)
+        self.assertFalse((folder / "metadata.json").exists())
+
     def test_invalid_session_metadata_fails_closed_without_rewriting(self):
         # Session identity and message structure must survive restart exactly.
         self.db.create_session("integrity", "discord")
