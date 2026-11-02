@@ -21,6 +21,32 @@ class ObsidianStateTests(unittest.TestCase):
         self.patch.stop()
         self.temp.cleanup()
 
+    def test_vault_root_replacement_rejects_reads_and_writes(self):
+        # A real-directory replacement is not a symlink: O_NOFOLLOW alone
+        # cannot detect it. The original Vault identity must remain pinned.
+        with tempfile.TemporaryDirectory() as parent:
+            vault = Path(parent) / "vault"
+            vault.mkdir()
+            db = SessionDB(vault_path=vault)
+            db.create_session("existing", "discord")
+            db.append_message("existing", "user", "preserve-original")
+
+            original = Path(parent) / "original-vault"
+            vault.rename(original)
+            vault.mkdir()
+
+            with self.assertRaisesRegex(RuntimeError, "Vault root changed"):
+                db.get_session("existing")
+            with self.assertRaisesRegex(RuntimeError, "Vault root changed"):
+                db.create_session("new", "discord")
+
+            self.assertEqual(list(vault.iterdir()), [])
+            reopened = SessionDB(vault_path=original)
+            self.assertEqual(
+                reopened.get_messages("existing")[0]["content"],
+                "preserve-original",
+            )
+
     def test_session_write_rejects_symlink_swap_before_directory_open(self):
         # A rename/symlink race must never create metadata outside the Vault.
         outside_temp = tempfile.TemporaryDirectory()
