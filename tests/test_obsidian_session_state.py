@@ -405,6 +405,34 @@ class ObsidianStateTests(unittest.TestCase):
         self.assertEqual(sentinel.read_text(encoding="utf-8"), "untouched")
         self.assertTrue(self.db.root.is_dir())
 
+    def test_session_enumeration_rejects_symlink_instead_of_hiding_data(self):
+        # List/search/export must not silently treat a linked or dangling
+        # session entry as absent. No external file is ever modified.
+        with tempfile.TemporaryDirectory() as outside:
+            external = Path(outside)
+            sentinel = external / "sentinel.txt"
+            sentinel.write_text("unchanged", encoding="utf-8")
+            linked = self.db.root / "linked_enumeration"
+            linked.symlink_to(external, target_is_directory=True)
+            for name, action in (
+                ("count", self.db.session_count),
+                ("search", self.db.search_sessions),
+                ("export", self.db.export_all),
+            ):
+                with self.subTest(operation=name):
+                    with self.assertRaisesRegex(
+                        RuntimeError, "Unsafe Vault session directory"
+                    ):
+                        action()
+            self.assertEqual(sentinel.read_text(encoding="utf-8"), "unchanged")
+            linked.unlink()
+            linked.symlink_to(external / "missing", target_is_directory=True)
+            with self.assertRaisesRegex(
+                RuntimeError, "Unsafe Vault session directory"
+            ):
+                self.db.session_count()
+            self.assertEqual(sentinel.read_text(encoding="utf-8"), "unchanged")
+
     def test_symlink_session_folder_cannot_read_write_or_delete_target(self):
         # A symlink inside the Vault must not redirect storage outside it.
         with tempfile.TemporaryDirectory() as outside:
