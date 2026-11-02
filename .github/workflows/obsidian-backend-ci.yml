@@ -144,3 +144,34 @@ jobs:
         run: python -m pytest tests/gateway/test_api_server_vault_required.py -q
       - name: Syntax verification
         run: python -m py_compile hermes_state.py hermes_obsidian_state.py hermes_hybrid/sqlite_audit.py scripts/migrate_sessions_to_obsidian.py scripts/migrate_kanban_to_vault.py scripts/migrate_sqlite_to_vault.py gateway/session.py gateway/platforms/helpers.py gateway/platforms/api_server.py
+
+  # Diagnostic only: the current SessionDB uses POSIX fcntl/dir_fd primitives.
+  # Keep this non-blocking until a Windows-safe Vault implementation is reviewed.
+  windows-compatibility-probe:
+    name: Windows Vault session smoke test (diagnostic)
+    runs-on: windows-latest
+    continue-on-error: true
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+      - name: Probe Vault-only session persistence and restart
+        shell: pwsh
+        run: |
+          @'
+          import tempfile
+          from pathlib import Path
+          from hermes_state import SessionDB
+
+          with tempfile.TemporaryDirectory() as root:
+              vault = Path(root)
+              first = SessionDB(vault_path=vault)
+              first.create_session("windows-smoke", "discord")
+              first.append_message("windows-smoke", "user", "vault-only")
+              restarted = SessionDB(vault_path=vault)
+              messages = restarted.get_messages("windows-smoke")
+              assert any(message.get("content") == "vault-only" for message in messages)
+              assert not list(vault.rglob("*.db"))
+              assert not list(vault.rglob("*.sqlite*"))
+          '@ | python -
