@@ -49,9 +49,9 @@ def _uses_sqlite(source: str, filename: str) -> bool:
                     alias.asname or alias.name
                     for alias in node.names if alias.name in _ENGINE_FACTORIES
                 )
-    # Resolve only unambiguous module-level string assignments. This catches
-    # common SQLite URLs and import names passed through constants, without
-    # treating an unrelated string literal as an active database connection.
+    # Resolve simple string expressions, including constant concatenations and
+    # the fixed prefix of f-strings. A SQLite URL with a dynamic database path
+    # is still a SQLite URL and must not evade the runtime audit.
     bindings: dict[str, list[ast.expr]] = {}
     for statement in tree.body:
         if isinstance(statement, ast.Assign):
@@ -63,13 +63,34 @@ def _uses_sqlite(source: str, filename: str) -> bool:
                 bindings.setdefault(statement.target.id, []).append(statement.value)
         elif isinstance(statement, ast.AugAssign) and isinstance(statement.target, ast.Name):
             bindings.setdefault(statement.target.id, []).append(statement.value)
-    constants = {
-        name: values[0].value
-        for name, values in bindings.items()
-        if len(values) == 1
-        and isinstance(values[0], ast.Constant)
-        and isinstance(values[0].value, str)
-    }
+    expressions = {name: values[0] for name, values in bindings.items() if len(values) == 1}
+
+    def string_prefix(expr: ast.expr, seen: frozenset[str] = frozenset()) -> tuple[str | None, bool]:
+        """Return (known prefix, fully static) without evaluating user code."""
+        if isinstance(expr, ast.Constant) and isinstance(expr.value, str):
+            return expr.value, True
+        if isinstance(expr, ast.Name):
+            if expr.id in seen or expr.id not in expressions:
+                return None, False
+            return string_prefix(expressions[expr.id], seen | {expr.id})
+        if isinstance(expr, ast.JoinedStr):
+            prefix = ""
+            for part in expr.values:
+                if isinstance(part, ast.Constant) and isinstance(part.value, str):
+                    prefix += part.value
+                else:
+                    return prefix, False
+            return prefix, True
+        if isinstance(expr, ast.BinOp) and isinstance(expr.op, ast.Add):
+            left, left_complete = string_prefix(expr.left, seen)
+            if left is None:
+                return None, False
+            if not left_complete:
+                return left, False
+            right, right_complete = string_prefix(expr.right, seen)
+            return left + (right or ""), right is not None and right_complete
+        return None, False
+
     for node in ast.walk(tree):
         if isinstance(node, ast.Import):
             if any(alias.name.split(".", 1)[0] in _SQLITE_MODULES for alias in node.names):
@@ -85,17 +106,12 @@ def _uses_sqlite(source: str, filename: str) -> bool:
                 (kw.value for kw in node.keywords if kw.arg in {"name", "url"}),
                 None,
             )
-            if isinstance(first, ast.Constant) and isinstance(first.value, str):
-                argument = first.value
-            elif isinstance(first, ast.Name):
-                argument = constants.get(first.id)
-            else:
-                argument = None
-            if argument is None:
+            argument, fully_static = string_prefix(first) if first is not None else (None, False)
+            if not argument:
                 continue
             module = argument.split(".", 1)[0]
             func = node.func
-            if module in _SQLITE_MODULES:
+            if fully_static and module in _SQLITE_MODULES:
                 if isinstance(func, ast.Name) and func.id in {"__import__", *import_module_names}:
                     return True
                 if isinstance(func, ast.Attribute) and func.attr == "import_module":
