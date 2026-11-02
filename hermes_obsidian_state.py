@@ -103,6 +103,21 @@ class SessionDB:
                         raise RuntimeError("Vault session lockfile changed during acquisition")
                     self._assert_write_dir_attached(self.root, root_fd)
                     yield
+                    # A replacement lockfile created while the operation ran
+                    # can let another writer lock a different inode. Report
+                    # that lost exclusion rather than claiming a clean write.
+                    try:
+                        current = os.stat(
+                            self._lockfile.name, dir_fd=root_fd,
+                            follow_symlinks=False,
+                        )
+                    except OSError as exc:
+                        raise RuntimeError(
+                            "Vault session lockfile missing during operation"
+                        ) from exc
+                    opened = os.fstat(fd.fileno())
+                    if (opened.st_dev, opened.st_ino) != (current.st_dev, current.st_ino):
+                        raise RuntimeError("Vault session lockfile changed during operation")
                     self._assert_write_dir_attached(self.root, root_fd)
                 finally:
                     fcntl.flock(fd, fcntl.LOCK_UN)
