@@ -278,6 +278,40 @@ class ObsidianStateTests(unittest.TestCase):
         reopened = SessionDB()
         self.assertEqual(reopened.get_session_title("title_limit"), "Original")
 
+    def test_delete_rejects_corrupt_topic_bindings_before_any_mutation(self):
+        # A malformed global routing index must not delete a session or
+        # detach its children before raising a validation error.
+        self.db.create_session("protected_parent", "discord")
+        self.db.append_message("protected_parent", "user", "keep me")
+        self.db.create_session(
+            "protected_child", "discord", parent_session_id="protected_parent"
+        )
+        parent_path = self.db.root / "protected_parent" / "metadata.json"
+        child_path = self.db.root / "protected_child" / "metadata.json"
+        parent_before = parent_path.read_bytes()
+        child_before = child_path.read_bytes()
+
+        for bindings in (
+            {"chat": "not a topic map"},
+            {"chat": {"topic": "not a binding object"}},
+        ):
+            with self.subTest(bindings=bindings):
+                self.db.set_meta("telegram_topic_bindings", bindings)
+                with self.assertRaisesRegex(
+                    RuntimeError, "Invalid Telegram topic bindings"
+                ):
+                    self.db.delete_session("protected_parent")
+                self.assertEqual(parent_path.read_bytes(), parent_before)
+                self.assertEqual(child_path.read_bytes(), child_before)
+                self.assertEqual(
+                    self.db.get_session("protected_child")["parent_session_id"],
+                    "protected_parent",
+                )
+                self.assertEqual(
+                    self.db.get_messages("protected_parent")[0]["content"],
+                    "keep me",
+                )
+
     def test_rewrite_title_search_and_cleanup(self):
         self.db.create_session("test_a", "discord")
         self.db.append_message("test_a", "user", "old")
