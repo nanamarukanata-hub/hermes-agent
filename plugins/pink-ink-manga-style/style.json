@@ -1,0 +1,28 @@
+{
+  "id": "pink-ink-manga-v1",
+  "version": "0.1.0",
+  "source": "visual characterization of three user-provided 768x1344 references; originals intentionally excluded from public repository",
+  "core": [
+    "hand-inked manga illustration with expressive variable-width dark brown-black outlines",
+    "pale rose-pink hair tones, warm peach and coral accents, flat limited-color fills",
+    "large expressive eyes with tapered lash lines and delicate cheek hatching",
+    "one-level cel shadow at most, tiny selectively placed white highlights",
+    "subtle fine paper grain, occasional short broken expressive strokes",
+    "strong character silhouette, generous negative space, minimal background detail"
+  ],
+  "negative": [
+    "photorealism", "3D rendering", "high-gloss plastic shine", "volumetric lighting",
+    "cinematic bloom", "strong lens effects", "airbrush gradients", "complex painterly brushwork",
+    "pore-level realistic skin texture", "over-detailed environment", "uniform vector outlines"
+  ],
+  "presets": {
+    "paper_coral": {"background": "clean off-white paper", "accents": "coral pink", "palette": ["#FDFDFD", "#FB8E7A", "#FDD6CC", "#594440", "#FBCEC6"]},
+    "peach_line": {"background": "warm pale off-white", "accents": "soft pink hair and light peach", "palette": ["#FDFDFD", "#FDDDD2", "#F7C9B6", "#FDD2BB", "#AD837D"]},
+    "dark_rose": {"background": "deep dusty rose-brown", "accents": "pale blush pink", "palette": ["#2D1E20", "#FCE0D8", "#E3BEB9", "#79585C", "#4D3437"]}
+  },
+  "reference_images": [
+    {"role": "style-only / peach-line", "resolution": "768x1344", "committed": false},
+    {"role": "style-only / dark-rose", "resolution": "768x1344", "committed": false},
+    {"role": "style-only / paper-coral", "resolution": "768x1344", "committed": false}
+  ]
+}
