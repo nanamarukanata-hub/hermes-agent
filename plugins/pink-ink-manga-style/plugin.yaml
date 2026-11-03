@@ -1,0 +1,4 @@
+name: pink-ink-manga-style
+version: 0.1.0
+description: "CPU-only prompt composition tool and /pink-ink command for manga art direction. No model, GPU or external API required for prompt assembly."
+author: "nanamarukanata-hub / user-provided art references"
