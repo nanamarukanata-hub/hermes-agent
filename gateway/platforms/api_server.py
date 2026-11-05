@@ -31,9 +31,11 @@ import logging
 import os
 import socket as _socket
 import re
-import sqlite3
+import shutil
+import tempfile
 import time
 import uuid
+from pathlib import Path
 from typing import Any, Dict, List, Optional
 
 try:
@@ -289,107 +291,111 @@ def check_api_server_requirements() -> bool:
 
 class ResponseStore:
     """
-    SQLite-backed LRU store for Responses API state.
+    Vault-backed LRU store for Responses API state.
 
     Each stored response includes the full internal conversation history
     (with tool calls and results) so it can be reconstructed on subsequent
-    requests via previous_response_id.
+    requests via previous_response_id.  One JSON file per response under
+    ``06_Automation/Hermes/ApiResponses/`` in the Obsidian Vault
+    (``HERMES_OBSIDIAN_VAULT``).  An explicit Vault is required for
+    durable storage; startup fails instead of writing to HERMES_HOME.
+    No SQLite is used.
 
-    Persists across gateway restarts.  Falls back to in-memory SQLite
-    if the on-disk path is unavailable.
+    Persists across gateway restarts.  ``db_path`` is kept as a
+    compatibility argument: a legacy ``*.db`` path is interpreted as
+    the response directory's stem, and ``":memory:"`` selects a
+    temporary directory that is removed on :meth:`close`.
     """
 
     def __init__(self, max_size: int = MAX_STORED_RESPONSES, db_path: str = None):
+        from hermes_hybrid.vault_kv import VaultDir, resolve_vault_root
+
         self._max_size = max_size
-        if db_path is None:
-            try:
-                from hermes_cli.config import get_hermes_home
-                db_path = str(get_hermes_home() / "response_store.db")
-            except Exception:
-                db_path = ":memory:"
-        try:
-            self._conn = sqlite3.connect(db_path, check_same_thread=False)
-        except Exception:
-            self._conn = sqlite3.connect(":memory:", check_same_thread=False)
-        self._conn.execute("PRAGMA journal_mode=WAL")
-        self._conn.execute(
-            """CREATE TABLE IF NOT EXISTS responses (
-                response_id TEXT PRIMARY KEY,
-                data TEXT NOT NULL,
-                accessed_at REAL NOT NULL
-            )"""
-        )
-        self._conn.execute(
-            """CREATE TABLE IF NOT EXISTS conversations (
-                name TEXT PRIMARY KEY,
-                response_id TEXT NOT NULL
-            )"""
-        )
-        self._conn.commit()
+        self._temp_dir = None
+        if db_path == ":memory:":
+            # Explicitly ephemeral mode is retained for isolated callers/tests.
+            self._temp_dir = Path(tempfile.mkdtemp(prefix="hermes-responses-"))
+            store_root, subpath = self._temp_dir, ()
+        else:
+            vault = resolve_vault_root()
+            if vault is None:
+                raise RuntimeError(
+                    "HERMES_OBSIDIAN_VAULT must be configured for persistent API responses"
+                )
+            if db_path:
+                # Legacy db_path may only select a directory *inside* the Vault.
+                # Never silently persist conversations under HERMES_HOME.
+                p = Path(db_path).expanduser()
+                candidate = p.parent / p.stem if p.suffix == ".db" else p
+                candidate = candidate.resolve(strict=False)
+                root = vault.resolve(strict=False)
+                if candidate == root or root not in candidate.parents:
+                    raise ValueError("ResponseStore db_path must be inside HERMES_OBSIDIAN_VAULT")
+                store_root, subpath = candidate, ()
+            else:
+                store_root, subpath = vault, ("06_Automation", "Hermes", "ApiResponses")
+        self._store = VaultDir(store_root, *subpath)
+        self._conversations_path = self._store.dir / "conversations.json"
+
+    def _conversations(self) -> Dict[str, str]:
+        # VaultDir.read refuses symlinked records and does not follow a
+        # substituted final-component symlink between check and open.
+        return self._store.read("conversations") or {}
 
     def get(self, response_id: str) -> Optional[Dict[str, Any]]:
         """Retrieve a stored response by ID (updates access time for LRU)."""
-        row = self._conn.execute(
-            "SELECT data FROM responses WHERE response_id = ?", (response_id,)
-        ).fetchone()
-        if row is None:
+        try:
+            record = self._store.read(response_id)
+        except ValueError:
             return None
-        self._conn.execute(
-            "UPDATE responses SET accessed_at = ? WHERE response_id = ?",
-            (time.time(), response_id),
-        )
-        self._conn.commit()
-        return json.loads(row[0])
+        if record is None:
+            return None
+        record["accessed_at"] = time.time()
+        self._store.write(response_id, record)
+        return record.get("data")
 
     def put(self, response_id: str, data: Dict[str, Any]) -> None:
         """Store a response, evicting the oldest if at capacity."""
-        self._conn.execute(
-            "INSERT OR REPLACE INTO responses (response_id, data, accessed_at) VALUES (?, ?, ?)",
-            (response_id, json.dumps(data, default=str), time.time()),
-        )
-        # Evict oldest entries beyond max_size
-        count = self._conn.execute("SELECT COUNT(*) FROM responses").fetchone()[0]
-        if count > self._max_size:
-            self._conn.execute(
-                "DELETE FROM responses WHERE response_id IN "
-                "(SELECT response_id FROM responses ORDER BY accessed_at ASC LIMIT ?)",
-                (count - self._max_size,),
-            )
-        self._conn.commit()
+        try:
+            self._store.write(response_id, {"response_id": response_id, "data": json.loads(json.dumps(data, default=str)), "accessed_at": time.time()})
+        except ValueError:
+            return
+        records = [r for r in self._store.list_records() if r.get("response_id")]
+        if len(records) > self._max_size:
+            records.sort(key=lambda r: r.get("accessed_at", 0))
+            for excess in records[: len(records) - self._max_size]:
+                rid = excess.get("response_id")
+                if rid:
+                    self._store.delete(rid)
 
     def delete(self, response_id: str) -> bool:
         """Remove a response from the store. Returns True if found and deleted."""
-        cursor = self._conn.execute(
-            "DELETE FROM responses WHERE response_id = ?", (response_id,)
-        )
-        self._conn.commit()
-        return cursor.rowcount > 0
+        try:
+            return self._store.delete(response_id)
+        except ValueError:
+            return False
 
     def get_conversation(self, name: str) -> Optional[str]:
         """Get the latest response_id for a conversation name."""
-        row = self._conn.execute(
-            "SELECT response_id FROM conversations WHERE name = ?", (name,)
-        ).fetchone()
-        return row[0] if row else None
+        return self._conversations().get(name)
 
     def set_conversation(self, name: str, response_id: str) -> None:
-        """Map a conversation name to its latest response_id."""
-        self._conn.execute(
-            "INSERT OR REPLACE INTO conversations (name, response_id) VALUES (?, ?)",
-            (name, response_id),
+        """Map a name to its latest response without losing concurrent writes."""
+        self._store.update(
+            "conversations",
+            lambda mapping: {**mapping, name: response_id},
         )
-        self._conn.commit()
 
     def close(self) -> None:
-        """Close the database connection."""
-        try:
-            self._conn.close()
-        except Exception:
-            pass
+        """Close the store (removes a temporary in-memory directory)."""
+        if self._temp_dir is not None:
+            shutil.rmtree(self._temp_dir, ignore_errors=True)
+            self._temp_dir = None
 
     def __len__(self) -> int:
-        row = self._conn.execute("SELECT COUNT(*) FROM responses").fetchone()
-        return row[0] if row else 0
+        # conversations.json lives in the same directory but is an index,
+        # not a response.
+        return len([rid for rid in self._store.list_ids() if rid != "conversations"])
 
 
 # ---------------------------------------------------------------------------

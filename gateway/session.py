@@ -12,14 +12,146 @@ import hashlib
 import logging
 import os
 import json
+import stat
 import threading
 import uuid
+from contextlib import contextmanager
 from pathlib import Path
 from datetime import datetime, timedelta
 from dataclasses import dataclass
 from typing import Dict, List, Optional, Any
 
 logger = logging.getLogger(__name__)
+
+# Capture capability before tests or instrumentation monkeypatch os.open.
+# A temporary wrapper must not silently downgrade pinned Vault I/O to paths.
+_ROUTING_DIRFD_AVAILABLE = (
+    os.name == "posix"
+    and hasattr(os, "O_DIRECTORY")
+    and hasattr(os, "O_NOFOLLOW")
+    and os.open in os.supports_dir_fd
+    and os.rename in os.supports_dir_fd
+    and os.unlink in os.supports_dir_fd
+)
+
+
+@contextmanager
+def _gateway_index_lock(lock_path: Path, *, dir_fd: Optional[int] = None):
+    """Serialize gateway routing index commits across cooperating processes.
+
+    The lock file is persistent inside the Vault, so replacing sessions.json
+    never releases the lock prematurely. A symlink or non-regular lock file
+    is rejected instead of following an untrusted path.
+    """
+    if lock_path.is_symlink():
+        raise RuntimeError("Obsidian Vault routing lock is a symlink")
+    flags = os.O_RDWR | os.O_CREAT | getattr(os, "O_NOFOLLOW", 0)
+    name = lock_path.name if dir_fd is not None else lock_path
+    fd = (
+        os.open(name, flags, 0o600, dir_fd=dir_fd)
+        if dir_fd is not None else os.open(name, flags, 0o600)
+    )
+    acquired = False
+    try:
+        opened = os.fstat(fd)
+        if not stat.S_ISREG(opened.st_mode):
+            raise RuntimeError("Obsidian Vault routing lock must be a regular file")
+        linked = os.stat(name, dir_fd=dir_fd, follow_symlinks=False)
+        if (linked.st_dev, linked.st_ino) != (opened.st_dev, opened.st_ino):
+            raise RuntimeError("Obsidian Vault routing lock changed during open")
+
+        if os.name == "nt":
+            import msvcrt
+            # msvcrt locks a byte range; ensure the lock byte exists.
+            if opened.st_size == 0:
+                os.write(fd, b"\0")
+            os.lseek(fd, 0, os.SEEK_SET)
+            msvcrt.locking(fd, msvcrt.LK_LOCK, 1)
+        else:
+            import fcntl
+            fcntl.flock(fd, fcntl.LOCK_EX)
+        acquired = True
+        # The pathname can be replaced while flock/msvcrt waits. A lock on
+        # the now-unlinked inode would not serialize writers opening its
+        # replacement, so verify the inode again after acquiring the lock.
+        try:
+            current = os.stat(name, dir_fd=dir_fd, follow_symlinks=False)
+        except OSError as exc:
+            raise RuntimeError(
+                "Obsidian Vault routing lock changed during acquisition"
+            ) from exc
+        if (
+            not stat.S_ISREG(current.st_mode)
+            or (current.st_dev, current.st_ino) != (opened.st_dev, opened.st_ino)
+        ):
+            raise RuntimeError(
+                "Obsidian Vault routing lock changed during acquisition"
+            )
+        yield
+    finally:
+        try:
+            if acquired:
+                if os.name == "nt":
+                    os.lseek(fd, 0, os.SEEK_SET)
+                    msvcrt.locking(fd, msvcrt.LK_UNLCK, 1)
+                else:
+                    fcntl.flock(fd, fcntl.LOCK_UN)
+        finally:
+            os.close(fd)
+
+
+def _read_routing_index_bytes(path: Path, *, dir_fd: Optional[int] = None) -> Optional[bytes]:
+    """Read the Vault index without following a swapped final symlink.
+
+    O_NONBLOCK prevents a substituted FIFO from blocking before fstat can
+    reject it. The inode check also protects platforms without O_NOFOLLOW.
+    """
+    flags = os.O_RDONLY | getattr(os, "O_NOFOLLOW", 0) | getattr(os, "O_NONBLOCK", 0)
+    name = path.name if dir_fd is not None else path
+    try:
+        fd = os.open(name, flags, dir_fd=dir_fd) if dir_fd is not None else os.open(name, flags)
+    except FileNotFoundError:
+        return None
+    try:
+        opened = os.fstat(fd)
+        if not stat.S_ISREG(opened.st_mode):
+            raise RuntimeError("Obsidian Vault routing index must be a regular file")
+        linked = os.stat(name, dir_fd=dir_fd, follow_symlinks=False)
+        if (
+            not stat.S_ISREG(linked.st_mode)
+            or (linked.st_dev, linked.st_ino) != (opened.st_dev, opened.st_ino)
+        ):
+            raise RuntimeError("Obsidian Vault routing index changed during open")
+        with os.fdopen(fd, "rb") as file:
+            fd = -1
+            return file.read()
+    finally:
+        if fd >= 0:
+            os.close(fd)
+
+
+@contextmanager
+def _gateway_routing_dirfd(vault_root: Path):
+    """Pin routing-directory writes to a directory descriptor on POSIX.
+
+    Each component is opened relative to the previously verified directory,
+    rejecting a parent symlink swap before a later file replacement.
+    Windows retains the existing path-based implementation.
+    """
+    if not _ROUTING_DIRFD_AVAILABLE:
+        yield None
+        return
+
+    flags = os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW
+    fd = os.open(vault_root, flags)
+    try:
+        for component in ("06_Automation", "Hermes", "GatewayRouting"):
+            child_fd = os.open(component, flags, dir_fd=fd)
+            os.close(fd)
+            fd = child_fd
+        yield fd
+    finally:
+        os.close(fd)
 
 
 def _now() -> datetime:
@@ -64,7 +196,6 @@ from .whatsapp_identity import (
     canonical_whatsapp_identifier,
     normalize_whatsapp_identifier,  # noqa: F401 - re-exported for gateway.session callers
 )
-from utils import atomic_replace
 
 
 @dataclass
@@ -529,12 +660,9 @@ class SessionEntry:
         if "origin" in data and data["origin"]:
             origin = SessionSource.from_dict(data["origin"])
         
-        platform = None
-        if data.get("platform"):
-            try:
-                platform = Platform(data["platform"])
-            except ValueError as e:
-                logger.debug("Unknown platform value %r: %s", data["platform"], e)
+        # A removed/unknown platform must invalidate the whole routing index.
+        # Silently coercing it to None would discard its routing metadata on save.
+        platform = Platform(data["platform"]) if data.get("platform") else None
 
         last_resume_marked_at = None
         _lrma = data.get("last_resume_marked_at")
@@ -663,27 +791,53 @@ class SessionStore:
     """
     Manages session storage and retrieval.
     
-    Uses SQLite (via SessionDB) for session metadata and message transcripts.
-    Falls back to legacy JSONL files if SQLite is unavailable.
+    Uses the Obsidian-native SessionDB for all session state and transcripts.
+    Requires the Obsidian Vault; a damaged routing index fails closed.
     """
     
     def __init__(self, sessions_dir: Path, config: GatewayConfig,
-                 has_active_processes_fn=None):
-        self.sessions_dir = sessions_dir
+                 has_active_processes_fn=None, vault_path=None):
+        # Obsidian Vault is the sole persistent session destination.
+        # vault_path is an explicit override (tests/embedders); otherwise
+        # HERMES_OBSIDIAN_VAULT is required.  sessions_dir is kept for
+        # compatibility but is no longer the storage location.
+        vault = vault_path or os.environ.get("HERMES_OBSIDIAN_VAULT")
+        if not vault:
+            raise RuntimeError("HERMES_OBSIDIAN_VAULT is required; legacy session storage is disabled")
+        vault_root = Path(vault).expanduser()
+        if vault_root.is_symlink():
+            raise RuntimeError("Obsidian Vault routing path contains a symlink")
+        self._vault_root = vault_root.resolve()
+        self.sessions_dir = self._vault_root / "06_Automation" / "Hermes" / "GatewayRouting"
         self.config = config
         self._entries: Dict[str, SessionEntry] = {}
         self._loaded = False
+        self._index_digest = None  # Hash of the last loaded/saved routing index.
         self._lock = threading.Lock()
         self._has_active_processes_fn = has_active_processes_fn
-        
-        # Initialize SQLite session database
-        self._db = None
-        try:
-            from hermes_state import SessionDB
-            self._db = SessionDB()
-        except Exception as e:
-            print(f"[gateway] Warning: SQLite session store unavailable, falling back to JSONL: {e}")
+
+        # Never silently fall back to JSONL outside the Vault.
+        from hermes_state import SessionDB
+        self._db = SessionDB(vault_path=vault)
     
+    def _assert_routing_path_safe(self) -> None:
+        """Reject symlink redirects before touching the Vault routing index.
+
+        Checking before mkdir matters: mkdir(parents=True) follows an existing
+        symlink and can create directories outside the configured Vault.
+        """
+        if self._vault_root.is_symlink():
+            raise RuntimeError("Obsidian Vault routing path contains a symlink")
+        current = self._vault_root
+        for component in ("06_Automation", "Hermes", "GatewayRouting"):
+            current = current / component
+            if current.is_symlink() or not current.resolve(strict=False).is_relative_to(self._vault_root):
+                raise RuntimeError("Obsidian Vault routing path contains a symlink")
+        if (self.sessions_dir / "sessions.json").is_symlink():
+            raise RuntimeError("Obsidian Vault routing index is a symlink")
+        if (self.sessions_dir / ".sessions.lock").is_symlink():
+            raise RuntimeError("Obsidian Vault routing lock is a symlink")
+
     def _ensure_loaded(self) -> None:
         """Load sessions index from disk if not already loaded."""
         with self._lock:
@@ -694,47 +848,112 @@ class SessionStore:
         if self._loaded:
             return
 
+        self._assert_routing_path_safe()
         self.sessions_dir.mkdir(parents=True, exist_ok=True)
+        self._assert_routing_path_safe()
         sessions_file = self.sessions_dir / "sessions.json"
 
-        if sessions_file.exists():
+        try:
+            with _gateway_routing_dirfd(self._vault_root) as routing_fd:
+                raw = _read_routing_index_bytes(sessions_file, dir_fd=routing_fd)
+        except Exception as e:
+            raise RuntimeError(
+                "Cannot load Obsidian gateway session index; refusing to overwrite it"
+            ) from e
+
+        if raw is not None:
             try:
-                with open(sessions_file, "r", encoding="utf-8") as f:
-                    data = json.load(f)
-                    for key, entry_data in data.items():
-                        try:
-                            self._entries[key] = SessionEntry.from_dict(entry_data)
-                        except (ValueError, KeyError):
-                            # Skip entries with unknown/removed platform values
-                            continue
+                data = json.loads(raw)
+                if not isinstance(data, dict):
+                    raise ValueError("Gateway session index must be a JSON object")
+                # Stage entries so a failed load cannot leave a partially
+                # restored in-memory index behind.
+                loaded_entries: Dict[str, SessionEntry] = {}
+                for key, entry_data in data.items():
+                    # Unknown/removed platforms must also fail closed: skipping
+                    # them would silently discard their routing entries on save.
+                    loaded_entries[key] = SessionEntry.from_dict(entry_data)
+                self._entries.update(loaded_entries)
+                self._index_digest = hashlib.sha256(raw).digest()
             except Exception as e:
-                print(f"[gateway] Warning: Failed to load sessions: {e}")
+                # Treat a damaged/unreadable Vault index as fatal. Continuing
+                # with an empty index would overwrite the original on _save().
+                raise RuntimeError(
+                    "Cannot load Obsidian gateway session index; refusing to overwrite it"
+                ) from e
 
         self._loaded = True
     
     def _save(self) -> None:
-        """Save sessions index to disk (kept for session key -> ID mapping)."""
+        """Commit the routing index without silently losing another writer's changes.
+
+        The POSIX routing dirfd pins lock, read, and replace operations to the
+        same Vault directory. Stale instances fail closed and must be re-created.
+        Windows retains path-based I/O pending a separate containment audit.
+        """
         import tempfile
+
+        self._assert_routing_path_safe()
         self.sessions_dir.mkdir(parents=True, exist_ok=True)
+        self._assert_routing_path_safe()
         sessions_file = self.sessions_dir / "sessions.json"
 
-        data = {key: entry.to_dict() for key, entry in self._entries.items()}
-        fd, tmp_path = tempfile.mkstemp(
-            dir=str(self.sessions_dir), suffix=".tmp", prefix=".sessions_"
-        )
-        try:
-            with os.fdopen(fd, "w", encoding="utf-8") as f:
-                json.dump(data, f, indent=2)
-                f.flush()
-                os.fsync(f.fileno())
-            atomic_replace(tmp_path, sessions_file)
-        except BaseException:
-            try:
-                os.unlink(tmp_path)
-            except OSError as e:
-                logger.debug("Could not remove temp file %s: %s", tmp_path, e)
-            raise
-    
+        with _gateway_routing_dirfd(self._vault_root) as routing_fd:
+            with _gateway_index_lock(
+                self.sessions_dir / ".sessions.lock", dir_fd=routing_fd
+            ):
+                self._assert_routing_path_safe()
+                current = _read_routing_index_bytes(sessions_file, dir_fd=routing_fd)
+                current_digest = hashlib.sha256(current).digest() if current is not None else None
+                if current_digest != self._index_digest:
+                    raise RuntimeError(
+                        "Obsidian gateway session index changed on disk; "
+                        "refusing to overwrite concurrent updates"
+                    )
+
+                data = {key: entry.to_dict() for key, entry in self._entries.items()}
+                payload = json.dumps(data, indent=2).encode("utf-8")
+                if routing_fd is None:
+                    fd, tmp_path = tempfile.mkstemp(
+                        dir=str(self.sessions_dir), suffix=".tmp", prefix=".sessions_"
+                    )
+                    tmp_name = None
+                else:
+                    tmp_name = f".sessions_{uuid.uuid4().hex}.tmp"
+                    fd = os.open(
+                        tmp_name,
+                        os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW,
+                        0o600,
+                        dir_fd=routing_fd,
+                    )
+                    tmp_path = None
+                try:
+                    with os.fdopen(fd, "wb") as f:
+                        f.write(payload)
+                        f.flush()
+                        os.fsync(f.fileno())
+                    self._assert_routing_path_safe()
+                    # Keep source and destination relative to the same opened
+                    # directory. A late parent symlink swap cannot redirect
+                    # either path outside the pinned routing directory.
+                    if routing_fd is None:
+                        os.replace(tmp_path, sessions_file)
+                    else:
+                        os.replace(
+                            tmp_name, "sessions.json",
+                            src_dir_fd=routing_fd, dst_dir_fd=routing_fd,
+                        )
+                    self._index_digest = hashlib.sha256(payload).digest()
+                except BaseException:
+                    try:
+                        if routing_fd is None:
+                            os.unlink(tmp_path)
+                        else:
+                            os.unlink(tmp_name, dir_fd=routing_fd)
+                    except OSError as e:
+                        logger.debug("Could not remove routing temp file: %s", e)
+                    raise
+
     def _generate_session_key(self, source: SessionSource) -> str:
         """Generate a session key from a source."""
         return build_session_key(
@@ -1247,16 +1466,24 @@ class SessionStore:
         return self.sessions_dir / f"{session_id}.jsonl"
     
     def append_to_transcript(self, session_id: str, message: Dict[str, Any], skip_db: bool = False) -> None:
-        """Append a message to a session's transcript (SQLite + legacy JSONL).
+        """Append a message to the session's canonical transcript.
+
+        The Obsidian SessionDB is the ONLY write destination. The legacy
+        JSONL mirror is never written when a SessionDB exists: dual writes
+        let the two copies diverge and made duplicate/divergent history
+        possible. Existing JSONL files are left untouched on disk and are
+        still consulted read-only by ``load_transcript`` for
+        pre-migration sessions.
 
         Args:
-            skip_db: When True, only write to JSONL and skip the SQLite write.
-                     Used when the agent already persisted messages to SQLite
-                     via its own _flush_messages_to_session_db(), preventing
-                     the duplicate-write bug (#860).
+            skip_db: When True, the caller has already persisted the
+                     message to the SessionDB (the agent's own
+                     _flush_messages_to_session_db(), #860), so nothing
+                     further is written here at all.
         """
-        # Write to SQLite (unless the agent already handled it)
-        if self._db and not skip_db:
+        if self._db:
+            if skip_db:
+                return
             try:
                 self._db.append_message(
                     session_id=session_id,
@@ -1271,47 +1498,78 @@ class SessionStore:
                     codex_reasoning_items=message.get("codex_reasoning_items") if message.get("role") == "assistant" else None,
                     codex_message_items=message.get("codex_message_items") if message.get("role") == "assistant" else None,
                 )
-            except Exception as e:
-                logger.debug("Session DB operation failed: %s", e)
-        
-        # Also write legacy JSONL (keeps existing tooling working during transition)
+            except Exception:
+                logger.exception("Failed to append transcript to Obsidian SessionDB")
+                raise
+            return
+
+        # No SessionDB (standalone/test doubles only): legacy JSONL is the
+        # sole store, so writing it is not a duplicate write.
         transcript_path = self.get_transcript_path(session_id)
         with self._lock:
+            transcript_path.parent.mkdir(parents=True, exist_ok=True)
             with open(transcript_path, "a", encoding="utf-8") as f:
                 f.write(json.dumps(message, ensure_ascii=False) + "\n")
     
     def rewrite_transcript(self, session_id: str, messages: List[Dict[str, Any]]) -> None:
         """Replace the entire transcript for a session with new messages.
-        
+
         Used by /retry, /undo, and /compress to persist modified conversation history.
-        Rewrites both SQLite and legacy JSONL storage.
+        Rewrites ONLY the canonical Obsidian SessionDB when one exists;
+        the legacy JSONL mirror is never rewritten (see
+        append_to_transcript). The DB replace is atomic so a mid-rewrite
+        failure doesn't leave the session half-empty.
         """
-        # SQLite: replace atomically so a mid-rewrite failure doesn't leave
-        # the session half-empty in the DB while JSONL still has history.
         if self._db:
             try:
                 self._db.replace_messages(session_id, messages)
-            except Exception as e:
-                logger.debug("Failed to rewrite transcript in DB: %s", e)
-        
-        # JSONL: overwrite the file
+            except Exception:
+                logger.exception("Failed to rewrite transcript in Obsidian SessionDB")
+                raise
+            return
+
+        # No SessionDB: legacy JSONL is the sole store.
         transcript_path = self.get_transcript_path(session_id)
+        transcript_path.parent.mkdir(parents=True, exist_ok=True)
         with open(transcript_path, "w", encoding="utf-8") as f:
             for msg in messages:
                 f.write(json.dumps(msg, ensure_ascii=False) + "\n")
 
+    def load_transcript_unified(self, session_id: str) -> List[Dict[str, Any]]:
+        """Canonical transcript: PR #11 Obsidian SessionDB only.
+
+        This is the unified read path used by the hermes_hybrid gateway
+        integration. The legacy JSONL mirror in GatewayRouting is NOT
+        consulted here, so a session cannot silently split between two
+        Vault locations. ``load_transcript`` keeps its legacy
+        longer-source fallback for pre-migration sessions and is
+        unchanged.
+        """
+        if not self._db:
+            return []
+        try:
+            return self._db.get_messages_as_conversation(session_id)
+        except Exception as e:
+            logger.debug("Could not load messages from Obsidian SessionDB: %s", e)
+            return []
+
     def load_transcript(self, session_id: str) -> List[Dict[str, Any]]:
-        """Load all messages from a session's transcript."""
+        """Load all messages from a session's transcript, deduplicated.
+
+        The Obsidian SessionDB is canonical. A legacy JSONL transcript,
+        when one still exists on disk, is read ONLY to recover history
+        that never reached the SessionDB (pre-migration sessions); the
+        two sources are merged with multiset deduplication
+        (:meth:`_merge_transcripts`) so a message present in both is
+        returned exactly once and no history is silently truncated.
+        """
         db_messages = []
-        # Try SQLite first
         if self._db:
             try:
                 db_messages = self._db.get_messages_as_conversation(session_id)
             except Exception as e:
                 logger.debug("Could not load messages from DB: %s", e)
 
-        # Load legacy JSONL transcript (may contain more history than SQLite
-        # for sessions created before the DB layer was introduced).
         transcript_path = self.get_transcript_path(session_id)
         jsonl_messages = []
         if transcript_path.exists():
@@ -1327,26 +1585,117 @@ class SessionStore:
                                 session_id, line[:120],
                             )
 
-        # Prefer whichever source has more messages.
-        #
-        # Background: when a session pre-dates SQLite storage (or when the DB
-        # layer was added while a long-lived session was already active), the
-        # first post-migration turn writes only the *new* messages to SQLite
-        # (because _flush_messages_to_session_db skips messages already in
-        # conversation_history, assuming they're persisted).  On the *next*
-        # turn load_transcript returns those few SQLite rows and ignores the
-        # full JSONL history — the model sees a context of 1-4 messages instead
-        # of hundreds.  Using the longer source prevents this silent truncation.
-        if len(jsonl_messages) > len(db_messages):
-            if db_messages:
-                logger.debug(
-                    "Session %s: JSONL has %d messages vs SQLite %d — "
-                    "using JSONL (legacy session not yet fully migrated)",
-                    session_id, len(jsonl_messages), len(db_messages),
-                )
+        if not jsonl_messages:
+            return db_messages
+        if not db_messages:
             return jsonl_messages
+        merged = self._merge_transcripts(db_messages, jsonl_messages)
+        if len(merged) > len(db_messages):
+            logger.debug(
+                "Session %s: merged %d canonical + %d legacy messages "
+                "into %d unique messages",
+                session_id, len(db_messages), len(jsonl_messages), len(merged),
+            )
+        return merged
 
-        return db_messages
+    @staticmethod
+    def _message_fingerprint(message: Dict[str, Any]) -> str:
+        """Stable identity of a transcript message for deduplication.
+
+        Only the fields the canonical conversation view carries are
+        used (role/content/tool fields): the SessionDB view drops
+        timestamps and storage metadata, while legacy JSONL copies keep
+        them, so including those fields would make the two copies of
+        one message fingerprint differently and defeat deduplication.
+        Repeated identical messages are still handled correctly by the
+        multiset counting in :meth:`_merge_transcripts`.
+        """
+        subset = {
+            key: message.get(key)
+            for key in (
+                "role", "content", "tool_name", "tool_calls",
+                "tool_call_id", "finish_reason",
+            )
+            if key in message
+        }
+        canonical = json.dumps(subset, ensure_ascii=False, sort_keys=True, default=str)
+        return hashlib.sha256(canonical.encode("utf-8")).hexdigest()
+
+    @classmethod
+    def _merge_transcripts(
+        cls,
+        canonical: List[Dict[str, Any]],
+        legacy: List[Dict[str, Any]],
+    ) -> List[Dict[str, Any]]:
+        """Merge canonical + legacy transcripts without duplicates.
+
+        Multiset semantics: a message that occurs N times in the union
+        of both sources (counting the higher per-source count, since the
+        sources are mirrors of one history, not independent logs) is
+        returned N times. When one source is a sub-multiset of the
+        other, the larger source is returned as-is (its order is the
+        chronological write order). For genuinely diverged sources,
+        extras from the legacy source are inserted by timestamp when
+        every message carries a parseable timestamp; otherwise they are
+        appended in legacy order.
+        """
+        from collections import Counter
+
+        canon_counts = Counter(cls._message_fingerprint(m) for m in canonical)
+        legacy_counts = Counter(cls._message_fingerprint(m) for m in legacy)
+
+        def _extras(source, other_counts):
+            seen = Counter()
+            out = []
+            for msg in source:
+                fp = cls._message_fingerprint(msg)
+                seen[fp] += 1
+                if seen[fp] > other_counts.get(fp, 0):
+                    out.append(msg)
+            return out
+
+        legacy_extras = _extras(legacy, canon_counts)
+        canon_extras = _extras(canonical, legacy_counts)
+        if not legacy_extras:
+            return list(canonical)
+        if not canon_extras:
+            return list(legacy)
+        if not (set(canon_counts) & set(legacy_counts)):
+            # Fully disjoint: the legacy file holds the pre-SessionDB
+            # history and the canonical store holds the turns written
+            # after migration, so legacy-first is chronological.
+            return list(legacy) + list(canonical)
+
+        # Diverged: both sides hold messages the other lacks. Insert
+        # each legacy-only message just before the next message that
+        # both sources share (its chronological anchor in the legacy
+        # order); legacy-only messages after the last shared message
+        # are appended. Canonical messages keep their stored order.
+        merged = list(canonical)
+        legacy_fps = [cls._message_fingerprint(m) for m in legacy]
+        extra_ids = {id(m) for m in legacy_extras}
+        inserted_before: Counter = Counter()
+        for idx, msg in enumerate(legacy):
+            if id(msg) not in extra_ids:
+                continue
+            anchor_fp = next(
+                (legacy_fps[j] for j in range(idx + 1, len(legacy))
+                 if canon_counts.get(legacy_fps[j], 0) > 0),
+                None,
+            )
+            if anchor_fp is None:
+                merged.append(msg)
+                continue
+            # Position of the anchor occurrence not yet used as an
+            # insertion point in this pass.
+            pos = next(
+                i for i, m in enumerate(merged)
+                if cls._message_fingerprint(m) == anchor_fp
+                and i >= inserted_before[anchor_fp]
+            )
+            merged.insert(pos, msg)
+            inserted_before[anchor_fp] = pos + 1
+        return merged
 
 
 def build_session_context(

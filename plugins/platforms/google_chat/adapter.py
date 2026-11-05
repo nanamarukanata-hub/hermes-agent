@@ -262,6 +262,28 @@ def _mime_for_message_type(mime: str) -> MessageType:
     return MessageType.DOCUMENT
 
 
+def _google_chat_state_path(filename: str) -> _Path:
+    """Locate non-secret Google Chat state inside the configured Obsidian Vault.
+
+    Do not silently recreate conversation-routing state under HERMES_HOME.
+    OAuth tokens and other credentials intentionally remain outside the Vault.
+    """
+    if filename not in {"google_chat_thread_counts.json", "google_chat_bot_id.json"}:
+        raise ValueError("unsupported Google Chat state file")
+    configured = os.environ.get("HERMES_OBSIDIAN_VAULT", "").strip()
+    if not configured:
+        raise RuntimeError("HERMES_OBSIDIAN_VAULT is required for Google Chat state")
+    vault = _Path(configured).expanduser()
+    if not vault.is_dir():
+        raise RuntimeError("HERMES_OBSIDIAN_VAULT must be an existing directory")
+    path = vault.resolve()
+    for part in ("06_Automation", "Hermes", "GoogleChat", filename):
+        path = path / part
+        if path.is_symlink():
+            raise RuntimeError("Google Chat state path contains a symlink")
+    return path
+
+
 class _ThreadCountStore:
     """Per-(chat_id, thread_name) inbound message counter, persisted to disk.
 
@@ -453,18 +475,23 @@ class GoogleChatAdapter(BasePlatformAdapter):
         # Inbound message count per (chat_id, thread_name). Drives the
         # DM main-flow vs side-thread heuristic in _build_message_event
         # and the outbound thread routing in _resolve_thread_id.
-        # Persisted to ${HERMES_HOME}/google_chat_thread_counts.json so
-        # active side-threads survive gateway restarts (the bug that
-        # made the in-memory version of this heuristic flaky for
-        # multi-restart sessions).
+        # Conversation-routing state belongs in the Vault, not HERMES_HOME.
+        # Fail closed if an older install has counters that were not copied:
+        # resetting them would merge formerly isolated Google Chat threads.
+        thread_counts_path = _google_chat_state_path("google_chat_thread_counts.json")
         try:
             from hermes_constants import get_hermes_home as _get_hermes_home
-            _hermes_home = _get_hermes_home()
+            legacy_home = _get_hermes_home()
         except (ModuleNotFoundError, ImportError):
-            _hermes_home = _Path.home() / ".hermes"
-        self._thread_count_store = _ThreadCountStore(
-            _hermes_home / "google_chat_thread_counts.json"
-        )
+            legacy_home = _Path.home() / ".hermes"
+        legacy_counts_path = _Path(legacy_home) / "google_chat_thread_counts.json"
+        if legacy_counts_path.is_file() and not thread_counts_path.is_file():
+            raise RuntimeError(
+                "Legacy Google Chat thread counters exist outside the Vault; "
+                "copy them to the Vault GoogleChat directory before starting "
+                "the gateway (do not overwrite existing Vault state)"
+            )
+        self._thread_count_store = _ThreadCountStore(thread_counts_path)
         # In-flight typing-card creates per chat_id. send_typing() reserves
         # an Event here BEFORE starting the API call so concurrent calls
         # from base.py's _keep_typing wait instead of duplicating cards.
@@ -617,8 +644,7 @@ class GoogleChatAdapter(BasePlatformAdapter):
     # ------------------------------------------------------------------
     def _bot_id_cache_path(self) -> _Path:
         """Location where the resolved bot user_id is cached across restarts."""
-        base = os.getenv("HERMES_HOME", str(_Path.home() / ".hermes"))
-        return _Path(base) / "google_chat_bot_id.json"
+        return _google_chat_state_path("google_chat_bot_id.json")
 
     def _load_cached_bot_id(self) -> Optional[str]:
         path = self._bot_id_cache_path()

@@ -3740,8 +3740,17 @@ def call_llm(
             or _is_unsupported_parameter_error(first_err, "max_tokens")
             or _is_zai_param_error
         ):
+            # Direct OpenAI endpoints require max_completion_tokens instead of
+            # max_tokens. Other providers (notably ZAI vision) may reject
+            # the limit entirely, so keep their historical omit-and-retry path.
+            had_max_tokens = "max_tokens" in kwargs
             kwargs.pop("max_tokens", None)
             kwargs.pop("max_completion_tokens", None)
+            if (had_max_tokens and not _is_zai_param_error and (
+                base_url_hostname(str(getattr(client, "base_url", ""))) == "api.openai.com"
+                or "use max_completion_tokens" in err_str.lower()
+            )):
+                kwargs["max_completion_tokens"] = max_tokens
             try:
                 return _validate_llm_response(
                     client.chat.completions.create(**kwargs), task)
@@ -4056,8 +4065,17 @@ async def async_call_llm(
             or _is_unsupported_parameter_error(first_err, "max_tokens")
             or _is_zai_param_error
         ):
+            # Direct OpenAI endpoints require max_completion_tokens instead of
+            # max_tokens. Other providers (notably ZAI vision) may reject
+            # the limit entirely, so keep their historical omit-and-retry path.
+            had_max_tokens = "max_tokens" in kwargs
             kwargs.pop("max_tokens", None)
             kwargs.pop("max_completion_tokens", None)
+            if (had_max_tokens and not _is_zai_param_error and (
+                base_url_hostname(str(getattr(client, "base_url", ""))) == "api.openai.com"
+                or "use max_completion_tokens" in err_str.lower()
+            )):
+                kwargs["max_completion_tokens"] = max_tokens
             try:
                 return _validate_llm_response(
                     await client.chat.completions.create(**kwargs), task)

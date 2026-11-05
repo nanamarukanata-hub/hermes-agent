@@ -1,15 +1,14 @@
-"""Tests for issue #860 — SQLite session transcript deduplication.
+"""Tests for issue #860 — canonical Obsidian Vault transcript deduplication.
 
 Verifies that:
 1. _flush_messages_to_session_db uses _last_flushed_db_idx to avoid re-writing
-2. Multiple _persist_session calls don't duplicate messages
-3. append_to_transcript(skip_db=True) skips SQLite but writes JSONL
-4. The gateway doesn't double-write messages the agent already persisted
+2. Multiple _persist_session calls do not duplicate messages
+3. append_to_transcript(skip_db=True) does not duplicate canonical Vault writes
+4. The gateway never creates a legacy JSONL mirror when a SessionDB exists
 """
 
 import json
 import os
-import sqlite3
 import tempfile
 from pathlib import Path
 from unittest.mock import MagicMock, patch
@@ -47,8 +46,7 @@ class TestFlushDeduplication:
         from hermes_state import SessionDB
 
         with tempfile.TemporaryDirectory() as tmpdir:
-            db_path = Path(tmpdir) / "test.db"
-            db = SessionDB(db_path=db_path)
+            db = SessionDB(vault_path=tmpdir)
 
             agent = self._make_agent(db)
 
@@ -77,8 +75,7 @@ class TestFlushDeduplication:
         from hermes_state import SessionDB
 
         with tempfile.TemporaryDirectory() as tmpdir:
-            db_path = Path(tmpdir) / "test.db"
-            db = SessionDB(db_path=db_path)
+            db = SessionDB(vault_path=tmpdir)
 
             agent = self._make_agent(db)
 
@@ -106,8 +103,7 @@ class TestFlushDeduplication:
         from hermes_state import SessionDB
 
         with tempfile.TemporaryDirectory() as tmpdir:
-            db_path = Path(tmpdir) / "test.db"
-            db = SessionDB(db_path=db_path)
+            db = SessionDB(vault_path=tmpdir)
 
             agent = self._make_agent(db)
             # Stub out _save_session_log to avoid file I/O
@@ -133,8 +129,7 @@ class TestFlushDeduplication:
         from hermes_state import SessionDB
 
         with tempfile.TemporaryDirectory() as tmpdir:
-            db_path = Path(tmpdir) / "test.db"
-            db = SessionDB(db_path=db_path)
+            db = SessionDB(vault_path=tmpdir)
 
             agent = self._make_agent(db)
 
@@ -172,7 +167,7 @@ class TestFlushDeduplication:
 # ---------------------------------------------------------------------------
 
 class TestAppendToTranscriptSkipDb:
-    """Verify skip_db=True writes JSONL but not SQLite."""
+    """Verify the Vault is canonical and legacy JSONL is never dual-written."""
 
     @pytest.fixture()
     def store(self, tmp_path):
@@ -180,13 +175,13 @@ class TestAppendToTranscriptSkipDb:
         from gateway.session import SessionStore
         config = GatewayConfig()
         with patch("gateway.session.SessionStore._ensure_loaded"):
-            s = SessionStore(sessions_dir=tmp_path, config=config)
-        s._db = None  # no SQLite for these JSONL-focused tests
+            s = SessionStore(sessions_dir=tmp_path / "legacy_sessions", config=config, vault_path=tmp_path)
+        s._db = None  # standalone test-double fallback, not the production Vault path
         s._loaded = True
         return s
 
     def test_skip_db_writes_jsonl_only(self, store, tmp_path):
-        """With skip_db=True, message appears in JSONL but not SQLite."""
+        """Without a SessionDB, a test double can still write its Vault-local JSONL."""
         session_id = "test-skip-db"
         msg = {"role": "assistant", "content": "hello world"}
         store.append_to_transcript(session_id, msg, skip_db=True)
@@ -200,18 +195,17 @@ class TestAppendToTranscriptSkipDb:
         parsed = json.loads(lines[0])
         assert parsed["content"] == "hello world"
 
-    def test_skip_db_prevents_sqlite_write(self, tmp_path):
-        """With skip_db=True and a real DB, message does NOT appear in SQLite."""
+    def test_skip_db_does_not_duplicate_vault_or_create_jsonl(self, tmp_path):
+        """With a real Vault backend, skip_db=True performs no additional writes."""
         from gateway.config import GatewayConfig
         from gateway.session import SessionStore
         from hermes_state import SessionDB
 
-        db_path = tmp_path / "test_skip.db"
-        db = SessionDB(db_path=db_path)
+        db = SessionDB(vault_path=tmp_path)
 
         config = GatewayConfig()
         with patch("gateway.session.SessionStore._ensure_loaded"):
-            store = SessionStore(sessions_dir=tmp_path, config=config)
+            store = SessionStore(sessions_dir=tmp_path / "legacy_sessions", config=config, vault_path=tmp_path)
         store._db = db
         store._loaded = True
 
@@ -221,28 +215,22 @@ class TestAppendToTranscriptSkipDb:
         msg = {"role": "assistant", "content": "hello world"}
         store.append_to_transcript(session_id, msg, skip_db=True)
 
-        # SQLite should NOT have the message
-        rows = db.get_messages(session_id)
-        assert len(rows) == 0, f"Expected 0 DB rows with skip_db=True, got {len(rows)}"
+        # The caller has already flushed this message, so the gateway must
+        # neither append it to the canonical Vault nor create a JSONL mirror.
+        assert db.get_messages(session_id) == []
+        assert not store.get_transcript_path(session_id).exists()
 
-        # But JSONL should have it
-        jsonl_path = store.get_transcript_path(session_id)
-        with open(jsonl_path) as f:
-            lines = f.readlines()
-        assert len(lines) == 1
-
-    def test_default_writes_both(self, tmp_path):
-        """Without skip_db, message appears in both JSONL and SQLite."""
+    def test_default_writes_only_canonical_vault(self, tmp_path):
+        """Without skip_db, persist once to the Vault and never dual-write JSONL."""
         from gateway.config import GatewayConfig
         from gateway.session import SessionStore
         from hermes_state import SessionDB
 
-        db_path = tmp_path / "test_both.db"
-        db = SessionDB(db_path=db_path)
+        db = SessionDB(vault_path=tmp_path)
 
         config = GatewayConfig()
         with patch("gateway.session.SessionStore._ensure_loaded"):
-            store = SessionStore(sessions_dir=tmp_path, config=config)
+            store = SessionStore(sessions_dir=tmp_path / "legacy_sessions", config=config, vault_path=tmp_path)
         store._db = db
         store._loaded = True
 
@@ -252,15 +240,12 @@ class TestAppendToTranscriptSkipDb:
         msg = {"role": "user", "content": "test message"}
         store.append_to_transcript(session_id, msg)
 
-        # JSONL should have the message
-        jsonl_path = store.get_transcript_path(session_id)
-        with open(jsonl_path) as f:
-            lines = f.readlines()
-        assert len(lines) == 1
-
-        # SQLite should also have the message
+        # The canonical Vault contains the message; no JSONL mirror is made.
         rows = db.get_messages(session_id)
         assert len(rows) == 1
+        assert rows[0]["content"] == "test message"
+        assert not store.get_transcript_path(session_id).exists()
+        assert store.load_transcript_unified(session_id)[0]["content"] == "test message"
 
 
 # ---------------------------------------------------------------------------

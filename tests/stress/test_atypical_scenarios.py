@@ -22,7 +22,6 @@ import json
 import multiprocessing as mp
 import os
 import shutil
-import sqlite3
 import subprocess
 import sys
 import tempfile
@@ -36,6 +35,26 @@ WT = _THIS.parents[2] if _THIS.parent.name == "stress" else Path.cwd()
 FAILURES: list[str] = []
 SKIPS: list[str] = []
 _REGISTERED: list = []
+
+
+def _set_task_fields(kb, task_id, **fields):
+    """Vault equivalent of a direct UPDATE on the tasks row."""
+    store = kb.kanban_store_dir()
+    path = store / f"{task_id}.json"
+    data = json.loads(path.read_text(encoding="utf-8"))
+    data.update(fields)
+    path.write_text(json.dumps(data, indent=2) + "\n", encoding="utf-8")
+
+
+def _set_open_run_fields(kb, task_id, **fields):
+    """Vault equivalent of a direct UPDATE on the task's open run row."""
+    store = kb.kanban_store_dir()
+    path = store / "runs.json"
+    rows = json.loads(path.read_text(encoding="utf-8")) if path.exists() else []
+    for row in rows:
+        if row.get("task_id") == task_id and row.get("ended_at") is None:
+            row.update(fields)
+    path.write_text(json.dumps(rows, indent=2) + "\n", encoding="utf-8")
 
 
 def scenario(name):
@@ -183,7 +202,7 @@ def _(home, kb):
             assert back.body == p
             # Kernel should have stored, not executed
             # Verify tasks table still has rows
-        count = conn.execute("SELECT COUNT(*) FROM tasks").fetchone()[0]
+        count = len(kb.list_tasks(conn, include_archived=True))
         assert count == len(payloads), f"lost rows: {count} vs {len(payloads)}"
         # tasks table wasn't dropped (we're still here)
         print(f"  {len(payloads)} injection payloads neutralized")
@@ -289,7 +308,7 @@ def _(home, kb):
             raise AssertionError(
                 "cycle creation was allowed; kernel should reject"
             )
-        except (ValueError, RuntimeError, sqlite3.IntegrityError) as e:
+        except (ValueError, RuntimeError) as e:
             # Expected: kernel refuses the cycle
             print(f"  cycle correctly rejected: {e}")
     finally:
@@ -306,7 +325,7 @@ def _(home, kb):
         try:
             kb.link_tasks(conn, parent_id=tid, child_id=tid)
             raise AssertionError("self-parenting should be rejected")
-        except (ValueError, RuntimeError, sqlite3.IntegrityError) as e:
+        except (ValueError, RuntimeError) as e:
             print(f"  self-parent rejected: {e}")
     finally:
         conn.close()
@@ -365,10 +384,7 @@ def _(home, kb):
         kb.complete_task(conn, parent, result="done")
         elapsed = (time.monotonic() - t0) * 1000
         # complete_task calls recompute_ready internally; check result.
-        ready_count = conn.execute(
-            "SELECT COUNT(*) FROM tasks WHERE status='ready' AND id != ?",
-            (parent,),
-        ).fetchone()[0]
+        ready_count = len([t for t in kb.list_tasks(conn) if t.status == "ready" and t.id != parent])
         assert ready_count == 500, f"expected 500 promoted, got {ready_count}"
         for cid in children[:5]:
             assert kb.get_task(conn, cid).status == "ready"
@@ -453,6 +469,9 @@ def _(home, kb):
 def _(home, kb):
     """Dispatching a task whose workspace can't be resolved should go
     through the spawn-failure circuit breaker, not crash."""
+    # Dispatcher only auto-spawns real profiles; create one for "w"
+    # (hermetic temp HOME has none, mirroring the pytest fixture).
+    (Path(home) / "profiles" / "w").mkdir(parents=True, exist_ok=True)
     kb.init_db()
     conn = kb.connect()
     try:
@@ -472,7 +491,9 @@ def _(home, kb):
         print(f"  after 1 tick with nonexistent workspace: status={task.status}")
         if task.status == "ready":
             # Expected path: workspace failure led to release
-            spawn_failures = task.spawn_failures
+            # (canonical field name; the legacy spawn_failures alias
+            # never existed as a Task attribute.)
+            spawn_failures = task.consecutive_failures
             print(f"  spawn_failures counter: {spawn_failures}")
             assert spawn_failures >= 1, "spawn_failures counter didn't increment"
         elif task.status == "running":
@@ -498,13 +519,9 @@ def _(home, kb):
     try:
         tid = kb.create_task(conn, title="time-travel", assignee="w")
         kb.claim_task(conn, tid)
-        # Force a future started_at via raw SQL
+        # Force a future started_at via the run record
         future = int(time.time()) + 3600
-        conn.execute(
-            "UPDATE task_runs SET started_at = ? WHERE task_id = ?",
-            (future, tid),
-        )
-        conn.commit()
+        _set_open_run_fields(kb, tid, started_at=future)
         # Complete normally — ended_at will be now, < started_at
         kb.complete_task(conn, tid, summary="time-skewed")
         run = kb.latest_run(conn, tid)
@@ -546,9 +563,9 @@ def _(home, kb):
         kb.complete_task(conn, tid, summary="path has spaces")
         runs = kb.list_runs(conn, tid)
         assert len(runs) == 1 and runs[0].outcome == "completed"
-        # Verify the DB file is actually in the weird path
-        db_path = Path(weird) / "kanban.db"
-        assert db_path.exists(), f"DB not at {db_path}"
+        # Verify the Vault store is actually in the weird path
+        store_path = Path(weird) / "kanban" / "boards" / "default" / "links.json"
+        assert store_path.exists(), f"store not at {store_path}"
         print(f"  HERMES_HOME with spaces: OK at {weird}")
     finally:
         conn.close()
@@ -570,7 +587,7 @@ def _(home, kb):
         tid = kb.create_task(conn, title="unicode home", assignee="w")
         kb.claim_task(conn, tid)
         kb.complete_task(conn, tid, summary="ok")
-        assert (Path(weird) / "kanban.db").exists()
+        assert (Path(weird) / "kanban" / "boards" / "default" / "links.json").exists()
         print(f"  HERMES_HOME with unicode path: OK at {weird}")
     finally:
         conn.close()
@@ -634,11 +651,7 @@ def _(home, kb):
             # Force close the run directly so we can make another claim
             rid = kb.latest_run(conn, tid).id
             kb._end_run(conn, tid, outcome="reclaimed", summary=f"attempt {i}")
-            conn.execute(
-                "UPDATE tasks SET status='ready', claim_lock=NULL, "
-                "claim_expires=NULL WHERE id=?", (tid,),
-            )
-            conn.commit()
+            _set_task_fields(kb, tid, status="ready", claim_lock=None, claim_expires=None)
         runs = kb.list_runs(conn, tid)
         assert len(runs) == 1000, f"expected 1000 runs, got {len(runs)}"
         # build_worker_context should NOT take forever
@@ -745,10 +758,7 @@ def _(home, kb):
     # Also verify there's only ONE row in the DB
     conn = kb.connect()
     try:
-        count = conn.execute(
-            "SELECT COUNT(*) FROM tasks WHERE idempotency_key = ?",
-            (key,),
-        ).fetchone()[0]
+        count = len([t for t in kb.list_tasks(conn, include_archived=True) if t.idempotency_key == key])
         assert count == 1, f"expected 1 task with key, got {count}"
     finally:
         conn.close()
@@ -823,9 +833,9 @@ def _(home, kb):
         tasks = kb.list_tasks(conn)
         assert all(t.id != tid for t in tasks), "archived task leaked into default list"
         # But it should still exist in the DB
-        row = conn.execute("SELECT status FROM tasks WHERE id = ?", (tid,)).fetchone()
-        assert row is not None
-        assert row["status"] == "archived"
+        archived = kb.get_task(conn, tid)
+        assert archived is not None
+        assert archived.status == "archived"
         # Trying to claim an archived task: should refuse
         claimed = kb.claim_task(conn, tid)
         assert claimed is None, "archived task should not be claimable"

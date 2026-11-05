@@ -7,19 +7,45 @@ transcript so the receiving-side agent has context about what was sent.
 
 Standalone -- works from CLI, cron, and gateway contexts without needing
 the full SessionStore machinery.
+
+Canonical-store rule: mirror records are written ONLY to the Obsidian
+SessionDB (the same store SessionStore uses). They are never written to
+a legacy JSONL file: the old dual write created a second, divergent copy
+of the history under the local Hermes home, outside the Vault.
 """
 
 import json
 import logging
+import os
 from datetime import datetime
+from pathlib import Path
 from typing import Optional
 
 from hermes_cli.config import get_hermes_home
 
 logger = logging.getLogger(__name__)
 
+# Legacy index location (read-only fallback for pre-Vault installs).
 _SESSIONS_DIR = get_hermes_home() / "sessions"
 _SESSIONS_INDEX = _SESSIONS_DIR / "sessions.json"
+
+
+def _index_candidates():
+    """Session-index files to consult, canonical (Vault) first.
+
+    The gateway's SessionStore keeps its index in the Vault at
+    ``06_Automation/Hermes/GatewayRouting/sessions.json``; the legacy
+    home-local index is only a fallback for pre-migration installs.
+    """
+    candidates = []
+    vault = os.environ.get("HERMES_OBSIDIAN_VAULT")
+    if vault:
+        candidates.append(
+            Path(vault).expanduser() / "06_Automation" / "Hermes"
+            / "GatewayRouting" / "sessions.json"
+        )
+    candidates.append(_SESSIONS_INDEX)
+    return candidates
 
 
 def mirror_to_session(
@@ -34,7 +60,7 @@ def mirror_to_session(
     Append a delivery-mirror message to the target session's transcript.
 
     Finds the gateway session that matches the given platform + chat_id,
-    then writes a mirror entry to both the JSONL transcript and SQLite DB.
+    then writes a mirror entry to the canonical Obsidian SessionDB only.
 
     Returns True if mirrored successfully, False if no matching session or error.
     All errors are caught -- this is never fatal.
@@ -64,8 +90,7 @@ def mirror_to_session(
             "mirror_source": source_label,
         }
 
-        _append_to_jsonl(session_id, mirror_msg)
-        _append_to_sqlite(session_id, mirror_msg)
+        _append_to_canonical(session_id, mirror_msg)
 
         logger.debug("Mirror: wrote to session %s (from %s)", session_id, source_label)
         return True
@@ -91,21 +116,25 @@ def _find_session_id(
     """
     Find the active session_id for a platform + chat_id pair.
 
-    Scans sessions.json entries and matches where origin.chat_id == chat_id
-    on the right platform.  DM session keys don't embed the chat_id
+    Scans the canonical Vault sessions index (falling back to the legacy
+    home-local index) and matches where origin.chat_id == chat_id on the
+    right platform.  DM session keys don't embed the chat_id
     (e.g. "agent:main:telegram:dm"), so we check the origin dict.
 
     When *user_id* is provided, prefer exact sender matches. If multiple
     same-chat candidates exist and none matches the user, return None instead
     of guessing and contaminating another participant's session.
     """
-    if not _SESSIONS_INDEX.exists():
-        return None
-
-    try:
-        with open(_SESSIONS_INDEX, encoding="utf-8") as f:
-            data = json.load(f)
-    except Exception:
+    data = None
+    for candidate in _index_candidates():
+        if candidate.exists():
+            try:
+                with open(candidate, encoding="utf-8") as f:
+                    data = json.load(f)
+                break
+            except Exception:
+                continue
+    if data is None:
         return None
 
     platform_lower = platform.lower()
@@ -150,18 +179,8 @@ def _find_session_id(
     return best_entry.get("session_id")
 
 
-def _append_to_jsonl(session_id: str, message: dict) -> None:
-    """Append a message to the JSONL transcript file."""
-    transcript_path = _SESSIONS_DIR / f"{session_id}.jsonl"
-    try:
-        with open(transcript_path, "a", encoding="utf-8") as f:
-            f.write(json.dumps(message, ensure_ascii=False) + "\n")
-    except Exception as e:
-        logger.debug("Mirror JSONL write failed: %s", e)
-
-
-def _append_to_sqlite(session_id: str, message: dict) -> None:
-    """Append a message to the SQLite session database."""
+def _append_to_canonical(session_id: str, message: dict) -> None:
+    """Append a message to the canonical Obsidian SessionDB."""
     db = None
     try:
         from hermes_state import SessionDB
@@ -172,7 +191,12 @@ def _append_to_sqlite(session_id: str, message: dict) -> None:
             content=message.get("content"),
         )
     except Exception as e:
-        logger.debug("Mirror SQLite write failed: %s", e)
+        logger.debug("Mirror canonical write failed: %s", e)
     finally:
         if db is not None:
             db.close()
+
+
+# Backwards-compatible alias: this was the SessionDB write half of the
+# old dual write (the JSONL half is gone by design).
+_append_to_sqlite = _append_to_canonical

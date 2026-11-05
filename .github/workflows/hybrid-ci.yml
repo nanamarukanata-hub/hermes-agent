@@ -1,0 +1,23 @@
+name: hermes-hybrid-ci
+on:
+  push:
+    branches: [feat/obsidian-session-backend-20261025, feat/obsidian-only-storage-20261025]
+  pull_request:
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - run: pip install pytest pytest-xdist PyYAML
+      - run: python3 -m py_compile hermes_hybrid/*.py tests/*.py
+      - run: python3 -m pytest tests/test_vault_kv_symlink_guards.py -q
+      - run: python3 -m pytest tests/test_sqlite_audit.py -q
+      # Hybrid smoke tests are scoped here; the repository-wide suite runs in tests.yml.
+      - run: python3 -m pytest tests/test_hybrid.py tests/test_hybrid_user_isolation.py -q
+      - run: python3 -m pytest tests/hermes_hybrid/test_drive_vault.py tests/hermes_hybrid/test_drive_integration_ops.py -q
+      - run: python3 -m unittest discover -s tests -t . -p 'test_obsidian_session_state.py' -q
+      - run: python3 -m unittest discover -s tests -t . -p 'test_kanban_migration_guards.py' -q
+      - run: python3 -c "from hermes_hybrid import audit; r=audit('hermes_hybrid'); assert not r['sqlite_imports'] and not r['db_files'], r"

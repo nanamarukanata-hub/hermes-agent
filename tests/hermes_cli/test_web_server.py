@@ -301,6 +301,55 @@ class TestWebServerEndpoints:
 
         assert resp.status_code == 200
 
+    def test_analytics_vault_model_breakdown(self):
+        """Both dashboard endpoints aggregate Vault sessions without SQLite."""
+        from hermes_state import SessionDB
+
+        db = SessionDB()
+        try:
+            db.create_session(
+                session_id="vault-analytics-model-test",
+                source="cli",
+                model="test/vault-model",
+            )
+            db.update_token_counts(
+                "vault-analytics-model-test",
+                input_tokens=120,
+                output_tokens=45,
+                cache_read_tokens=7,
+                reasoning_tokens=9,
+                api_call_count=2,
+                estimated_cost_usd=0.125,
+                billing_provider="test",
+            )
+        finally:
+            db.close()
+
+        usage_response = self.client.get("/api/analytics/usage?days=7")
+        assert usage_response.status_code == 200
+        usage = usage_response.json()
+        model_usage = next(
+            row for row in usage["by_model"]
+            if row["model"] == "test/vault-model"
+        )
+        assert model_usage["input_tokens"] == 120
+        assert model_usage["output_tokens"] == 45
+        assert model_usage["api_calls"] == 2
+        assert usage["totals"]["total_sessions"] >= 1
+
+        models_response = self.client.get("/api/analytics/models?days=7")
+        assert models_response.status_code == 200
+        models = models_response.json()
+        model = next(
+            row for row in models["models"]
+            if row["model"] == "test/vault-model"
+        )
+        assert model["provider"] == "test"
+        assert model["cache_read_tokens"] == 7
+        assert model["reasoning_tokens"] == 9
+        assert model["avg_tokens_per_session"] == 165
+        assert models["totals"]["distinct_models"] >= 1
+
     def test_session_token_endpoint_removed(self):
         """GET /api/auth/session-token should no longer exist (token injected via HTML)."""
         resp = self.client.get("/api/auth/session-token")
@@ -2181,25 +2230,27 @@ class TestPtyWebSocket:
         pub_path = f"/api/pub?{qs}"
         sub_path = f"/api/events?{qs}"
 
-        with self.client.websocket_connect(sub_path) as sub:
-            # Wait for the subscriber to be registered on the server side.
-            # websocket_connect returns when ws.accept() completes, but the
-            # server adds us to ``_event_channels`` in a follow-up await,
-            # so a publish immediately after connect can race ahead of the
-            # subscriber registration and the message is dropped.
-            deadline = time.monotonic() + 5.0
-            while time.monotonic() < deadline:
-                if ws_mod._event_channels.get("broadcast-test"):
-                    break
-                time.sleep(0.01)
-            else:
-                raise AssertionError(
-                    "subscriber did not register on channel within 5s"
-                )
+        # Keep both WebSockets on one TestClient portal/event loop.
+        # Without entering the TestClient context, each websocket_connect()
+        # creates a separate portal; broadcasting to a WebSocket owned by
+        # another loop can hang when the CI worker is under load.
+        with self.client as client:
+            with client.websocket_connect(sub_path) as sub:
+                # websocket_connect returns after accept(), before the
+                # handler registers the subscriber in _event_channels.
+                deadline = time.monotonic() + 5.0
+                while time.monotonic() < deadline:
+                    if ws_mod._event_channels.get("broadcast-test"):
+                        break
+                    time.sleep(0.01)
+                else:
+                    raise AssertionError(
+                        "subscriber did not register on channel within 5s"
+                    )
 
-            with self.client.websocket_connect(pub_path) as pub:
-                pub.send_text('{"type":"tool.start","payload":{"tool_id":"t1"}}')
-                received = sub.receive_text()
+                with client.websocket_connect(pub_path) as pub:
+                    pub.send_text('{"type":"tool.start","payload":{"tool_id":"t1"}}')
+                    received = sub.receive_text()
 
         assert "tool.start" in received
         assert '"tool_id":"t1"' in received

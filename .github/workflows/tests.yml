@@ -45,13 +45,32 @@ jobs:
 
       - name: Run tests
         run: |
+          mkdir -p "$HERMES_OBSIDIAN_VAULT"
           source .venv/bin/activate
-          python -m pytest tests/ -q --ignore=tests/integration --ignore=tests/e2e --tb=short -n auto
+          # Always verify the token-limit retry regression before fail-fast triage.
+          python -m pytest tests/agent/test_unsupported_parameter_retry.py -q --tb=short --junitxml="$RUNNER_TEMP/pytest-retry.xml"
+          # Triage mode: stop at first failure so CI prints the failing test and traceback
+          # before the 20-minute job timeout. Restore full-suite execution once fixed.
+          python -m pytest tests/ -q --ignore=tests/integration --ignore=tests/e2e --tb=short -n auto --maxfail=1 --junitxml="$RUNNER_TEMP/pytest-unit.xml"
         env:
+          # Isolated CI-only Vault: production data and SQLite are never used.
+          HERMES_OBSIDIAN_VAULT: ${{ runner.temp }}/hermes-unit-vault
           # Ensure tests don't accidentally call real APIs
           OPENROUTER_API_KEY: ""
           OPENAI_API_KEY: ""
           NOUS_API_KEY: ""
+
+      # Preserve the first failing test and traceback even when CI fails.
+      - name: Upload unit test diagnostics
+        if: always()
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02  # v4
+        with:
+          name: hermes-unit-pytest-junit
+          path: |
+            ${{ runner.temp }}/pytest-retry.xml
+            ${{ runner.temp }}/pytest-unit.xml
+          if-no-files-found: warn
+          retention-days: 7
 
   e2e:
     runs-on: ubuntu-latest
@@ -74,9 +93,11 @@ jobs:
 
       - name: Run e2e tests
         run: |
+          mkdir -p "$HERMES_OBSIDIAN_VAULT"
           source .venv/bin/activate
           python -m pytest tests/e2e/ -v --tb=short
         env:
+          HERMES_OBSIDIAN_VAULT: ${{ runner.temp }}/hermes-e2e-vault
           OPENROUTER_API_KEY: ""
           OPENAI_API_KEY: ""
           NOUS_API_KEY: ""

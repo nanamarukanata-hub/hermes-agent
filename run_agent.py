@@ -1749,8 +1749,15 @@ class AIAgent:
                         user_char_limit=mem_config.get("user_char_limit", 1375),
                     )
                     self._memory_store.load_from_disk()
-            except Exception:
-                pass  # Memory is optional -- don't break agent init
+            except Exception as exc:
+                # Curated memory was explicitly enabled. Continuing here would
+                # silently drop persistent MEMORY.md / USER.md state when the
+                # Obsidian Vault is missing, invalid, or unreadable.
+                if self._memory_enabled or self._user_profile_enabled:
+                    raise RuntimeError(
+                        "Vault-backed curated memory failed to initialize"
+                    ) from exc
+                logger.debug("Optional memory configuration unavailable: %s", exc)
         
 
 
@@ -1768,6 +1775,10 @@ class AIAgent:
                     _mp = _load_mem(_mem_provider_name)
                     if _mp and _mp.is_available():
                         self._memory_manager.add_provider(_mp)
+                    else:
+                        raise RuntimeError(
+                            f"Configured memory provider '{_mem_provider_name}' is unavailable"
+                        )
                     if self._memory_manager.providers:
                         _init_kwargs = {
                             "session_id": self.session_id,
@@ -1808,14 +1819,19 @@ class AIAgent:
                             _init_kwargs["agent_workspace"] = "hermes"
                         except Exception:
                             pass
-                        self._memory_manager.initialize_all(**_init_kwargs)
+                        self._memory_manager.initialize_all(
+                            raise_on_failure=True, **_init_kwargs
+                        )
                         logger.info("Memory provider '%s' activated", _mem_provider_name)
                     else:
                         logger.debug("Memory provider '%s' not found or not available", _mem_provider_name)
                         self._memory_manager = None
             except Exception as _mpe:
-                logger.warning("Memory provider plugin init failed: %s", _mpe)
-                self._memory_manager = None
+                # A configured provider is a requested persistence backend.
+                # Do not continue with it silently disabled after failure.
+                raise RuntimeError(
+                    f"Configured memory provider '{_mem_provider_name}' failed to initialize"
+                ) from _mpe
 
         # Inject memory provider tool schemas into the tool surface.
         # Skip tools whose names already exist (plugins may register the
@@ -4935,10 +4951,10 @@ class AIAgent:
         the same intent, and a prefetch keyed on the interrupted turn
         would fire against stale context.
 
-        Normal completed turns still sync as before.  The whole body is
-        wrapped in ``try/except Exception`` because external memory
-        providers are strictly best-effort — a misconfigured or offline
-        backend must not block the user from seeing their response.
+        A completed turn requests strict sync error reporting.  Memory
+        provider failures are logged with their traceback, but do not block
+        the user from seeing the response.  A failed sync does not trigger
+        prefetch for that turn.
         """
         if interrupted:
             return
@@ -4948,13 +4964,18 @@ class AIAgent:
             self._memory_manager.sync_all(
                 original_user_message, final_response,
                 session_id=self.session_id or "",
+                raise_on_failure=True,
             )
             self._memory_manager.queue_prefetch_all(
                 original_user_message,
                 session_id=self.session_id or "",
             )
         except Exception:
-            pass
+            logger.error(
+                "Memory provider turn sync failed for session %s",
+                self.session_id,
+                exc_info=True,
+            )
 
     def release_clients(self) -> None:
         """Release LLM client resources WITHOUT tearing down session tool state.
@@ -8646,6 +8667,7 @@ class AIAgent:
                 base_url=getattr(self, "_anthropic_base_url", None),
                 fast_mode=(self.request_overrides or {}).get("speed") == "fast",
                 drop_context_1m_beta=bool(getattr(self, "_oauth_1m_beta_disabled", False)),
+                is_bedrock=self.provider == "bedrock",
             )
 
         # AWS Bedrock native Converse API — bypasses the OpenAI client entirely.

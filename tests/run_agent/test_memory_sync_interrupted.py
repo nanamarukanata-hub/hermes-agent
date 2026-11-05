@@ -85,6 +85,7 @@ class TestSyncExternalMemoryForTurn:
         agent._memory_manager.sync_all.assert_called_once_with(
             "What's the weather in Paris?", "It's sunny and 22°C.",
             session_id="test_session_001",
+            raise_on_failure=True,
         )
         agent._memory_manager.queue_prefetch_all.assert_called_once_with(
             "What's the weather in Paris?",

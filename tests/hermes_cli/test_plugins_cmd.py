@@ -218,26 +218,47 @@ class TestCmdInstall:
 class TestCmdUpdate:
     """Test the update command."""
 
-    @patch("hermes_cli.plugins_cmd._sanitize_plugin_name")
+    @patch("hermes_cli.plugins_cmd._copy_example_files")
+    @patch("hermes_cli.plugins_cmd._git_pull_plugin_dir", return_value=(True, "Updated"))
     @patch("hermes_cli.plugins_cmd._plugins_dir")
-    @patch("hermes_cli.plugins_cmd.subprocess.run")
-    def test_update_git_pull_success(self, mock_run, mock_plugins_dir, mock_sanitize):
+    def test_update_git_pull_success(
+        self, mock_plugins_dir, mock_git_pull, mock_copy_examples, tmp_path
+    ):
+        """A non-catalog git plugin updates in place, without reinstalling."""
         from hermes_cli.plugins_cmd import cmd_update
 
-        mock_plugins_dir_val = MagicMock()
-        mock_plugins_dir.return_value = mock_plugins_dir_val
-        mock_target = MagicMock()
-        mock_target.exists.return_value = True
-        mock_target.__truediv__ = lambda self, x: MagicMock(
-            exists=MagicMock(return_value=True)
-        )
-        mock_sanitize.return_value = mock_target
+        plugin_dir = tmp_path / "test-plugin"
+        plugin_dir.mkdir()
+        (plugin_dir / ".git").mkdir()
+        mock_plugins_dir.return_value = tmp_path
 
-        mock_run.return_value = MagicMock(returncode=0, stdout="Updated", stderr="")
+        with patch("hermes_cli.plugins_cmd.cmd_install") as mock_install:
+            cmd_update("test-plugin")
 
-        cmd_update("test-plugin")
+        mock_git_pull.assert_called_once_with(plugin_dir)
+        mock_copy_examples.assert_called_once()
+        assert mock_copy_examples.call_args.args[0] == plugin_dir
+        mock_install.assert_not_called()
 
-        mock_run.assert_called_once()
+    @patch("hermes_cli.plugins_cmd._get_enabled_set", return_value={"test-plugin"})
+    @patch("hermes_cli.plugins_cmd.cmd_install")
+    @patch("hermes_cli.plugins_cmd._plugins_dir")
+    def test_update_catalog_plugin_reinstalls_pinned_sha(
+        self, mock_plugins_dir, mock_install, mock_enabled, tmp_path
+    ):
+        """Catalog plugins use reviewed-SHA reinstall, not a git pull."""
+        from hermes_cli.plugins_cmd import cmd_update
+
+        plugin_dir = tmp_path / "test-plugin"
+        plugin_dir.mkdir()
+        (plugin_dir / ".hermes-catalog.json").write_text("{}")
+        mock_plugins_dir.return_value = tmp_path
+
+        with patch("hermes_cli.plugins_cmd._git_pull_plugin_dir") as mock_git_pull:
+            cmd_update("test-plugin")
+
+        mock_install.assert_called_once_with("test-plugin", force=True, enable=True)
+        mock_git_pull.assert_not_called()
 
     @patch("hermes_cli.plugins_cmd._sanitize_plugin_name")
     @patch("hermes_cli.plugins_cmd._plugins_dir")

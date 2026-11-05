@@ -8,7 +8,7 @@ import gateway.mirror as mirror_mod
 from gateway.mirror import (
     mirror_to_session,
     _find_session_id,
-    _append_to_jsonl,
+    _append_to_canonical,
 )
 
 
@@ -152,32 +152,21 @@ class TestFindSessionId:
         assert result == "sess_1"
 
 
-class TestAppendToJsonl:
-    def test_appends_message(self, tmp_path):
-        sessions_dir = tmp_path / "sessions"
-        sessions_dir.mkdir()
+class TestCanonicalOnlyWrite:
+    """Mirror records go to the canonical SessionDB only -- never JSONL."""
 
-        with patch.object(mirror_mod, "_SESSIONS_DIR", sessions_dir):
-            _append_to_jsonl("sess_1", {"role": "assistant", "content": "Hello"})
+    def test_no_jsonl_function_remains(self):
+        assert not hasattr(mirror_mod, "_append_to_jsonl")
 
-        transcript = sessions_dir / "sess_1.jsonl"
-        lines = transcript.read_text().strip().splitlines()
-        assert len(lines) == 1
-        msg = json.loads(lines[0])
-        assert msg["role"] == "assistant"
-        assert msg["content"] == "Hello"
+    def test_append_to_canonical_writes_via_sessiondb(self):
+        mock_db = MagicMock()
+        with patch("hermes_state.SessionDB", return_value=mock_db):
+            _append_to_canonical("sess_1", {"role": "assistant", "content": "Hello"})
 
-    def test_appends_multiple_messages(self, tmp_path):
-        sessions_dir = tmp_path / "sessions"
-        sessions_dir.mkdir()
-
-        with patch.object(mirror_mod, "_SESSIONS_DIR", sessions_dir):
-            _append_to_jsonl("sess_1", {"role": "assistant", "content": "msg1"})
-            _append_to_jsonl("sess_1", {"role": "assistant", "content": "msg2"})
-
-        transcript = sessions_dir / "sess_1.jsonl"
-        lines = transcript.read_text().strip().splitlines()
-        assert len(lines) == 2
+        mock_db.append_message.assert_called_once_with(
+            session_id="sess_1", role="assistant", content="Hello",
+        )
+        mock_db.close.assert_called_once()
 
 
 class TestMirrorToSession:
@@ -192,19 +181,21 @@ class TestMirrorToSession:
 
         with patch.object(mirror_mod, "_SESSIONS_DIR", sessions_dir), \
              patch.object(mirror_mod, "_SESSIONS_INDEX", index_file), \
-             patch("gateway.mirror._append_to_sqlite"):
+             patch("gateway.mirror._append_to_canonical") as mock_append:
             result = mirror_to_session("telegram", "12345", "Hello!", source_label="cli")
 
         assert result is True
 
-        # Check JSONL was written
-        transcript = sessions_dir / "sess_abc.jsonl"
-        assert transcript.exists()
-        msg = json.loads(transcript.read_text().strip())
+        # Canonical store received the mirror message exactly once...
+        mock_append.assert_called_once()
+        session_arg, msg = mock_append.call_args[0]
+        assert session_arg == "sess_abc"
         assert msg["content"] == "Hello!"
         assert msg["role"] == "assistant"
         assert msg["mirror"] is True
         assert msg["mirror_source"] == "cli"
+        # ...and NO legacy JSONL copy was written anywhere.
+        assert not (sessions_dir / "sess_abc.jsonl").exists()
 
     def test_successful_mirror_uses_thread_id(self, tmp_path):
         sessions_dir, index_file = _setup_sessions(tmp_path, {
@@ -222,11 +213,13 @@ class TestMirrorToSession:
 
         with patch.object(mirror_mod, "_SESSIONS_DIR", sessions_dir), \
              patch.object(mirror_mod, "_SESSIONS_INDEX", index_file), \
-             patch("gateway.mirror._append_to_sqlite"):
+             patch("gateway.mirror._append_to_canonical") as mock_append:
             result = mirror_to_session("telegram", "-1001", "Hello topic!", source_label="cron", thread_id="10")
 
         assert result is True
-        assert (sessions_dir / "sess_topic_a.jsonl").exists()
+        mock_append.assert_called_once()
+        assert mock_append.call_args[0][0] == "sess_topic_a"
+        assert not (sessions_dir / "sess_topic_a.jsonl").exists()
         assert not (sessions_dir / "sess_topic_b.jsonl").exists()
 
     def test_successful_mirror_uses_user_id_for_group_session(self, tmp_path):
@@ -245,7 +238,7 @@ class TestMirrorToSession:
 
         with patch.object(mirror_mod, "_SESSIONS_DIR", sessions_dir), \
              patch.object(mirror_mod, "_SESSIONS_INDEX", index_file), \
-             patch("gateway.mirror._append_to_sqlite"):
+             patch("gateway.mirror._append_to_canonical") as mock_append:
             result = mirror_to_session(
                 "telegram",
                 "-1001",
@@ -255,7 +248,9 @@ class TestMirrorToSession:
             )
 
         assert result is True
-        assert (sessions_dir / "sess_alice.jsonl").exists()
+        mock_append.assert_called_once()
+        assert mock_append.call_args[0][0] == "sess_alice"
+        assert not (sessions_dir / "sess_alice.jsonl").exists()
         assert not (sessions_dir / "sess_bob.jsonl").exists()
 
     def test_no_matching_session(self, tmp_path):

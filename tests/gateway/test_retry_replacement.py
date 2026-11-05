@@ -11,7 +11,11 @@ from gateway.session import SessionStore
 
 
 @pytest.mark.asyncio
-async def test_gateway_retry_replaces_last_user_turn_in_transcript(tmp_path):
+async def test_gateway_retry_replaces_last_user_turn_in_transcript(tmp_path, monkeypatch):
+    # SessionStore now requires a Vault root (post-migration contract);
+    # point it at a per-test Vault, then run against the JSONL fallback.
+    (tmp_path / "vault").mkdir()
+    monkeypatch.setenv("HERMES_OBSIDIAN_VAULT", str(tmp_path / "vault"))
     config = GatewayConfig()
     with patch("gateway.session.SessionStore._ensure_loaded"):
         store = SessionStore(sessions_dir=tmp_path, config=config)

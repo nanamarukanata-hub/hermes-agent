@@ -532,12 +532,14 @@ def session_search(
 
 
 def check_session_search_requirements() -> bool:
-    """Requires SQLite state database and an auxiliary text model."""
-    try:
-        from hermes_state import DEFAULT_DB_PATH
-        return DEFAULT_DB_PATH.parent.exists()
-    except ImportError:
+    """Requires an explicitly configured Obsidian Vault (no SQLite)."""
+    import os
+    from pathlib import Path
+    vault = os.environ.get("HERMES_OBSIDIAN_VAULT", "")
+    if not vault:
         return False
+    target = Path(vault).expanduser().resolve()
+    return target.is_dir()
 
 
 SESSION_SEARCH_SCHEMA = {

@@ -45,99 +45,80 @@ OPS = [
 def assert_invariants(conn, kb, ops_log):
     """Run all invariant checks; raise AssertionError with context on any."""
     failures = []
+    tasks = kb.list_tasks(conn, include_archived=True)
+    by_id = {t.id: t for t in tasks}
+    pointed = set()
+    all_runs = []
+    for task in tasks:
+        if task.current_run_id is not None:
+            pointed.add(task.current_run_id)
+        all_runs.extend(kb.list_runs(conn, task.id))
+    runs_by_id = {r.id: r for r in all_runs}
 
     # I1: current_run_id → run exists and not ended
-    bad_ptr = conn.execute("""
-        SELECT t.id, t.current_run_id, r.ended_at, r.outcome
-        FROM tasks t
-        LEFT JOIN task_runs r ON r.id = t.current_run_id
-        WHERE t.current_run_id IS NOT NULL
-          AND (r.id IS NULL OR r.ended_at IS NOT NULL)
-    """).fetchall()
-    for row in bad_ptr:
-        if row["ended_at"] is None and row["outcome"] is None:
-            detail = "missing"
-        else:
-            detail = f"closed ({row['outcome']})"
-        failures.append(
-            f"I1: task {row['id']} points at run {row['current_run_id']} "
-            f"which is {detail}"
-        )
+    for task in tasks:
+        if task.current_run_id is not None:
+            run = runs_by_id.get(task.current_run_id)
+            if run is None:
+                failures.append(
+                    f"I1: task {task.id} points at run {task.current_run_id} "
+                    f"which is missing"
+                )
+            elif run.ended_at is not None:
+                failures.append(
+                    f"I1: task {task.id} points at run {task.current_run_id} "
+                    f"which is closed ({run.outcome})"
+                )
 
     # I2: open run → some task points at it
-    orphans = conn.execute("""
-        SELECT r.id, r.task_id
-        FROM task_runs r
-        WHERE r.ended_at IS NULL
-          AND NOT EXISTS (SELECT 1 FROM tasks t WHERE t.current_run_id = r.id)
-    """).fetchall()
-    for row in orphans:
-        failures.append(f"I2: open run {row['id']} on task {row['task_id']} has no pointer")
+    for run in all_runs:
+        if run.ended_at is None and run.id not in pointed:
+            failures.append(f"I2: open run {run.id} on task {run.task_id} has no pointer")
 
     # I3: valid statuses
     valid = {"triage", "todo", "ready", "running", "blocked", "done", "archived"}
-    bad_status = conn.execute("SELECT id, status FROM tasks").fetchall()
-    for row in bad_status:
-        if row["status"] not in valid:
-            failures.append(f"I3: task {row['id']} has invalid status {row['status']!r}")
+    for task in tasks:
+        if task.status not in valid:
+            failures.append(f"I3: task {task.id} has invalid status {task.status!r}")
 
     # I4: claim_lock set only when running
-    bad_lock = conn.execute("""
-        SELECT id, status, claim_lock FROM tasks
-        WHERE (status != 'running' AND claim_lock IS NOT NULL)
-    """).fetchall()
-    for row in bad_lock:
-        failures.append(
-            f"I4: task {row['id']} status={row['status']} but claim_lock={row['claim_lock']!r}"
-        )
+    for task in tasks:
+        if task.status != "running" and task.claim_lock is not None:
+            failures.append(
+                f"I4: task {task.id} status={task.status} but claim_lock={task.claim_lock!r}"
+            )
 
     # I5: run started_at <= ended_at
-    bad_times = conn.execute("""
-        SELECT id, started_at, ended_at FROM task_runs
-        WHERE ended_at IS NOT NULL AND started_at > ended_at
-    """).fetchall()
-    for row in bad_times:
-        failures.append(
-            f"I5: run {row['id']} started_at={row['started_at']} > ended_at={row['ended_at']}"
-        )
+    for run in all_runs:
+        if run.ended_at is not None and run.started_at is not None and run.started_at > run.ended_at:
+            failures.append(
+                f"I5: run {run.id} started_at={run.started_at} > ended_at={run.ended_at}"
+            )
 
     # I6: outcome set → ended_at set
-    bad_outcome = conn.execute("""
-        SELECT id, outcome, ended_at FROM task_runs
-        WHERE outcome IS NOT NULL AND ended_at IS NULL
-    """).fetchall()
-    for row in bad_outcome:
-        failures.append(f"I6: run {row['id']} outcome={row['outcome']} but ended_at NULL")
+    for run in all_runs:
+        if run.outcome is not None and run.ended_at is None:
+            failures.append(f"I6: run {run.id} outcome={run.outcome} but ended_at NULL")
 
-    # I7: events monotonic in id (always true for autoincrement)
-    # Skip — autoincrement guarantees it.
+    # I7: events monotonic in id (always true for the persistent counter)
+    # Skip — the counters file guarantees it.
 
     # I8: event.run_id references existing run
-    bad_ev_fk = conn.execute("""
-        SELECT e.id, e.run_id FROM task_events e
-        LEFT JOIN task_runs r ON r.id = e.run_id
-        WHERE e.run_id IS NOT NULL AND r.id IS NULL
-    """).fetchall()
-    for row in bad_ev_fk:
-        failures.append(f"I8: event {row['id']} references missing run {row['run_id']}")
+    for task in tasks:
+        for ev in kb.list_events(conn, task.id):
+            if ev.run_id is not None and ev.run_id not in runs_by_id:
+                failures.append(f"I8: event {ev.id} references missing run {ev.run_id}")
 
     # I9: if all parents done → child not in todo
     # (Only applies to children with at least one parent)
-    orphaned_todo = conn.execute("""
-        SELECT c.id AS child_id,
-               COUNT(*) AS n_parents,
-               SUM(CASE WHEN p.status = 'done' THEN 1 ELSE 0 END) AS done_parents
-        FROM tasks c
-        JOIN task_links l ON l.child_id = c.id
-        JOIN tasks p ON p.id = l.parent_id
-        WHERE c.status = 'todo'
-        GROUP BY c.id
-        HAVING n_parents > 0 AND n_parents = done_parents
-    """).fetchall()
-    for row in orphaned_todo:
-        failures.append(
-            f"I9: task {row['child_id']} is todo but all {row['n_parents']} parents are done"
-        )
+    for task in tasks:
+        if task.status != "todo":
+            continue
+        parents = kb.parent_ids(conn, task.id)
+        if parents and all(by_id.get(pid) is not None and by_id[pid].status == "done" for pid in parents):
+            failures.append(
+                f"I9: task {task.id} is todo but all {len(parents)} parents are done"
+            )
 
     if failures:
         print(f"\n!!! INVARIANT VIOLATION after {len(ops_log)} ops:")

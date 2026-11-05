@@ -671,6 +671,7 @@ def switch_model(
     resolved_alias = ""
     new_model = raw_input.strip()
     target_provider = current_provider
+    resolved_in_current_catalog = False
 
     # =================================================================
     # PATH A: Explicit --provider given
@@ -804,7 +805,6 @@ def switch_model(
         # Critical for flat-namespace resellers like opencode-go / opencode-zen
         # whose live /v1/models returns bare IDs (e.g. "deepseek-v4-flash") that
         # coincidentally match entries in native providers' static catalogs.
-        resolved_in_current_catalog = False
         if is_aggregator(target_provider) and not resolved_alias:
             catalog = list_provider_models(target_provider)
             if catalog:
@@ -977,9 +977,15 @@ def switch_model(
                 error_message=msg,
             )
 
-    # Apply auto-correction if validation found a closer match
+    # An exact match in the current provider's catalog takes precedence over
+    # a fuzzy correction from a separate (possibly stale) validation catalog.
+    # In particular, OpenCode Go can advertise deepseek-v4-flash while the
+    # fallback catalog proposes the different deepseek-v4.1-flash model.
     if validation.get("corrected_model"):
-        new_model = validation["corrected_model"]
+        if resolved_in_current_catalog:
+            validation = {**validation, "message": None}
+        else:
+            new_model = validation["corrected_model"]
 
     # --- Copilot api_mode override ---
     if target_provider in {"copilot", "github-copilot"}:

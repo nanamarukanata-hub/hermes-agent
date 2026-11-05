@@ -19,6 +19,18 @@ from gateway.session import (
 # working without duplicating the suite.
 normalize_whatsapp_identifier = canonical_whatsapp_identifier
 
+@pytest.fixture(autouse=True)
+def _obsidian_vault(tmp_path, monkeypatch):
+    """Obsidian-spec fixture: every SessionStore/SessionDB in this file
+    resolves to a per-test Vault.  This is the post-migration contract:
+    HERMES_OBSIDIAN_VAULT is required, and the old ``db_path`` argument
+    no longer selects a .db file."""
+    vault = tmp_path / "obsidian-vault"
+    vault.mkdir(parents=True, exist_ok=True)
+    monkeypatch.setenv("HERMES_OBSIDIAN_VAULT", str(vault))
+    return vault
+
+
 
 class TestSessionSourceRoundtrip:
     def test_full_roundtrip(self):
@@ -525,51 +537,67 @@ class TestLoadTranscriptCorruptLines:
 
 
 class TestLoadTranscriptPreferLongerSource:
-    """Regression: load_transcript must return whichever source (SQLite or JSONL)
-    has more messages to prevent silent truncation.  GH-3212."""
+    """Regression: load_transcript must not silently truncate history.
+
+    Originally GH-3212 (prefer the longer source). Step 2 supersedes the
+    lossy half of that rule: the canonical SessionDB and a surviving
+    legacy JSONL are merged with deduplication, so no source's unique
+    messages are dropped and shared messages are returned once.
+    """
 
     @pytest.fixture()
     def store_with_db(self, tmp_path):
-        """SessionStore with both SQLite and JSONL active."""
+        """SessionStore with both Obsidian SessionDB and legacy JSONL present."""
         from hermes_state import SessionDB
 
         config = GatewayConfig()
         with patch("gateway.session.SessionStore._ensure_loaded"):
             s = SessionStore(sessions_dir=tmp_path, config=config)
-        s._db = SessionDB(db_path=tmp_path / "state.db")
+        s._db = SessionDB()  # Vault via HERMES_OBSIDIAN_VAULT fixture
         s._loaded = True
         return s
 
-    def test_jsonl_longer_than_sqlite_returns_jsonl(self, store_with_db):
-        """Legacy session: JSONL has full history, SQLite has only recent turn."""
+    @staticmethod
+    def _write_legacy(store, sid, messages):
+        """Write a legacy JSONL transcript directly (pre-migration artifact).
+
+        append_to_transcript no longer writes JSONL when a SessionDB
+        exists, so fixtures create the legacy file the way history did.
+        """
+        path = store.get_transcript_path(sid)
+        path.parent.mkdir(parents=True, exist_ok=True)
+        with open(path, "w", encoding="utf-8") as f:
+            for msg in messages:
+                f.write(json.dumps(msg, ensure_ascii=False) + "\n")
+
+    def test_jsonl_longer_than_sqlite_merges_without_loss(self, store_with_db):
+        """Legacy session: JSONL has full history, Vault has only recent turn.
+
+        Both unique parts survive: 10 legacy + 2 canonical, legacy first.
+        """
         sid = "legacy_session"
         store_with_db._db.create_session(session_id=sid, source="gateway", model="m")
-        # JSONL has 10 messages (legacy history — written before SQLite existed)
-        for i in range(10):
-            role = "user" if i % 2 == 0 else "assistant"
-            store_with_db.append_to_transcript(
-                sid, {"role": role, "content": f"msg-{i}"}, skip_db=True,
-            )
-        # SQLite has only 2 messages (recent turn after migration)
+        legacy = [
+            {"role": "user" if i % 2 == 0 else "assistant", "content": f"msg-{i}"}
+            for i in range(10)
+        ]
+        self._write_legacy(store_with_db, sid, legacy)
         store_with_db._db.append_message(session_id=sid, role="user", content="new-q")
         store_with_db._db.append_message(session_id=sid, role="assistant", content="new-a")
 
         result = store_with_db.load_transcript(sid)
-        assert len(result) == 10
+        assert len(result) == 12
         assert result[0]["content"] == "msg-0"
+        assert result[-1]["content"] == "new-a"
 
     def test_sqlite_longer_than_jsonl_returns_sqlite(self, store_with_db):
-        """Fully migrated session: SQLite has more (JSONL stopped growing)."""
+        """Fully migrated session: Vault is a superset (JSONL stopped growing)."""
         sid = "migrated_session"
         store_with_db._db.create_session(session_id=sid, source="gateway", model="m")
-        # JSONL has 2 old messages
-        store_with_db.append_to_transcript(
-            sid, {"role": "user", "content": "old-q"}, skip_db=True,
-        )
-        store_with_db.append_to_transcript(
-            sid, {"role": "assistant", "content": "old-a"}, skip_db=True,
-        )
-        # SQLite has 4 messages (superset after migration)
+        self._write_legacy(store_with_db, sid, [
+            {"role": "user", "content": "db-0"},
+            {"role": "assistant", "content": "db-1"},
+        ])
         for i in range(4):
             role = "user" if i % 2 == 0 else "assistant"
             store_with_db._db.append_message(session_id=sid, role=role, content=f"db-{i}")
@@ -579,14 +607,12 @@ class TestLoadTranscriptPreferLongerSource:
         assert result[0]["content"] == "db-0"
 
     def test_sqlite_empty_falls_back_to_jsonl(self, store_with_db):
-        """No SQLite rows — falls back to JSONL (original behavior preserved)."""
+        """No Vault rows — falls back to JSONL (original behavior preserved)."""
         sid = "no_db_rows"
-        store_with_db.append_to_transcript(
-            sid, {"role": "user", "content": "hello"}, skip_db=True,
-        )
-        store_with_db.append_to_transcript(
-            sid, {"role": "assistant", "content": "hi"}, skip_db=True,
-        )
+        self._write_legacy(store_with_db, sid, [
+            {"role": "user", "content": "hello"},
+            {"role": "assistant", "content": "hi"},
+        ])
 
         result = store_with_db.load_transcript(sid)
         assert len(result) == 2
@@ -597,25 +623,23 @@ class TestLoadTranscriptPreferLongerSource:
         result = store_with_db.load_transcript("nonexistent")
         assert result == []
 
-    def test_equal_length_prefers_sqlite(self, store_with_db):
-        """When both have same count, SQLite wins (has richer fields like reasoning)."""
+    def test_equal_length_disjoint_sources_merge(self, store_with_db):
+        """Equal counts with different content: nothing is dropped.
+
+        The old rule silently discarded the JSONL half; the merged,
+        deduplicated transcript keeps both, legacy first.
+        """
         sid = "equal_session"
         store_with_db._db.create_session(session_id=sid, source="gateway", model="m")
-        # Write 2 messages to JSONL only
-        store_with_db.append_to_transcript(
-            sid, {"role": "user", "content": "jsonl-q"}, skip_db=True,
-        )
-        store_with_db.append_to_transcript(
-            sid, {"role": "assistant", "content": "jsonl-a"}, skip_db=True,
-        )
-        # Write 2 different messages to SQLite only
+        self._write_legacy(store_with_db, sid, [
+            {"role": "user", "content": "jsonl-q"},
+            {"role": "assistant", "content": "jsonl-a"},
+        ])
         store_with_db._db.append_message(session_id=sid, role="user", content="db-q")
         store_with_db._db.append_message(session_id=sid, role="assistant", content="db-a")
 
         result = store_with_db.load_transcript(sid)
-        assert len(result) == 2
-        # Should be the SQLite version (equal count → prefers SQLite)
-        assert result[0]["content"] == "db-q"
+        assert [m["content"] for m in result] == ["jsonl-q", "jsonl-a", "db-q", "db-a"]
 
 
 class TestSessionStoreSwitchSession:
@@ -627,7 +651,7 @@ class TestSessionStoreSwitchSession:
         config = GatewayConfig()
         with patch("gateway.session.SessionStore._ensure_loaded"):
             store = SessionStore(sessions_dir=tmp_path / "sessions", config=config)
-        db = SessionDB(db_path=tmp_path / "state.db")
+        db = SessionDB()  # Vault via HERMES_OBSIDIAN_VAULT fixture
         store._db = db
         store._loaded = True
 
@@ -1199,12 +1223,12 @@ class TestLastPromptTokens:
         assert entry.last_prompt_tokens == 0
 
 class TestRewriteTranscriptPreservesReasoning:
-    """rewrite_transcript must not drop reasoning fields from SQLite."""
+    """rewrite_transcript must not drop reasoning fields from the Vault."""
 
     def test_reasoning_survives_rewrite(self, tmp_path):
         from hermes_state import SessionDB
 
-        db = SessionDB(db_path=tmp_path / "test.db")
+        db = SessionDB()  # Vault via HERMES_OBSIDIAN_VAULT fixture
         session_id = "reasoning-test"
         db.create_session(session_id=session_id, source="cli")
 
@@ -1246,7 +1270,7 @@ class TestRewriteTranscriptPreservesReasoning:
     def test_db_rewrite_is_atomic_on_insert_failure(self, tmp_path, monkeypatch):
         from hermes_state import SessionDB
 
-        db = SessionDB(db_path=tmp_path / "test.db")
+        db = SessionDB()  # Vault via HERMES_OBSIDIAN_VAULT fixture
         session_id = "atomic-rewrite-test"
         db.create_session(session_id=session_id, source="cli")
         db.append_message(session_id=session_id, role="user", content="before user")
@@ -1258,25 +1282,24 @@ class TestRewriteTranscriptPreservesReasoning:
         store._db = db
         store._loaded = True
 
-        # Force the second insert inside replace_messages to fail, simulating
-        # any storage-layer error that might abort a multi-row rewrite.
-        real_encode = SessionDB._encode_content
-        calls = {"n": 0}
+        # Force the storage write inside replace_messages to fail, simulating
+        # any storage-layer error that might abort a rewrite.  In Vault
+        # mode replace_messages is a single atomic metadata.json replace,
+        # so a failure before the replace must leave the original intact.
+        def flaky_write(path, content):
+            raise RuntimeError("simulated storage failure")
 
-        def flaky_encode(cls, content):
-            calls["n"] += 1
-            if calls["n"] == 2:
-                raise RuntimeError("simulated storage failure")
-            return real_encode.__func__(cls, content)
-
-        monkeypatch.setattr(SessionDB, "_encode_content", classmethod(flaky_encode))
+        monkeypatch.setattr(SessionDB, "_write", staticmethod(flaky_write))
 
         replacement = [
             {"role": "user", "content": "after user"},
             {"role": "assistant", "content": "after assistant"},
         ]
 
-        store.rewrite_transcript(session_id, replacement)
+        # The gateway must surface persistence errors to the caller instead
+        # of reporting a successful /retry, /undo, or /compress operation.
+        with pytest.raises(RuntimeError, match="simulated storage failure"):
+            store.rewrite_transcript(session_id, replacement)
 
         # The rewrite must roll back atomically — original messages preserved.
         after = db.get_messages_as_conversation(session_id)

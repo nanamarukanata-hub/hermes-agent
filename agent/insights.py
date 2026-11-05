@@ -106,7 +106,8 @@ class InsightsEngine:
             db: A SessionDB instance (from hermes_state.py)
         """
         self.db = db
-        self._conn = db._conn
+        # Session data comes from the Obsidian Vault, not a SQLite connection.
+        self._conn = None
 
     def generate(self, days: int = 30, source: str = None) -> Dict[str, Any]:
         """
@@ -197,212 +198,81 @@ class InsightsEngine:
     )
 
     def _get_sessions(self, cutoff: float, source: str = None) -> List[Dict]:
-        """Fetch sessions within the time window."""
-        if source:
-            cursor = self._conn.execute(self._GET_SESSIONS_WITH_SOURCE, (cutoff, source))
-        else:
-            cursor = self._conn.execute(self._GET_SESSIONS_ALL, (cutoff,))
-        return [dict(row) for row in cursor.fetchall()]
-
-    def _get_tool_usage(self, cutoff: float, source: str = None) -> List[Dict]:
-        """Get tool call counts from messages.
-
-        Uses two sources:
-        1. tool_name column on 'tool' role messages (set by gateway)
-        2. tool_calls JSON on 'assistant' role messages (covers CLI where
-           tool_name is not populated on tool responses)
-        """
-        tool_counts = Counter()
-
-        # Source 1: explicit tool_name on tool response messages
-        if source:
-            cursor = self._conn.execute(
-                """SELECT m.tool_name, COUNT(*) as count
-                   FROM messages m
-                   JOIN sessions s ON s.id = m.session_id
-                   WHERE s.started_at >= ? AND s.source = ?
-                     AND m.role = 'tool' AND m.tool_name IS NOT NULL
-                   GROUP BY m.tool_name
-                   ORDER BY count DESC""",
-                (cutoff, source),
-            )
-        else:
-            cursor = self._conn.execute(
-                """SELECT m.tool_name, COUNT(*) as count
-                   FROM messages m
-                   JOIN sessions s ON s.id = m.session_id
-                   WHERE s.started_at >= ?
-                     AND m.role = 'tool' AND m.tool_name IS NOT NULL
-                   GROUP BY m.tool_name
-                   ORDER BY count DESC""",
-                (cutoff,),
-            )
-        for row in cursor.fetchall():
-            tool_counts[row["tool_name"]] += row["count"]
-
-        # Source 2: extract from tool_calls JSON on assistant messages
-        # (covers CLI sessions where tool_name is NULL on tool responses)
-        if source:
-            cursor2 = self._conn.execute(
-                """SELECT m.tool_calls
-                   FROM messages m
-                   JOIN sessions s ON s.id = m.session_id
-                   WHERE s.started_at >= ? AND s.source = ?
-                     AND m.role = 'assistant' AND m.tool_calls IS NOT NULL""",
-                (cutoff, source),
-            )
-        else:
-            cursor2 = self._conn.execute(
-                """SELECT m.tool_calls
-                   FROM messages m
-                   JOIN sessions s ON s.id = m.session_id
-                   WHERE s.started_at >= ?
-                     AND m.role = 'assistant' AND m.tool_calls IS NOT NULL""",
-                (cutoff,),
-            )
-
-        tool_calls_counts = Counter()
-        for row in cursor2.fetchall():
-            try:
-                calls = row["tool_calls"]
-                if isinstance(calls, str):
-                    calls = json.loads(calls)
-                if isinstance(calls, list):
-                    for call in calls:
-                        func = call.get("function", {}) if isinstance(call, dict) else {}
-                        name = func.get("name")
-                        if name:
-                            tool_calls_counts[name] += 1
-            except (json.JSONDecodeError, TypeError, AttributeError):
-                continue
-
-        # Merge: prefer tool_name source, supplement with tool_calls source
-        # for tools not already counted
-        if not tool_counts and tool_calls_counts:
-            # No tool_name data at all — use tool_calls exclusively
-            tool_counts = tool_calls_counts
-        elif tool_counts and tool_calls_counts:
-            # Both sources have data — use whichever has the higher count per tool
-            # (they may overlap, so take the max to avoid double-counting)
-            all_tools = set(tool_counts) | set(tool_calls_counts)
-            merged = Counter()
-            for tool in all_tools:
-                merged[tool] = max(tool_counts.get(tool, 0), tool_calls_counts.get(tool, 0))
-            tool_counts = merged
-
-        # Convert to the expected format
+        """Read session records directly from Obsidian Vault."""
         return [
-            {"tool_name": name, "count": count}
-            for name, count in tool_counts.most_common()
+            {k: v for k, v in item.items() if k != "messages"}
+            for item in self.db._items()
+            if (item.get("started_at") or 0) >= cutoff
+            and (source is None or item.get("source") == source)
         ]
 
+    def _get_tool_usage(self, cutoff: float, source: str = None) -> List[Dict]:
+        """Count tool calls in Vault transcripts without SQLite."""
+        responses = Counter()
+        calls = Counter()
+        for session in self.db._items():
+            if (session.get("started_at") or 0) < cutoff: continue
+            if source and session.get("source") != source: continue
+            for msg in session.get("messages", []):
+                name = msg.get("tool_name")
+                if msg.get("role") == "tool" and name:
+                    responses[name] += 1
+                if msg.get("role") == "assistant":
+                    items = msg.get("tool_calls") or []
+                    if isinstance(items, str):
+                        try: items = json.loads(items)
+                        except (TypeError, ValueError): items = []
+                    for call in items if isinstance(items, list) else []:
+                        fn = call.get("function", {}) if isinstance(call, dict) else {}
+                        if fn.get("name"): calls[fn["name"]] += 1
+        return [{"tool_name": name, "count": max(responses[name], calls[name])}
+                for name in sorted(set(responses) | set(calls),
+                                   key=lambda name: (-max(responses[name], calls[name]), name))]
+
     def _get_skill_usage(self, cutoff: float, source: str = None) -> List[Dict]:
-        """Extract per-skill usage from assistant tool calls."""
-        skill_counts: Dict[str, Dict[str, Any]] = {}
-
-        if source:
-            cursor = self._conn.execute(
-                """SELECT m.tool_calls, m.timestamp
-                   FROM messages m
-                   JOIN sessions s ON s.id = m.session_id
-                   WHERE s.started_at >= ? AND s.source = ?
-                     AND m.role = 'assistant' AND m.tool_calls IS NOT NULL""",
-                (cutoff, source),
-            )
-        else:
-            cursor = self._conn.execute(
-                """SELECT m.tool_calls, m.timestamp
-                   FROM messages m
-                   JOIN sessions s ON s.id = m.session_id
-                   WHERE s.started_at >= ?
-                     AND m.role = 'assistant' AND m.tool_calls IS NOT NULL""",
-                (cutoff,),
-            )
-
-        for row in cursor.fetchall():
-            try:
-                calls = row["tool_calls"]
+        """Extract skill execution records directly from Vault transcripts."""
+        usage = {}
+        for session in self.db._items():
+            if (session.get("started_at") or 0) < cutoff: continue
+            if source and session.get("source") != source: continue
+            for msg in session.get("messages", []):
+                if msg.get("role") != "assistant": continue
+                calls = msg.get("tool_calls") or []
                 if isinstance(calls, str):
-                    calls = json.loads(calls)
-                if not isinstance(calls, list):
-                    continue
-            except (json.JSONDecodeError, TypeError):
-                continue
-
-            timestamp = row["timestamp"]
-            for call in calls:
-                if not isinstance(call, dict):
-                    continue
-                func = call.get("function", {})
-                tool_name = func.get("name")
-                if tool_name not in {"skill_view", "skill_manage"}:
-                    continue
-
-                args = func.get("arguments")
-                if isinstance(args, str):
-                    try:
-                        args = json.loads(args)
-                    except (json.JSONDecodeError, TypeError):
-                        continue
-                if not isinstance(args, dict):
-                    continue
-
-                skill_name = args.get("name")
-                if not isinstance(skill_name, str) or not skill_name.strip():
-                    continue
-
-                entry = skill_counts.setdefault(
-                    skill_name,
-                    {
-                        "skill": skill_name,
-                        "view_count": 0,
-                        "manage_count": 0,
-                        "last_used_at": None,
-                    },
-                )
-                if tool_name == "skill_view":
-                    entry["view_count"] += 1
-                else:
-                    entry["manage_count"] += 1
-
-                if timestamp is not None and (
-                    entry["last_used_at"] is None or timestamp > entry["last_used_at"]
-                ):
-                    entry["last_used_at"] = timestamp
-
-        return list(skill_counts.values())
+                    try: calls = json.loads(calls)
+                    except (TypeError, ValueError): calls = []
+                for call in calls if isinstance(calls, list) else []:
+                    if not isinstance(call, dict): continue
+                    fn = call.get("function") or {}
+                    name = fn.get("name")
+                    if name not in {"skill_view", "skill_manage"}: continue
+                    args = fn.get("arguments") or {}
+                    if isinstance(args, str):
+                        try: args = json.loads(args)
+                        except (TypeError, ValueError): continue
+                    if not isinstance(args, dict): continue
+                    skill = args.get("name")
+                    if not isinstance(skill, str) or not skill.strip(): continue
+                    row = usage.setdefault(skill, {"skill": skill, "view_count": 0,
+                                                   "manage_count": 0, "last_used_at": None})
+                    row["view_count" if name == "skill_view" else "manage_count"] += 1
+                    ts = msg.get("timestamp")
+                    if ts is not None and (row["last_used_at"] is None or ts > row["last_used_at"]):
+                        row["last_used_at"] = ts
+        return list(usage.values())
 
     def _get_message_stats(self, cutoff: float, source: str = None) -> Dict:
-        """Get aggregate message statistics."""
-        if source:
-            cursor = self._conn.execute(
-                """SELECT
-                     COUNT(*) as total_messages,
-                     SUM(CASE WHEN m.role = 'user' THEN 1 ELSE 0 END) as user_messages,
-                     SUM(CASE WHEN m.role = 'assistant' THEN 1 ELSE 0 END) as assistant_messages,
-                     SUM(CASE WHEN m.role = 'tool' THEN 1 ELSE 0 END) as tool_messages
-                   FROM messages m
-                   JOIN sessions s ON s.id = m.session_id
-                   WHERE s.started_at >= ? AND s.source = ?""",
-                (cutoff, source),
-            )
-        else:
-            cursor = self._conn.execute(
-                """SELECT
-                     COUNT(*) as total_messages,
-                     SUM(CASE WHEN m.role = 'user' THEN 1 ELSE 0 END) as user_messages,
-                     SUM(CASE WHEN m.role = 'assistant' THEN 1 ELSE 0 END) as assistant_messages,
-                     SUM(CASE WHEN m.role = 'tool' THEN 1 ELSE 0 END) as tool_messages
-                   FROM messages m
-                   JOIN sessions s ON s.id = m.session_id
-                   WHERE s.started_at >= ?""",
-                (cutoff,),
-            )
-        row = cursor.fetchone()
-        return dict(row) if row else {
-            "total_messages": 0, "user_messages": 0,
-            "assistant_messages": 0, "tool_messages": 0,
-        }
+        """Aggregate Vault message counts."""
+        counts = Counter()
+        for session in self.db._items():
+            if (session.get("started_at") or 0) < cutoff: continue
+            if source and session.get("source") != source: continue
+            for msg in session.get("messages", []):
+                counts[msg.get("role")] += 1
+        return {"total_messages": sum(counts.values()),
+                "user_messages": counts["user"],
+                "assistant_messages": counts["assistant"],
+                "tool_messages": counts["tool"]}
 
     # =========================================================================
     # Computation

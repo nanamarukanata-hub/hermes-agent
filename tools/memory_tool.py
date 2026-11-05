@@ -30,7 +30,6 @@ import re
 import tempfile
 from contextlib import contextmanager
 from pathlib import Path
-from hermes_constants import get_hermes_home
 from typing import Dict, Any, List, Optional
 
 from utils import atomic_replace
@@ -48,13 +47,24 @@ except ImportError:
 
 logger = logging.getLogger(__name__)
 
-# Where memory files live — resolved dynamically so profile overrides
-# (HERMES_HOME env var changes) are always respected.  The old module-level
-# constant was cached at import time and could go stale if a profile switch
-# happened after the first import.
+# Curated memory is durable conversation-adjacent state, so it must not
+# silently fall back to HERMES_HOME/memories when the Vault is unavailable.
+# Keep the existing MEMORY.md / USER.md format in a dedicated Vault directory;
+# migration of older HERMES_HOME files is an explicit, offline operation.
 def get_memory_dir() -> Path:
-    """Return the profile-scoped memories directory."""
-    return get_hermes_home() / "memories"
+    """Return the configured Vault's curated-memory directory (fail closed)."""
+    configured = os.environ.get("HERMES_OBSIDIAN_VAULT", "").strip()
+    if not configured:
+        raise RuntimeError("HERMES_OBSIDIAN_VAULT is required for curated memory")
+    root = Path(configured).expanduser()
+    if not root.is_dir() or root.is_symlink():
+        raise RuntimeError("HERMES_OBSIDIAN_VAULT must be an existing, non-symlink directory")
+    current = root
+    for component in ("06_Automation", "Hermes", "CuratedMemory"):
+        current = current / component
+        if current.is_symlink():
+            raise ValueError("symlink in curated-memory Vault path is rejected")
+    return current
 
 ENTRY_DELIMITER = "\n§\n"
 

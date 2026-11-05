@@ -16,6 +16,7 @@ import subprocess
 import sys
 import tempfile
 import time
+from pathlib import Path
 
 WT = str(Path(__file__).resolve().parents[2])
 FAKE_WORKER = str(Path(__file__).parent / "_fake_worker.py")
@@ -69,6 +70,12 @@ exec {PY} -m hermes_cli.main "$@"
 """)
     os.chmod(shim_path, 0o755)
     os.environ["PATH"] = f"{shim_dir}:{os.environ.get('PATH','')}"
+
+    # The dispatcher only auto-spawns assignees that are real profiles.
+    # This hermetic temp HOME has none, so create the "worker" profile
+    # directory the scenarios assign to (mirrors the pytest
+    # all_assignees_spawnable fixture).
+    (Path(home) / "profiles" / "worker").mkdir(parents=True, exist_ok=True)
 
     kb.init_db()
     conn = kb.connect()

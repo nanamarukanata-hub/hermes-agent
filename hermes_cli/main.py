@@ -10359,10 +10359,13 @@ Examples:
                 c = db.session_count(source=src)
                 if c > 0:
                     print(f"  {src}: {c} sessions")
-            db_path = db.db_path
-            if db_path.exists():
-                size_mb = os.path.getsize(db_path) / (1024 * 1024)
-                print(f"Database size: {size_mb:.1f} MB")
+            vault_session_dir = db.db_path
+            if vault_session_dir.is_dir():
+                size_bytes = sum(
+                    file.stat().st_size for file in vault_session_dir.rglob("*")
+                    if file.is_file() and not file.is_symlink()
+                )
+                print(f"Obsidian session storage: {size_bytes / (1024 * 1024):.1f} MB")
 
         else:
             sessions_parser.print_help()

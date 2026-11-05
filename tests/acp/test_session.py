@@ -283,7 +283,8 @@ class TestPersistence:
         assert row is not None
         assert row["source"] == "acp"
         # cwd stored in model_config JSON
-        mc = json.loads(row["model_config"])
+        mc = row["model_config"]
+        assert isinstance(mc, dict)
         assert mc["cwd"] == "/project"
 
     def test_get_session_restores_from_db(self, manager):
@@ -429,8 +430,35 @@ class TestPersistence:
         # Should also be persisted in DB.
         db = manager._get_db()
         row = db.get_session(sid)
-        mc = json.loads(row["model_config"])
+        mc = row["model_config"]
+        assert isinstance(mc, dict)
         assert mc["cwd"] == "/new"
+
+        # Regression: an ACP cwd update must survive a second process restart.
+        with manager._lock:
+            del manager._sessions[sid]
+        restored = manager.get_session(sid)
+        assert restored is not None
+        assert restored.cwd == "/new"
+
+    def test_list_sessions_filters_persisted_vault_cwd(self, manager):
+        state = manager.create_session(cwd="/vault-work")
+        state.history.append({"role": "user", "content": "persisted thread"})
+        manager.save_session(state.session_id)
+        with manager._lock:
+            del manager._sessions[state.session_id]
+
+        matching = manager.list_sessions(cwd="/vault-work")
+        assert state.session_id in {row["session_id"] for row in matching}
+        unrelated = manager.list_sessions(cwd="/other-work")
+        assert state.session_id not in {row["session_id"] for row in unrelated}
+
+    def test_model_config_reader_accepts_vault_dict_and_legacy_json(self):
+        meta = {"cwd": "/workspace", "provider": "openrouter"}
+        assert acp_session._parse_model_config(meta) == meta
+        assert acp_session._parse_model_config(json.dumps(meta)) == meta
+        assert acp_session._parse_model_config("{invalid") == {}
+        assert acp_session._parse_model_config(None) == {}
 
     def test_only_restores_acp_sessions(self, manager):
         """get_session should not restore non-ACP sessions from DB."""

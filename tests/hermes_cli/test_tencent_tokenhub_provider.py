@@ -304,12 +304,37 @@ class TestTencentTokenhubURLMapping:
 
 
 class TestTencentTokenhubContextLength:
-    """hy3-preview context length is registered."""
+    """Keep the static fallback deterministic while honoring provider metadata."""
 
-    def test_hy3_preview_context_length(self):
-        from agent.model_metadata import get_model_context_length
-        ctx = get_model_context_length("hy3-preview")
+    def test_hy3_preview_static_context_length_without_registry_data(self, monkeypatch):
+        from agent import model_metadata
+
+        # models.dev and OpenRouter can publish a different context window.
+        # This test is for the local 256K fallback, not a live registry snapshot.
+        monkeypatch.setattr(
+            "agent.models_dev.lookup_models_dev_context",
+            lambda provider, model: None,
+        )
+        monkeypatch.setattr(model_metadata, "fetch_model_metadata", lambda: {})
+
+        ctx = model_metadata.get_model_context_length(
+            "hy3-preview", provider="tencent-tokenhub"
+        )
         assert ctx == 256000
+
+    def test_hy3_preview_provider_metadata_overrides_static_fallback(self, monkeypatch):
+        from agent import model_metadata
+
+        def lookup(provider, model):
+            assert provider == "tencent-tokenhub"
+            assert model == "hy3-preview"
+            return 262144
+
+        monkeypatch.setattr("agent.models_dev.lookup_models_dev_context", lookup)
+        ctx = model_metadata.get_model_context_length(
+            "hy3-preview", provider="tencent-tokenhub"
+        )
+        assert ctx == 262144
 
 
 # =============================================================================

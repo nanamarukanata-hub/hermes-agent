@@ -2800,63 +2800,76 @@ async def update_config_raw(body: RawConfigUpdate):
 # ---------------------------------------------------------------------------
 
 
+def _vault_analytics_sessions(db, days: int):
+    """Read analytics from the canonical Vault, never a SQLite connection."""
+    cutoff = time.time() - days * 86400
+    return [s for s in db._items() if (s.get("started_at") or 0) > cutoff]
+
+
+def _analytics_sum(sessions, field):
+    return sum((s.get(field) or 0) for s in sessions)
+
+
 @app.get("/api/analytics/usage")
 async def get_usage_analytics(days: int = 30):
+    from collections import defaultdict
+    from datetime import datetime, timezone
     from hermes_state import SessionDB
     from agent.insights import InsightsEngine
 
     db = SessionDB()
     try:
-        cutoff = time.time() - (days * 86400)
-        cur = db._conn.execute("""
-            SELECT date(started_at, 'unixepoch') as day,
-                   SUM(input_tokens) as input_tokens,
-                   SUM(output_tokens) as output_tokens,
-                   SUM(cache_read_tokens) as cache_read_tokens,
-                   SUM(reasoning_tokens) as reasoning_tokens,
-                   COALESCE(SUM(estimated_cost_usd), 0) as estimated_cost,
-                   COALESCE(SUM(actual_cost_usd), 0) as actual_cost,
-                   COUNT(*) as sessions,
-                   SUM(COALESCE(api_call_count, 0)) as api_calls
-            FROM sessions WHERE started_at > ?
-            GROUP BY day ORDER BY day
-        """, (cutoff,))
-        daily = [dict(r) for r in cur.fetchall()]
+        sessions = _vault_analytics_sessions(db, days)
+        daily_groups = defaultdict(list)
+        model_groups = defaultdict(list)
+        for session in sessions:
+            day = datetime.fromtimestamp(
+                session["started_at"], tz=timezone.utc
+            ).strftime("%Y-%m-%d")
+            daily_groups[day].append(session)
+            if session.get("model") is not None:
+                model_groups[session["model"]].append(session)
 
-        cur2 = db._conn.execute("""
-            SELECT model,
-                   SUM(input_tokens) as input_tokens,
-                   SUM(output_tokens) as output_tokens,
-                   COALESCE(SUM(estimated_cost_usd), 0) as estimated_cost,
-                   COUNT(*) as sessions,
-                   SUM(COALESCE(api_call_count, 0)) as api_calls
-            FROM sessions WHERE started_at > ? AND model IS NOT NULL
-            GROUP BY model ORDER BY SUM(input_tokens) + SUM(output_tokens) DESC
-        """, (cutoff,))
-        by_model = [dict(r) for r in cur2.fetchall()]
-
-        cur3 = db._conn.execute("""
-            SELECT SUM(input_tokens) as total_input,
-                   SUM(output_tokens) as total_output,
-                   SUM(cache_read_tokens) as total_cache_read,
-                   SUM(reasoning_tokens) as total_reasoning,
-                   COALESCE(SUM(estimated_cost_usd), 0) as total_estimated_cost,
-                   COALESCE(SUM(actual_cost_usd), 0) as total_actual_cost,
-                   COUNT(*) as total_sessions,
-                   SUM(COALESCE(api_call_count, 0)) as total_api_calls
-            FROM sessions WHERE started_at > ?
-        """, (cutoff,))
-        totals = dict(cur3.fetchone())
+        daily = [
+            {
+                "day": day,
+                "input_tokens": _analytics_sum(group, "input_tokens"),
+                "output_tokens": _analytics_sum(group, "output_tokens"),
+                "cache_read_tokens": _analytics_sum(group, "cache_read_tokens"),
+                "reasoning_tokens": _analytics_sum(group, "reasoning_tokens"),
+                "estimated_cost": _analytics_sum(group, "estimated_cost_usd"),
+                "actual_cost": _analytics_sum(group, "actual_cost_usd"),
+                "sessions": len(group),
+                "api_calls": _analytics_sum(group, "api_call_count"),
+            }
+            for day, group in sorted(daily_groups.items())
+        ]
+        by_model = [
+            {
+                "model": model,
+                "input_tokens": _analytics_sum(group, "input_tokens"),
+                "output_tokens": _analytics_sum(group, "output_tokens"),
+                "estimated_cost": _analytics_sum(group, "estimated_cost_usd"),
+                "sessions": len(group),
+                "api_calls": _analytics_sum(group, "api_call_count"),
+            }
+            for model, group in model_groups.items()
+        ]
+        by_model.sort(
+            key=lambda row: -(row["input_tokens"] + row["output_tokens"])
+        )
+        totals = {
+            "total_input": _analytics_sum(sessions, "input_tokens"),
+            "total_output": _analytics_sum(sessions, "output_tokens"),
+            "total_cache_read": _analytics_sum(sessions, "cache_read_tokens"),
+            "total_reasoning": _analytics_sum(sessions, "reasoning_tokens"),
+            "total_estimated_cost": _analytics_sum(sessions, "estimated_cost_usd"),
+            "total_actual_cost": _analytics_sum(sessions, "actual_cost_usd"),
+            "total_sessions": len(sessions),
+            "total_api_calls": _analytics_sum(sessions, "api_call_count"),
+        }
         insights_report = InsightsEngine(db).generate(days=days)
-        skills = insights_report.get("skills", {
-            "summary": {
-                "total_skill_loads": 0,
-                "total_skill_edits": 0,
-                "total_skill_actions": 0,
-                "distinct_skills_used": 0,
-            },
-            "top_skills": [],
-        })
+        skills = insights_report["skills"]
 
         return {
             "daily": daily,
@@ -2871,36 +2884,41 @@ async def get_usage_analytics(days: int = 30):
 
 @app.get("/api/analytics/models")
 async def get_models_analytics(days: int = 30):
-    """Rich per-model analytics for the Models dashboard page.
-
-    Returns token/cost/session breakdown per model plus capability metadata
-    from models.dev (context window, vision, tools, reasoning, etc.).
-    """
+    """Per-model usage and capabilities from the Obsidian Vault."""
+    from collections import defaultdict
     from hermes_state import SessionDB
 
     db = SessionDB()
     try:
-        cutoff = time.time() - (days * 86400)
+        sessions = [
+            s for s in _vault_analytics_sessions(db, days)
+            if s.get("model")
+        ]
+        groups = defaultdict(list)
+        for session in sessions:
+            groups[(session["model"], session.get("billing_provider"))].append(session)
 
-        cur = db._conn.execute("""
-            SELECT model,
-                   billing_provider,
-                   SUM(input_tokens) as input_tokens,
-                   SUM(output_tokens) as output_tokens,
-                   SUM(cache_read_tokens) as cache_read_tokens,
-                   SUM(reasoning_tokens) as reasoning_tokens,
-                   COALESCE(SUM(estimated_cost_usd), 0) as estimated_cost,
-                   COALESCE(SUM(actual_cost_usd), 0) as actual_cost,
-                   COUNT(*) as sessions,
-                   SUM(COALESCE(api_call_count, 0)) as api_calls,
-                   SUM(tool_call_count) as tool_calls,
-                   MAX(started_at) as last_used_at,
-                   AVG(input_tokens + output_tokens) as avg_tokens_per_session
-            FROM sessions WHERE started_at > ? AND model IS NOT NULL AND model != ''
-            GROUP BY model, billing_provider
-            ORDER BY SUM(input_tokens) + SUM(output_tokens) DESC
-        """, (cutoff,))
-        rows = [dict(r) for r in cur.fetchall()]
+        rows = []
+        for (model, provider), group in groups.items():
+            rows.append({
+                "model": model,
+                "billing_provider": provider,
+                "input_tokens": _analytics_sum(group, "input_tokens"),
+                "output_tokens": _analytics_sum(group, "output_tokens"),
+                "cache_read_tokens": _analytics_sum(group, "cache_read_tokens"),
+                "reasoning_tokens": _analytics_sum(group, "reasoning_tokens"),
+                "estimated_cost": _analytics_sum(group, "estimated_cost_usd"),
+                "actual_cost": _analytics_sum(group, "actual_cost_usd"),
+                "sessions": len(group),
+                "api_calls": _analytics_sum(group, "api_call_count"),
+                "tool_calls": _analytics_sum(group, "tool_call_count"),
+                "last_used_at": max(s["started_at"] for s in group),
+                "avg_tokens_per_session": (
+                    _analytics_sum(group, "input_tokens")
+                    + _analytics_sum(group, "output_tokens")
+                ) / len(group),
+            })
+        rows.sort(key=lambda row: -(row["input_tokens"] + row["output_tokens"]))
 
         models = []
         for row in rows:
@@ -2939,25 +2957,18 @@ async def get_models_analytics(days: int = 30):
                 "capabilities": caps,
             })
 
-        totals_cur = db._conn.execute("""
-            SELECT COUNT(DISTINCT model) as distinct_models,
-                   SUM(input_tokens) as total_input,
-                   SUM(output_tokens) as total_output,
-                   SUM(cache_read_tokens) as total_cache_read,
-                   SUM(reasoning_tokens) as total_reasoning,
-                   COALESCE(SUM(estimated_cost_usd), 0) as total_estimated_cost,
-                   COALESCE(SUM(actual_cost_usd), 0) as total_actual_cost,
-                   COUNT(*) as total_sessions,
-                   SUM(COALESCE(api_call_count, 0)) as total_api_calls
-            FROM sessions WHERE started_at > ? AND model IS NOT NULL AND model != ''
-        """, (cutoff,))
-        totals = dict(totals_cur.fetchone())
-
-        return {
-            "models": models,
-            "totals": totals,
-            "period_days": days,
+        totals = {
+            "distinct_models": len({s["model"] for s in sessions}),
+            "total_input": _analytics_sum(sessions, "input_tokens"),
+            "total_output": _analytics_sum(sessions, "output_tokens"),
+            "total_cache_read": _analytics_sum(sessions, "cache_read_tokens"),
+            "total_reasoning": _analytics_sum(sessions, "reasoning_tokens"),
+            "total_estimated_cost": _analytics_sum(sessions, "estimated_cost_usd"),
+            "total_actual_cost": _analytics_sum(sessions, "actual_cost_usd"),
+            "total_sessions": len(sessions),
+            "total_api_calls": _analytics_sum(sessions, "api_call_count"),
         }
+        return {"models": models, "totals": totals, "period_days": days}
     finally:
         db.close()
 

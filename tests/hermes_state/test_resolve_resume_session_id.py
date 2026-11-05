@@ -1,16 +1,11 @@
-"""Regression guard for #15000: --resume <id> after compression loses messages.
+"""Regression tests for resuming a compressed session from the Vault.
 
-Context compression ends the current session and forks a new child session
-(linked by ``parent_session_id``). The SQLite flush cursor is reset, so
-only the latest descendant ends up with rows in the ``messages`` table —
-the parent row has ``message_count = 0``. ``hermes --resume <parent_id>``
-used to load zero rows and show a blank chat.
-
-``SessionDB.resolve_resume_session_id()`` walks the parent → child chain
-and redirects to the first descendant that actually has messages. These
-tests pin that behaviour.
+Compression can leave a chain of empty parent/child sessions with messages
+only in an intermediate descendant. Resuming the original ID must find that
+message-bearing descendant without using SQLite or touching a .db file.
 """
 import time
+from unittest.mock import patch
 
 import pytest
 
@@ -19,19 +14,19 @@ from hermes_state import SessionDB
 
 @pytest.fixture
 def db(tmp_path):
-    return SessionDB(tmp_path / "state.db")
+    # The Vault backend accepts a directory, never a SQLite database path.
+    store = SessionDB(vault_path=tmp_path)
+    yield store
+    store.close()
+    assert not (tmp_path / "state.db").exists()
 
 
 def _make_chain(db: SessionDB, ids_with_parent):
-    """Create sessions in order, forcing started_at so ordering is deterministic."""
+    """Create sessions with deterministic Vault timestamps, without SQL."""
     base = int(time.time()) - 10_000
     for i, (sid, parent) in enumerate(ids_with_parent):
-        db.create_session(sid, source="cli", parent_session_id=parent)
-        db._conn.execute(
-            "UPDATE sessions SET started_at = ? WHERE id = ?",
-            (base + i * 100, sid),
-        )
-    db._conn.commit()
+        with patch("hermes_obsidian_state.time.time", return_value=base + i * 100):
+            db.create_session(sid, source="cli", parent_session_id=parent)
 
 
 def test_redirects_from_empty_head_to_descendant_with_messages(db):

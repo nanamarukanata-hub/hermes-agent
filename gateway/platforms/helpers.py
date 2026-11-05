@@ -227,8 +227,39 @@ class ThreadParticipationTracker:
         }
 
     def _state_path(self) -> Path:
-        from hermes_constants import get_hermes_home
-        return get_hermes_home() / f"{self._platform}_threads.json"
+        # The platform becomes a filename; reject separators and dot segments
+        # rather than allowing a caller to redirect persistence outside Vault.
+        if (not isinstance(self._platform, str) or not self._platform
+                or len(self._platform) > 64 or not self._platform.isascii()
+                or not all(c.isalnum() or c in "_-" for c in self._platform)):
+            raise ValueError("Invalid thread tracker platform name")
+        # Threads are durable conversation state and therefore belong in Vault.
+        import os
+        vault = os.environ.get("HERMES_OBSIDIAN_VAULT", "")
+        if not vault:
+            raise RuntimeError("HERMES_OBSIDIAN_VAULT is required for thread persistence")
+        path = Path(vault).expanduser().resolve()
+        if not path.is_dir():
+            raise RuntimeError("Obsidian Vault directory does not exist")
+        # Validate each component *before* creating it.  Checking only after
+        # mkdir(parents=True) can create directories outside the Vault through
+        # an existing symlinked parent, even if the call ultimately raises.
+        target = path
+        for component in ("06_Automation", "Hermes", "GatewayRouting"):
+            target = target / component
+            if target.is_symlink() or not target.resolve().is_relative_to(path):
+                raise RuntimeError("Thread state path escaped Obsidian Vault")
+            if target.exists() and not target.is_dir():
+                raise RuntimeError("Thread state path component is not a directory")
+            target.mkdir(exist_ok=True)
+            if target.is_symlink() or not target.resolve().is_relative_to(path):
+                raise RuntimeError("Thread state path escaped Obsidian Vault")
+        state_file = target / f"{self._platform}_threads.json"
+        # The directory check alone does not protect a symlinked JSON file.
+        # Reject even dangling links before any read or write.
+        if state_file.is_symlink() or (state_file.exists() and not state_file.is_file()):
+            raise RuntimeError("Unsafe Obsidian thread state file")
+        return state_file
 
     def _load(self) -> list[str]:
         path = self._state_path()

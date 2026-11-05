@@ -163,7 +163,7 @@ def build_parser(parent_subparsers: argparse._SubParsersAction) -> argparse.Argu
         "kanban",
         help="Multi-profile collaboration board (tasks, links, comments)",
         description=(
-            "Durable SQLite-backed task board shared across Hermes profiles. "
+            "Durable Vault-backed task board shared across Hermes profiles. "
             "Tasks are claimed atomically, can depend on other tasks, and "
             "are executed by a named profile in an isolated workspace. "
             "See https://hermes-agent.nousresearch.com/docs/user-guide/features/kanban "
@@ -676,15 +676,15 @@ def kanban_command(args: argparse.Namespace) -> int:
 
     # Auto-initialize the DB before dispatching any subcommand. init_db
     # is idempotent, so running it every invocation is cheap (one
-    # SELECT against sqlite_master when tables already exist) and
-    # prevents "no such table: tasks" on first use from a fresh
+    # store load when the board already exists) and
+    # prevents "board not initialized" errors on first use from a fresh
     # HERMES_HOME. Previously only `init` and `daemon` triggered
     # schema creation; `create` / `list` / every other command would
     # error out on a fresh install.
     try:
         kb.init_db()
     except Exception as exc:
-        print(f"kanban: could not initialize database: {exc}", file=sys.stderr)
+        print(f"kanban: could not initialize board store: {exc}", file=sys.stderr)
         return 1
 
     handlers = {
@@ -760,8 +760,8 @@ def _dispatch_boards(args: argparse.Namespace) -> int:
 
     Boards management is deliberately separate from the task-level
     commands: it operates on the filesystem (board directories,
-    ``current`` pointer, ``board.json``), not on the per-board SQLite
-    DB, so a fresh HERMES_HOME that has never called ``kanban init``
+    ``current`` pointer, ``board.json``), not on the per-board task store,
+    so a fresh HERMES_HOME that has never called ``kanban init``
     can still run ``boards create`` / ``boards list``.
     """
     sub = getattr(args, "boards_action", None) or "list"
@@ -784,14 +784,8 @@ def _dispatch_boards(args: argparse.Namespace) -> int:
 def _board_task_counts(slug: str) -> dict[str, int]:
     """Return ``{status: count}`` for a board. Safe to call on an empty DB."""
     try:
-        path = kb.kanban_db_path(board=slug)
-        if not path.exists():
-            return {}
         with kb.connect(board=slug) as conn:
-            rows = conn.execute(
-                "SELECT status, COUNT(*) AS n FROM tasks GROUP BY status"
-            ).fetchall()
-        return {r["status"]: int(r["n"]) for r in rows}
+            return dict(kb.board_stats(conn)["by_status"])
     except Exception:
         return {}
 
@@ -1349,32 +1343,17 @@ def _cmd_diagnostics(args: argparse.Namespace) -> int:
             }
         else:
             # Fleet mode: pull all non-archived tasks + their events/runs.
-            rows = list(conn.execute(
-                "SELECT * FROM tasks WHERE status != 'archived'"
-            ).fetchall())
-            ids = [r["id"] for r in rows]
-            if not ids:
+            tasks = kb.list_tasks(conn, include_archived=False)
+            if not tasks:
                 diags_by_task = {}
             else:
-                placeholders = ",".join(["?"] * len(ids))
-                ev_by = {i: [] for i in ids}
-                for row in conn.execute(
-                    f"SELECT * FROM task_events WHERE task_id IN ({placeholders}) ORDER BY id",
-                    tuple(ids),
-                ):
-                    ev_by.setdefault(row["task_id"], []).append(row)
-                run_by = {i: [] for i in ids}
-                for row in conn.execute(
-                    f"SELECT * FROM task_runs WHERE task_id IN ({placeholders}) ORDER BY id",
-                    tuple(ids),
-                ):
-                    run_by.setdefault(row["task_id"], []).append(row)
                 diags_by_task = {}
-                for r in rows:
-                    tid = r["id"]
-                    dl = kd.compute_task_diagnostics(r, ev_by.get(tid, []), run_by.get(tid, []))
+                for t in tasks:
+                    dl = kd.compute_task_diagnostics(
+                        t, kb.list_events(conn, t.id), kb.list_runs(conn, t.id)
+                    )
                     if dl:
-                        diags_by_task[tid] = dl
+                        diags_by_task[t.id] = dl
 
         # Severity filter.
         sev = getattr(args, "severity", None)
@@ -1389,15 +1368,13 @@ def _cmd_diagnostics(args: argparse.Namespace) -> int:
         # Map task_id → title/status/assignee for the table output.
         meta: dict[str, dict] = {}
         if diags_by_task:
-            placeholders = ",".join(["?"] * len(diags_by_task))
-            for r in conn.execute(
-                f"SELECT id, title, status, assignee FROM tasks WHERE id IN ({placeholders})",
-                tuple(diags_by_task.keys()),
-            ):
-                meta[r["id"]] = {
-                    "title": r["title"], "status": r["status"],
-                    "assignee": r["assignee"],
-                }
+            for tid in diags_by_task:
+                t = kb.get_task(conn, tid)
+                if t is not None:
+                    meta[t.id] = {
+                        "title": t.title, "status": t.status,
+                        "assignee": t.assignee,
+                    }
 
     if getattr(args, "json", False):
         out_json = [
@@ -1853,21 +1830,21 @@ def _cmd_watch(args: argparse.Namespace) -> int:
     print("Watching kanban events. Ctrl-C to stop.", flush=True)
     # Seed cursor at the latest id so we don't replay history.
     with kb.connect() as conn:
-        row = conn.execute(
-            "SELECT COALESCE(MAX(id), 0) AS m FROM task_events"
-        ).fetchone()
-        cursor = int(row["m"])
+        cursor = kb.max_event_id(conn)
 
     try:
         while True:
             with kb.connect() as conn:
-                rows = conn.execute(
-                    "SELECT e.id, e.task_id, e.kind, e.payload, e.created_at, "
-                    "       t.assignee, t.tenant "
-                    "FROM task_events e LEFT JOIN tasks t ON t.id = e.task_id "
-                    "WHERE e.id > ? ORDER BY e.id ASC LIMIT 200",
-                    (cursor,),
-                ).fetchall()
+                events = kb.list_events_after(conn, cursor, limit=200)
+                rows = []
+                for ev in events:
+                    t = kb.get_task(conn, ev.task_id)
+                    rows.append({
+                        "id": ev.id, "task_id": ev.task_id, "kind": ev.kind,
+                        "payload": ev.payload, "created_at": ev.created_at,
+                        "assignee": t.assignee if t else None,
+                        "tenant": t.tenant if t else None,
+                    })
             for r in rows:
                 cursor = max(cursor, int(r["id"]))
                 if kinds and r["kind"] not in kinds:
@@ -1877,7 +1854,7 @@ def _cmd_watch(args: argparse.Namespace) -> int:
                 if args.tenant and r["tenant"] != args.tenant:
                     continue
                 try:
-                    payload = json.loads(r["payload"]) if r["payload"] else None
+                    payload = r["payload"]
                 except Exception:
                     payload = None
                 pl = f" {payload}" if payload else ""
@@ -2098,13 +2075,11 @@ def _cmd_gc(args: argparse.Namespace) -> int:
     scratch_root = kb.workspaces_root()
     removed_ws = 0
     with kb.connect() as conn:
-        rows = conn.execute(
-            "SELECT id, workspace_kind, workspace_path FROM tasks WHERE status = 'archived'"
-        ).fetchall()
+        rows = kb.list_tasks(conn, status="archived", include_archived=True)
     for row in rows:
-        if row["workspace_kind"] != "scratch":
+        if row.workspace_kind != "scratch":
             continue
-        path = Path(row["workspace_path"] or (scratch_root / row["id"]))
+        path = Path(row.workspace_path or (scratch_root / row.id))
         try:
             path = path.resolve()
         except OSError:

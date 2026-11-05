@@ -8,7 +8,7 @@ Original plugin by dusterbloom (PR #2351), adapted to the MemoryProvider ABC.
 Config in $HERMES_HOME/config.yaml (profile-scoped):
   plugins:
     hermes-memory-store:
-      db_path: $HERMES_HOME/memory_store.db   # omit to use the default
+      db_path: <vault>/06_Automation/Hermes/HolographicMemory   # omit to use the default
       auto_extract: false
       default_trust: 0.5
       min_trust_threshold: 0.3
@@ -126,7 +126,7 @@ class HolographicMemoryProvider(MemoryProvider):
         return "holographic"
 
     def is_available(self) -> bool:
-        return True  # SQLite is always available, numpy is optional
+        return True  # Vault path is validated when the provider initializes
 
     def save_config(self, values, hermes_home):
         """Write config to config.yaml under plugins.hermes-memory-store."""
@@ -146,10 +146,12 @@ class HolographicMemoryProvider(MemoryProvider):
             pass
 
     def get_config_schema(self):
-        from hermes_constants import display_hermes_home
-        _default_db = f"{display_hermes_home()}/memory_store.db"
         return [
-            {"key": "db_path", "description": "SQLite database path", "default": _default_db},
+            {
+                "key": "db_path",
+                "description": "Optional directory inside HERMES_OBSIDIAN_VAULT; blank uses the Vault default",
+                "default": "",
+            },
             {"key": "auto_extract", "description": "Auto-extract facts at session end", "default": "false", "choices": ["true", "false"]},
             {"key": "default_trust", "description": "Default trust score for new facts", "default": "0.5"},
             {"key": "hrr_dim", "description": "HRR vector dimensions", "default": "1024"},
@@ -158,8 +160,9 @@ class HolographicMemoryProvider(MemoryProvider):
     def initialize(self, session_id: str, **kwargs) -> None:
         from hermes_constants import get_hermes_home
         _hermes_home = str(get_hermes_home())
-        _default_db = _hermes_home + "/memory_store.db"
-        db_path = self._config.get("db_path", _default_db)
+        # Do not override MemoryStore's Vault default with a legacy
+        # HERMES_HOME/memory_store.db path.
+        db_path = self._config.get("db_path") or None
         # Expand $HERMES_HOME in user-supplied paths so config values like
         # "$HERMES_HOME/memory_store.db" or "~/.hermes/memory_store.db" both
         # resolve to the active profile's directory.
@@ -184,9 +187,7 @@ class HolographicMemoryProvider(MemoryProvider):
         if not self._store:
             return ""
         try:
-            total = self._store._conn.execute(
-                "SELECT COUNT(*) FROM facts"
-            ).fetchone()[0]
+            total = len(self._store.list_facts(limit=100000))
         except Exception:
             total = 0
         if total == 0:

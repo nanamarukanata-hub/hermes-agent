@@ -3,8 +3,9 @@
 Covers the fix from #15914 / PR #15920:
 - _seed_from_env reads API keys from ~/.hermes/.env when not in os.environ
 - _resolve_api_key_provider_secret falls back to credential_pool when env vars are empty
-- env vars take priority over .env file (handled by get_env_value itself)
-- env vars take priority over credential pool (fallback only kicks in when env is empty)
+- credential-pool seeding prefers ~/.hermes/.env over inherited process env vars
+- generic auth resolution uses get_env_value's separate precedence rules
+- environment/.env credentials take priority over credential pool fallback
 """
 
 import os
@@ -106,10 +107,15 @@ class TestCredentialPoolSeedsFromDotEnv:
         assert active_sources == set()
         assert entries == []
 
-    def test_os_environ_still_wins_over_dotenv(self, isolated_hermes_home, monkeypatch):
-        """get_env_value checks os.environ first — verify seeding picks that up."""
-        _write_env_file(isolated_hermes_home, DEEPSEEK_API_KEY="sk-dotenv-stale")
-        monkeypatch.setenv("DEEPSEEK_API_KEY", "sk-env-fresh-xyz")
+    def test_dotenv_wins_over_inherited_os_environ(self, isolated_hermes_home, monkeypatch):
+        """The explicit Hermes .env key overrides an inherited process key.
+
+        _seed_from_env deliberately uses the user's ~/.hermes/.env as the
+        authoritative credential source, unlike the generic get_env_value
+        helper. This guards against stale parent-process credentials.
+        """
+        _write_env_file(isolated_hermes_home, DEEPSEEK_API_KEY="sk-dotenv-current")
+        monkeypatch.setenv("DEEPSEEK_API_KEY", "sk-env-inherited-stale")
 
         from agent.credential_pool import _seed_from_env
         entries = []
@@ -118,7 +124,22 @@ class TestCredentialPoolSeedsFromDotEnv:
         assert changed is True
         seeded = [e for e in entries if e.source == "env:DEEPSEEK_API_KEY"]
         assert len(seeded) == 1
-        assert seeded[0].access_token == "sk-env-fresh-xyz"
+        assert seeded[0].access_token == "sk-dotenv-current"
+
+    def test_os_environ_fallback_when_dotenv_has_no_key(self, isolated_hermes_home, monkeypatch):
+        """An exported key still seeds the pool if .env lacks that key."""
+        _write_env_file(isolated_hermes_home, OPENROUTER_API_KEY="sk-unrelated")
+        monkeypatch.setenv("DEEPSEEK_API_KEY", "sk-env-fallback-xyz")
+
+        from agent.credential_pool import _seed_from_env
+        entries = []
+        changed, active_sources = _seed_from_env("deepseek", entries)
+
+        assert changed is True
+        assert "env:DEEPSEEK_API_KEY" in active_sources
+        seeded = [e for e in entries if e.source == "env:DEEPSEEK_API_KEY"]
+        assert len(seeded) == 1
+        assert seeded[0].access_token == "sk-env-fallback-xyz"
 
 
 class TestAuthResolvesFromDotEnv:

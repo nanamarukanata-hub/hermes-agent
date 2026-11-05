@@ -422,16 +422,27 @@ class LocalEnvironment(BaseEnvironment):
             preexec_fn=None if _IS_WINDOWS else os.setsid,
             cwd=_popen_cwd,
         )
-        if not _IS_WINDOWS:
+        # An asynchronous KeyboardInterrupt/SystemExit can arrive after Popen
+        # starts the process but before execute() enters its cleanup guard.
+        # Keep post-spawn setup exception-safe so this narrow window cannot
+        # leave a detached process group running as an orphan.
+        try:
+            if not _IS_WINDOWS:
+                try:
+                    proc._hermes_pgid = os.getpgid(proc.pid)
+                except ProcessLookupError:
+                    pass
+
+            if stdin_data is not None:
+                _pipe_stdin(proc, stdin_data)
+
+            return proc
+        except BaseException:
             try:
-                proc._hermes_pgid = os.getpgid(proc.pid)
-            except ProcessLookupError:
-                pass
-
-        if stdin_data is not None:
-            _pipe_stdin(proc, stdin_data)
-
-        return proc
+                self._kill_process(proc)
+            except Exception:
+                logger.exception("Failed to clean up interrupted local subprocess")
+            raise
 
     def _kill_process(self, proc):
         """Kill the entire process group (all children)."""

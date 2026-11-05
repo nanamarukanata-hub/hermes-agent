@@ -360,6 +360,18 @@ class TestBareTextNoLongerApproves:
 class TestBlockingApprovalE2E:
     """Test the full blocking flow: agent thread blocks → user approves → agent resumes."""
 
+    @pytest.fixture(autouse=True)
+    def _isolate_external_guards(self):
+        """Do not install tirith or depend on user approval settings in queue tests."""
+        with (
+            patch(
+                "tools.tirith_security.check_command_security",
+                return_value={"action": "allow", "findings": [], "summary": ""},
+            ),
+            patch("tools.approval._get_approval_mode", return_value="manual"),
+        ):
+            yield
+
     def setup_method(self):
         _clear_approval_state()
         os.environ.pop("HERMES_YOLO_MODE", None)
@@ -377,8 +389,13 @@ class TestBlockingApprovalE2E:
 
         session_key = "e2e-test"
         notified = []
+        notification_received = threading.Event()
 
-        register_gateway_notify(session_key, lambda d: notified.append(d))
+        def on_notify(data):
+            notified.append(data)
+            notification_received.set()
+
+        register_gateway_notify(session_key, on_notify)
 
         result_holder = [None]
 
@@ -401,21 +418,23 @@ class TestBlockingApprovalE2E:
 
         t = threading.Thread(target=agent_thread)
         t.start()
+        try:
+            assert notification_received.wait(timeout=5), (
+                "approval notification did not arrive within 5 seconds"
+            )
+            assert len(notified) == 1
+            assert "rm -rf /important" in notified[0]["command"]
 
-        for _ in range(50):
-            if notified:
-                break
-            time.sleep(0.05)
+            resolve_gateway_approval(session_key, "once")
+            t.join(timeout=5)
 
-        assert len(notified) == 1
-        assert "rm -rf /important" in notified[0]["command"]
-
-        resolve_gateway_approval(session_key, "once")
-        t.join(timeout=5)
-
-        assert result_holder[0] is not None
-        assert result_holder[0]["approved"] is True
-        unregister_gateway_notify(session_key)
+            assert not t.is_alive()
+            assert result_holder[0] is not None
+            assert result_holder[0]["approved"] is True
+        finally:
+            # A failed assertion must not leave an approval thread blocked.
+            unregister_gateway_notify(session_key)
+            t.join(timeout=5)
 
     def test_blocking_approval_deny(self):
         """check_all_command_guards returns BLOCKED when denied."""

@@ -1,6 +1,6 @@
 """Hybrid keyword/BM25 retrieval for the memory store.
 
-Ported from KIK memory_agent.py — combines FTS5 full-text search with
+Ported from KIK memory_agent.py — combines keyword search with
 Jaccard similarity reranking and trust-weighted scoring.
 """
 
@@ -52,17 +52,17 @@ class FactRetriever:
         min_trust: float = 0.3,
         limit: int = 10,
     ) -> list[dict]:
-        """Hybrid search: FTS5 candidates → Jaccard rerank → trust weighting.
+        """Hybrid search: keyword candidates → Jaccard rerank → trust weighting.
 
         Pipeline:
-        1. FTS5 search: Get limit*3 candidates from SQLite full-text search
+        1. keyword search: Get limit*3 candidates from keyword search
         2. Jaccard boost: Token overlap between query and fact content
         3. Trust weighting: final_score = relevance * trust_score
         4. Temporal decay (optional): decay = 0.5^(age_days / half_life)
 
         Returns list of dicts with fact data + 'score' field, sorted by score desc.
         """
-        # Stage 1: Get FTS5 candidates (more than limit for reranking headroom)
+        # Stage 1: Get keyword candidates (more than limit for reranking headroom)
         candidates = self._fts_candidates(query, category, min_trust, limit * 3)
 
         if not candidates:
@@ -88,7 +88,7 @@ class FactRetriever:
             else:
                 hrr_sim = 0.5  # neutral
 
-            # Combine FTS5 + Jaccard + HRR
+            # Combine keyword + Jaccard + HRR
             relevance = (self.fts_weight * fts_score
                         + self.jaccard_weight * jaccard
                         + self.hrr_weight * hrr_sim)
@@ -123,13 +123,11 @@ class FactRetriever:
         This is NOT keyword search — it uses algebraic structure to find facts
         where the entity plays a structural role.
 
-        Falls back to FTS5 search if numpy unavailable.
+        Falls back to keyword search if numpy unavailable.
         """
         if not hrr._HAS_NUMPY:
             # Fallback to keyword search on entity name
             return self.search(entity, category=category, limit=limit)
-
-        conn = self.store._conn
 
         # Encode entity as role-bound vector
         role_entity = hrr.encode_atom("__hrr_role_entity__", self.hrr_dim)
@@ -139,12 +137,9 @@ class FactRetriever:
         # Try category-specific bank first, then all facts
         if category:
             bank_name = f"cat:{category}"
-            bank_row = conn.execute(
-                "SELECT vector FROM memory_banks WHERE bank_name = ?",
-                (bank_name,),
-            ).fetchone()
-            if bank_row:
-                bank_vec = hrr.bytes_to_phases(bank_row["vector"])
+            bank_vec_bytes = self.store.get_bank_vector(bank_name)
+            if bank_vec_bytes:
+                bank_vec = hrr.bytes_to_phases(bank_vec_bytes)
                 extracted = hrr.unbind(bank_vec, probe_key)
                 # Use extracted signal to score individual facts
                 return self._score_facts_by_vector(
@@ -152,22 +147,7 @@ class FactRetriever:
                 )
 
         # Score against individual fact vectors directly
-        where = "WHERE hrr_vector IS NOT NULL"
-        params: list = []
-        if category:
-            where += " AND category = ?"
-            params.append(category)
-
-        rows = conn.execute(
-            f"""
-            SELECT fact_id, content, category, tags, trust_score,
-                   retrieval_count, helpful_count, created_at, updated_at,
-                   hrr_vector
-            FROM facts
-            {where}
-            """,
-            params,
-        ).fetchall()
+        rows = self.store.facts_with_vectors(category=category)
 
         if not rows:
             # Final fallback: keyword search
@@ -201,33 +181,16 @@ class FactRetriever:
         facts that are connected through shared context — e.g., other entities
         mentioned alongside this one, or content that overlaps structurally.
 
-        Falls back to FTS5 search if numpy unavailable.
+        Falls back to keyword search if numpy unavailable.
         """
         if not hrr._HAS_NUMPY:
             return self.search(entity, category=category, limit=limit)
-
-        conn = self.store._conn
 
         # Encode entity as a bare atom (not role-bound — we want ANY structural match)
         entity_vec = hrr.encode_atom(entity.lower(), self.hrr_dim)
 
         # Get all facts with vectors
-        where = "WHERE hrr_vector IS NOT NULL"
-        params: list = []
-        if category:
-            where += " AND category = ?"
-            params.append(category)
-
-        rows = conn.execute(
-            f"""
-            SELECT fact_id, content, category, tags, trust_score,
-                   retrieval_count, helpful_count, created_at, updated_at,
-                   hrr_vector
-            FROM facts
-            {where}
-            """,
-            params,
-        ).fetchall()
+        rows = self.store.facts_with_vectors(category=category)
 
         if not rows:
             return self.search(entity, category=category, limit=limit)
@@ -272,14 +235,13 @@ class FactRetriever:
         Example: reason(["peppi", "backend"]) finds facts where peppi AND
         backend both play structural roles — without keyword matching.
 
-        Falls back to FTS5 search if numpy unavailable.
+        Falls back to keyword search if numpy unavailable.
         """
         if not hrr._HAS_NUMPY or not entities:
             # Fallback: search with all entities as keywords
             query = " ".join(entities)
             return self.search(query, category=category, limit=limit)
 
-        conn = self.store._conn
         role_entity = hrr.encode_atom("__hrr_role_entity__", self.hrr_dim)
 
         # For each entity, compute what the bank "remembers" about it
@@ -291,22 +253,7 @@ class FactRetriever:
             entity_residuals.append(probe_key)
 
         # Get all facts with vectors
-        where = "WHERE hrr_vector IS NOT NULL"
-        params: list = []
-        if category:
-            where += " AND category = ?"
-            params.append(category)
-
-        rows = conn.execute(
-            f"""
-            SELECT fact_id, content, category, tags, trust_score,
-                   retrieval_count, helpful_count, created_at, updated_at,
-                   hrr_vector
-            FROM facts
-            {where}
-            """,
-            params,
-        ).fetchall()
+        rows = self.store.facts_with_vectors(category=category)
 
         if not rows:
             query = " ".join(entities)
@@ -353,24 +300,8 @@ class FactRetriever:
         if not hrr._HAS_NUMPY:
             return []
 
-        conn = self.store._conn
-
         # Get all facts with vectors and their linked entities
-        where = "WHERE f.hrr_vector IS NOT NULL"
-        params: list = []
-        if category:
-            where += " AND f.category = ?"
-            params.append(category)
-
-        rows = conn.execute(
-            f"""
-            SELECT f.fact_id, f.content, f.category, f.tags, f.trust_score,
-                   f.created_at, f.updated_at, f.hrr_vector
-            FROM facts f
-            {where}
-            """,
-            params,
-        ).fetchall()
+        rows = self.store.facts_with_vectors(category=category)
 
         if len(rows) < 2:
             return []
@@ -387,15 +318,7 @@ class FactRetriever:
         fact_entities: dict[int, set[str]] = {}
         for row in rows:
             fid = row["fact_id"]
-            entity_rows = conn.execute(
-                """
-                SELECT e.name FROM entities e
-                JOIN fact_entities fe ON fe.entity_id = e.entity_id
-                WHERE fe.fact_id = ?
-                """,
-                (fid,),
-            ).fetchall()
-            fact_entities[fid] = {r["name"].lower() for r in entity_rows}
+            fact_entities[fid] = {name.lower() for name in self.store.fact_entity_names(fid)}
 
         # Compare all pairs: high entity overlap + low content similarity = contradiction
         facts = [dict(r) for r in rows]
@@ -448,24 +371,7 @@ class FactRetriever:
         limit: int = 10,
     ) -> list[dict]:
         """Score facts by similarity to a target vector."""
-        conn = self.store._conn
-
-        where = "WHERE hrr_vector IS NOT NULL"
-        params: list = []
-        if category:
-            where += " AND category = ?"
-            params.append(category)
-
-        rows = conn.execute(
-            f"""
-            SELECT fact_id, content, category, tags, trust_score,
-                   retrieval_count, helpful_count, created_at, updated_at,
-                   hrr_vector
-            FROM facts
-            {where}
-            """,
-            params,
-        ).fetchall()
+        rows = self.store.facts_with_vectors(category=category)
 
         scored = []
         for row in rows:
@@ -485,61 +391,16 @@ class FactRetriever:
         min_trust: float,
         limit: int,
     ) -> list[dict]:
-        """Get raw FTS5 candidates from the store.
+        """Get keyword candidates from the store.
 
-        Uses the store's database connection directly for FTS5 MATCH
-        with rank scoring. Normalizes FTS5 rank to [0, 1] range.
+        Vault replacement for the former FTS5 MATCH query: token
+        overlap scoring, already normalised to [0, 1] by the store.
+        Malformed queries fall back to empty.
         """
-        conn = self.store._conn
-
-        # Build query - FTS5 rank is negative (lower = better match)
-        # We need to join facts_fts with facts to get all columns
-        params: list = []
-        where_clauses = ["facts_fts MATCH ?"]
-        params.append(query)
-
-        if category:
-            where_clauses.append("f.category = ?")
-            params.append(category)
-
-        where_clauses.append("f.trust_score >= ?")
-        params.append(min_trust)
-
-        where_sql = " AND ".join(where_clauses)
-
-        sql = f"""
-            SELECT f.*, facts_fts.rank as fts_rank_raw
-            FROM facts_fts
-            JOIN facts f ON f.fact_id = facts_fts.rowid
-            WHERE {where_sql}
-            ORDER BY facts_fts.rank
-            LIMIT ?
-        """
-        params.append(limit)
-
         try:
-            rows = conn.execute(sql, params).fetchall()
+            return self.store.keyword_candidates(query, category, min_trust, limit)
         except Exception:
-            # FTS5 MATCH can fail on malformed queries — fall back to empty
             return []
-
-        if not rows:
-            return []
-
-        # Normalize FTS5 rank: rank is negative, lower = better
-        # Convert to positive score in [0, 1] range
-        raw_ranks = [abs(row["fts_rank_raw"]) for row in rows]
-        max_rank = max(raw_ranks) if raw_ranks else 1.0
-        max_rank = max(max_rank, 1e-6)  # avoid div by zero
-
-        results = []
-        for row, raw_rank in zip(rows, raw_ranks):
-            fact = dict(row)
-            fact.pop("fts_rank_raw", None)
-            fact["fts_rank"] = raw_rank / max_rank  # normalize to [0, 1]
-            results.append(fact)
-
-        return results
 
     @staticmethod
     def _tokenize(text: str) -> set[str]:

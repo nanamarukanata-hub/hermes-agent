@@ -314,8 +314,16 @@ class MemoryManager:
 
     # -- Sync ----------------------------------------------------------------
 
-    def sync_all(self, user_content: str, assistant_content: str, *, session_id: str = "") -> None:
-        """Sync a completed turn to all providers."""
+    def sync_all(
+        self, user_content: str, assistant_content: str, *,
+        session_id: str = "", raise_on_failure: bool = False,
+    ) -> None:
+        """Sync a completed turn to all providers.
+
+        By default provider failures remain best-effort for existing callers.
+        A configured persistent provider can request strict error propagation
+        so a failed write is never mistaken for a successful memory sync.
+        """
         for provider in self._providers:
             try:
                 provider.sync_turn(user_content, assistant_content, session_id=session_id)
@@ -324,6 +332,10 @@ class MemoryManager:
                     "Memory provider '%s' sync_turn failed: %s",
                     provider.name, e,
                 )
+                if raise_on_failure:
+                    raise RuntimeError(
+                        f"Memory provider '{provider.name}' failed to sync turn"
+                    ) from e
 
     # -- Tools ---------------------------------------------------------------
 
@@ -535,7 +547,7 @@ class MemoryManager:
                     provider.name, e,
                 )
 
-    def initialize_all(self, session_id: str, **kwargs) -> None:
+    def initialize_all(self, session_id: str, *, raise_on_failure: bool = False, **kwargs) -> None:
         """Initialize all providers.
 
         Automatically injects ``hermes_home`` into *kwargs* so that every
@@ -553,3 +565,7 @@ class MemoryManager:
                     "Memory provider '%s' initialize failed: %s",
                     provider.name, e,
                 )
+                if raise_on_failure:
+                    raise RuntimeError(
+                        f"Memory provider '{provider.name}' failed to initialize"
+                    ) from e

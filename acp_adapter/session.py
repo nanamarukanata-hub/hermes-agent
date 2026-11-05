@@ -1,10 +1,8 @@
 """ACP session manager — maps ACP sessions to Hermes AIAgent instances.
 
-Sessions are persisted to the shared SessionDB (``~/.hermes/state.db``) so they
-survive process restarts and appear in ``session_search``.  When the editor
-reconnects after idle/restart, the ``load_session`` / ``resume_session`` calls
-find the persisted session in the database and restore the full conversation
-history.
+Sessions are persisted through the shared SessionDB compatibility API to the
+Obsidian Vault. When the editor reconnects after idle/restart, the
+``load_session`` / ``resume_session`` calls restore the conversation from Vault.
 """
 from __future__ import annotations
 
@@ -24,6 +22,19 @@ from threading import Lock
 from typing import Any, Dict, List, Optional
 
 logger = logging.getLogger(__name__)
+
+
+def _parse_model_config(value: Any) -> dict[str, Any]:
+    """Read Vault-native mappings and legacy JSON-encoded session metadata."""
+    if isinstance(value, dict):
+        return value
+    if isinstance(value, str):
+        try:
+            parsed = json.loads(value)
+        except (ValueError, TypeError):
+            return {}
+        return parsed if isinstance(parsed, dict) else {}
+    return {}
 
 
 def _win_path_to_wsl(path: str) -> str | None:
@@ -332,14 +343,8 @@ class SessionManager:
             message_count = int(row.get("message_count") or 0)
             if message_count <= 0:
                 continue
-            # Extract cwd from model_config JSON.
-            session_cwd = "."
-            mc = row.get("model_config")
-            if mc:
-                try:
-                    session_cwd = json.loads(mc).get("cwd", ".")
-                except (json.JSONDecodeError, TypeError):
-                    pass
+            # Vault-native model_config is a dict; old sessions may hold JSON.
+            session_cwd = _parse_model_config(row.get("model_config")).get("cwd", ".")
             if normalized_cwd and _normalize_cwd_for_compare(session_cwd) != normalized_cwd:
                 continue
             results.append({
@@ -442,29 +447,22 @@ class SessionManager:
             session_meta["base_url"] = base_url.strip()
         if isinstance(api_mode, str) and api_mode.strip():
             session_meta["api_mode"] = api_mode.strip()
-        cwd_json = json.dumps(session_meta)
-
         try:
-            # Ensure the session record exists.
+            # The Vault stores metadata as a JSON object. Never reach into
+            # SQLite internals: a session update must survive process restart.
             existing = db.get_session(state.session_id)
             if existing is None:
                 db.create_session(
                     session_id=state.session_id,
                     source="acp",
                     model=model_str,
-                    model_config={"cwd": state.cwd},
+                    model_config=session_meta,
                 )
             else:
-                # Update model_config (contains cwd) if changed.
-                try:
-                    with db._lock:
-                        db._conn.execute(
-                            "UPDATE sessions SET model_config = ?, model = COALESCE(?, model) WHERE id = ?",
-                            (cwd_json, model_str, state.session_id),
-                        )
-                        db._conn.commit()
-                except Exception:
-                    logger.debug("Failed to update ACP session metadata", exc_info=True)
+                if not db.update_session_metadata(
+                    state.session_id, model_config=session_meta, model=model_str
+                ):
+                    raise RuntimeError("ACP Vault session metadata update failed")
 
             # Replace stored messages with current history atomically so a
             # mid-rewrite failure rolls back and the previously persisted
@@ -499,17 +497,11 @@ class SessionManager:
         requested_provider = row.get("billing_provider")
         restored_base_url = row.get("billing_base_url")
         restored_api_mode = None
-        mc = row.get("model_config")
-        if mc:
-            try:
-                meta = json.loads(mc)
-                if isinstance(meta, dict):
-                    cwd = meta.get("cwd", ".")
-                    requested_provider = meta.get("provider") or requested_provider
-                    restored_base_url = meta.get("base_url") or restored_base_url
-                    restored_api_mode = meta.get("api_mode") or restored_api_mode
-            except (json.JSONDecodeError, TypeError):
-                pass
+        meta = _parse_model_config(row.get("model_config"))
+        cwd = meta.get("cwd", ".")
+        requested_provider = meta.get("provider") or requested_provider
+        restored_base_url = meta.get("base_url") or restored_base_url
+        restored_api_mode = meta.get("api_mode") or restored_api_mode
 
         model = row.get("model") or None
 

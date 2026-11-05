@@ -39,6 +39,18 @@ from unittest.mock import MagicMock
 import pytest
 
 
+@pytest.fixture(autouse=True)
+def _api_server_test_vault(request, tmp_path, monkeypatch):
+    """Give API-server tests an isolated Vault, never a shared HERMES_HOME.
+
+    Production intentionally refuses durable ResponseStore startup without
+    HERMES_OBSIDIAN_VAULT. Tests that exercise the missing-config error may
+    explicitly unset the variable after this fixture runs.
+    """
+    if request.node.path.name.startswith("test_api_server"):
+        monkeypatch.setenv("HERMES_OBSIDIAN_VAULT", str(tmp_path / "vault"))
+
+
 def _ensure_telegram_mock() -> None:
     """Install a comprehensive telegram mock in sys.modules.
 

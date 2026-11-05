@@ -223,9 +223,21 @@ class TestBuildJobPromptWithScript:
             "prompt": "Check status.",
             "script": str(script),
         }
+        # Empty stdout intentionally suppresses the LLM call and delivery.
+        # Returning None is the wake-gate contract, not an error message.
         prompt = _build_job_prompt(job)
-        assert "no output" in prompt.lower()
-        assert "Check status." in prompt
+        assert prompt is None
+
+    def test_cached_empty_script_output_skips_without_rerunning(self, cron_env):
+        from cron.scheduler import _build_job_prompt
+
+        with patch("cron.scheduler._run_job_script") as run_script:
+            prompt = _build_job_prompt(
+                {"prompt": "Check status.", "script": "noop.py"},
+                prerun_script=(True, ""),
+            )
+        assert prompt is None
+        run_script.assert_not_called()
 
 
 class TestCronjobToolScript:

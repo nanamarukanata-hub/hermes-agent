@@ -22,10 +22,16 @@ import pytest
 # ===========================================================================
 
 def _make_session_db(tmp_path):
-    """Create a real SessionDB for integration-style tests."""
+    """Create an isolated Obsidian Vault session store for integration tests."""
     from hermes_state import SessionDB
-    db_path = tmp_path / "test_state.db"
-    return SessionDB(db_path=db_path)
+    return SessionDB(vault_path=tmp_path)
+
+
+def _backdate_session(db, session_id, seconds=800000):
+    """Set up stale-session fixtures through the Vault's locked writer, not SQL."""
+    started_at = time.time() - seconds
+    db._edit(session_id, lambda item: item.update(started_at=started_at))
+    assert db.get_session(session_id)["started_at"] == started_at
 
 
 def _tui_session(agent=None, session_key="session-key-old", **extra):
@@ -425,6 +431,23 @@ class TestGatewaySurfacesNullResponse:
 class TestFinalizeOrphanedCompressionSessions:
     """The prune migration marks ghost compression continuations as ended."""
 
+    def test_backdated_fixture_persists_in_vault_without_sqlite(self, tmp_path):
+        """Fixture updates survive reopening and preserve the stored transcript."""
+        from hermes_state import SessionDB
+
+        db = _make_session_db(tmp_path)
+        db.create_session(session_id="backdated", source="tui", model="test")
+        db.append_message("backdated", role="user", content="original message")
+        _backdate_session(db, "backdated")
+        expected_start = db.get_session("backdated")["started_at"]
+        db.close()
+
+        reopened = SessionDB(vault_path=tmp_path)
+        assert reopened.get_session("backdated")["started_at"] == expected_start
+        assert reopened.get_messages("backdated")[0]["content"] == "original message"
+        assert not list(tmp_path.rglob("*.db"))
+        reopened.close()
+
     def test_marks_ghost_continuation_with_compression_parent(self, tmp_path):
         """Ghost session with compression-ended parent + messages → finalized."""
         db = _make_session_db(tmp_path)
@@ -444,12 +467,7 @@ class TestFinalizeOrphanedCompressionSessions:
         db.append_message("ghost-cont", role="assistant", content="hi")
 
         # Make it old enough (fake started_at)
-        db._execute_write(
-            lambda conn: conn.execute(
-                "UPDATE sessions SET started_at = ? WHERE id = ?",
-                (time.time() - 800000, "ghost-cont"),  # ~9 days old
-            )
-        )
+        _backdate_session(db, "ghost-cont")
 
         count = db.finalize_orphaned_compression_sessions()
         assert count == 1
@@ -466,12 +484,7 @@ class TestFinalizeOrphanedCompressionSessions:
         db.create_session(session_id="ghost-notitle", source="tui", model="test")
         db.append_message("ghost-notitle", role="user", content="test")
 
-        db._execute_write(
-            lambda conn: conn.execute(
-                "UPDATE sessions SET started_at = ? WHERE id = ?",
-                (time.time() - 800000, "ghost-notitle"),
-            )
-        )
+        _backdate_session(db, "ghost-notitle")
 
         count = db.finalize_orphaned_compression_sessions()
         assert count == 0
@@ -511,12 +524,7 @@ class TestFinalizeOrphanedCompressionSessions:
         db.append_message("already-ended", role="user", content="hello")
         db.end_session("already-ended", "user_exit")
 
-        db._execute_write(
-            lambda conn: conn.execute(
-                "UPDATE sessions SET started_at = ? WHERE id = ?",
-                (time.time() - 800000, "already-ended"),
-            )
-        )
+        _backdate_session(db, "already-ended")
 
         count = db.finalize_orphaned_compression_sessions()
         assert count == 0
@@ -538,12 +546,7 @@ class TestFinalizeOrphanedCompressionSessions:
         )
         db.append_message("child", role="user", content="hello")
 
-        db._execute_write(
-            lambda conn: conn.execute(
-                "UPDATE sessions SET started_at = ? WHERE id = ?",
-                (time.time() - 800000, "child"),
-            )
-        )
+        _backdate_session(db, "child")
 
         count = db.finalize_orphaned_compression_sessions()
         assert count == 0
@@ -565,12 +568,7 @@ class TestFinalizeOrphanedCompressionSessions:
         )
         # No messages appended
 
-        db._execute_write(
-            lambda conn: conn.execute(
-                "UPDATE sessions SET started_at = ? WHERE id = ?",
-                (time.time() - 800000, "empty-ghost"),
-            )
-        )
+        _backdate_session(db, "empty-ghost")
 
         count = db.finalize_orphaned_compression_sessions()
         assert count == 0
@@ -594,12 +592,7 @@ class TestFinalizeOrphanedCompressionSessions:
         db.set_session_title("titled-ghost", "Chat (2)")
         db.append_message("titled-ghost", role="user", content="continued...")
 
-        db._execute_write(
-            lambda conn: conn.execute(
-                "UPDATE sessions SET started_at = ? WHERE id = ?",
-                (time.time() - 800000, "titled-ghost"),
-            )
-        )
+        _backdate_session(db, "titled-ghost")
 
         count = db.finalize_orphaned_compression_sessions()
         assert count == 1
