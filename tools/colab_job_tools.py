@@ -115,9 +115,10 @@ def _health_status(_args: dict, **_kwargs) -> str:
         return tool_error("Hermes Drive credentials and pinned Vault root are not configured")
     try:
         from hermes_hybrid.colab_dispatch import worker_health, resident_health
+        from hermes_hybrid.lora_training import lora_health
         vault = _vault()
         return tool_result(success=True, colab=worker_health(vault),
-                           resident=resident_health(vault))
+                           resident=resident_health(vault), lora=lora_health(vault))
     except Exception as exc:
         return tool_error("Colab worker health unavailable: " + type(exc).__name__)
 
