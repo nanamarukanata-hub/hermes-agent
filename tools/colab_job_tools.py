@@ -129,7 +129,7 @@ def _lora_submit(args: dict, **_kwargs) -> str:
         return tool_error("Hermes Drive credentials and pinned Vault root are not configured")
     try:
         from hermes_hybrid.lora_training import submit
-        keys = ("model_path", "dataset_path", "trigger", "steps", "resolution",
+        keys = ("model_path", "model_source", "dataset_path", "trigger", "steps", "resolution",
                 "network_dim", "network_alpha", "seed", "checkpoint_steps",
                 "monochrome_weight", "learning_rate")
         spec = {key: args[key] for key in keys if key in args}
@@ -154,11 +154,12 @@ def _lora_status(args: dict, **_kwargs) -> str:
 
 LORA_SUBMIT_SCHEMA = {
     "name": "lora_submit",
-    "description": "Queue a constrained SDXL LoRA training job with a generated Colab notebook in the canonical Hermes Drive Vault. Requires an existing local SDXL .safetensors model and captioned image dataset in the pinned Vault. This queues work but cannot start a Colab GPU or fix a disconnected kernel.",
+    "description": "Queue a constrained SDXL LoRA training job with a generated Colab notebook in the canonical Hermes Drive Vault. Uses a pinned public WAI v14 checkpoint if no local model_path is supplied; a captioned image dataset directory in the pinned Vault is required. This cannot start a Colab GPU or fix a disconnected kernel.",
     "parameters": {
         "type": "object",
         "properties": {
             "model_path": {"type": "string", "description": "Vault relative existing SDXL .safetensors under 06_Automation/Hermes/"},
+            "model_source": {"type": "string", "enum": ["wai_v140"], "description": "Pinned public WAI Illustrious v14 checkpoint; used by default if model_path is omitted"},
             "dataset_path": {"type": "string", "description": "Vault relative captioned images directory under 06_Automation/Hermes/"},
             "trigger": {"type": "string", "description": "ASCII LoRA trigger token, default keinastyle"},
             "steps": {"type": "integer", "minimum": 100, "maximum": 8000},
@@ -171,7 +172,7 @@ LORA_SUBMIT_SCHEMA = {
             "seed": {"type": "integer"},
             "job_id": {"type": "string", "description": "Optional idempotency key"},
         },
-        "required": ["model_path", "dataset_path"],
+        "required": ["dataset_path"],
     },
 }
 
