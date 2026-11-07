@@ -44,7 +44,17 @@ def validate_lora_spec(spec: dict) -> dict:
         raise ValueError("LoRA spec must be an object")
     if spec.get("type", "sdxl_lora") != "sdxl_lora":
         raise ValueError("only SDXL LoRA is supported")
-    model = _safe_path(spec.get("model_path"), suffix=".safetensors")
+    requested_model = spec.get("model_path")
+    model_source = spec.get("model_source")
+    if requested_model:
+        if model_source is not None:
+            raise ValueError("choose model_path or model_source, not both")
+        model = _safe_path(requested_model, suffix=".safetensors")
+    else:
+        if model_source not in (None, "wai_v140"):
+            raise ValueError("only the pinned public wai_v140 model source is allowed")
+        model = None
+        model_source = "wai_v140"
     data = _safe_path(spec.get("dataset_path"))
     trigger = spec.get("trigger", "keinastyle")
     if not isinstance(trigger, str) or not _TRIGGER.fullmatch(trigger):
@@ -74,7 +84,8 @@ def validate_lora_spec(spec: dict) -> dict:
     if type(learning_rate) not in (int, float) or not (0.00001 <= learning_rate <= 0.0005):
         raise ValueError("learning_rate must be between 1e-5 and 5e-4")
     return {"type": "sdxl_lora", "executor": "colab",
-            "model_path": model, "dataset_path": data, "trigger": trigger,
+            "model_path": model, "model_source": model_source,
+            "dataset_path": data, "trigger": trigger,
             "steps": steps, "resolution": resolution,
             "network_dim": dim, "network_alpha": alpha, "seed": seed,
             "checkpoint_steps": checkpoint_steps,
@@ -131,6 +142,7 @@ def report(vault: DriveVault, job_id: str) -> dict:
 # This cell is standalone: the user's Colab session executes it after Drive auth.
 # Do not interpolate user-controlled code. Only a validated job ID is injected.
 _TRAIN_CELL = r'''
+import hashlib
 import json
 import os
 import random
@@ -141,6 +153,7 @@ import sys
 import threading
 import time
 import traceback
+import urllib.request
 from datetime import datetime, timezone
 from pathlib import Path
 
@@ -150,6 +163,9 @@ VAULT = (Path("/content/drive/MyDrive") / VAULT_NAME).resolve()
 JOB = VAULT / "06_Automation" / "Hermes" / "LoRAJobs" / JOB_ID
 SRC_ROOT = (VAULT / "06_Automation" / "Hermes").resolve()
 GIT_REVISION = "cb70b96858477e716a2096292ab8aab433277f38"
+MODEL_URL = ("https://huggingface.co/arcacolab/models-moved/resolve/"
+             "f41cca2847de07c193cb67619cf864b19a53033b/waiIllustriousSDXL_v140.safetensors")
+MODEL_SHA256 = "bdb59bac77d94ae7a55ff893170f9554c3f349e48a1b73c0c17c0b7c6f4d41a2"
 SCRIPT_REPO = Path("/content/hermes-sd-scripts")
 IMAGES = {".png", ".jpg", ".jpeg", ".webp"}
 _LOSS = re.compile(r"(?:^|[,\s])loss[=:]\s*([0-9.eE+-]+)", re.IGNORECASE)
@@ -191,9 +207,13 @@ def main():
     assert 0.1 <= spec["monochrome_weight"] <= 1
     assert 0.00001 <= spec["learning_rate"] <= 0.0005
     dataset = safe_source(spec["dataset_path"])
-    model = safe_source(spec["model_path"])
-    if not dataset.is_dir() or not model.is_file() or model.suffix.lower() != ".safetensors":
-        raise FileNotFoundError("model .safetensors or dataset directory is missing in the Drive Vault")
+    model = safe_source(spec["model_path"]) if spec.get("model_path") else None
+    if not dataset.is_dir():
+        raise FileNotFoundError("dataset directory is missing in the Drive Vault")
+    if model is not None and (not model.is_file() or model.suffix.lower() != ".safetensors"):
+        raise FileNotFoundError("SDXL .safetensors checkpoint is missing in the Drive Vault")
+    if model is None and spec.get("model_source") != "wai_v140":
+        raise ValueError("unknown model_source")
     # Never silently train on CPU if the Colab T4 is unavailable.
     import torch
     if not torch.cuda.is_available():
@@ -220,6 +240,29 @@ def main():
             time.sleep(30)
     threading.Thread(target=lora_heartbeat, name="hermes-lora-heartbeat",
                      daemon=True).start()
+    if model is None:
+        state("downloading_model", gpu=gpu_name)
+        model = Path("/content/hermes-lora-models/waiIllustriousSDXL_v140.safetensors")
+        model.parent.mkdir(parents=True, exist_ok=True)
+        def valid_checkpoint(path):
+            if not path.is_file():
+                return False
+            digest = hashlib.sha256()
+            with path.open("rb") as fh:
+                for chunk in iter(lambda: fh.read(4 * 1024 * 1024), b""):
+                    digest.update(chunk)
+            return digest.hexdigest() == MODEL_SHA256
+        if not valid_checkpoint(model):
+            partial = model.with_suffix(".download")
+            try:
+                with urllib.request.urlopen(MODEL_URL, timeout=60) as remote, partial.open("wb") as dst:
+                    shutil.copyfileobj(remote, dst, length=4 * 1024 * 1024)
+                if not valid_checkpoint(partial):
+                    raise ValueError("WAI v14 downloaded checkpoint SHA256 mismatch")
+                partial.replace(model)
+            finally:
+                partial.unlink(missing_ok=True)
+        state("preparing", gpu=gpu_name)
     images = sorted(p for p in dataset.rglob("*") if p.suffix.lower() in IMAGES and p.is_file())
     if not 10 <= len(images) <= 6000:
         raise ValueError("dataset must contain between 10 and 6000 image files")
