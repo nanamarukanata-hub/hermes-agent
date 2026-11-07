@@ -21,7 +21,9 @@ from hermes_hybrid.jupyter_ws_protocol import (
 
 def main(argv=None) -> int:
     parser = argparse.ArgumentParser(description="Probe an existing Colab Jupyter kernel")
-    parser.add_argument("--execute-file", type=Path, help="Run explicit local Python file instead of a read-only kernel-info probe")
+    choice = parser.add_mutually_exclusive_group()
+    choice.add_argument("--execute-file", type=Path, help="Run explicit local Python file instead of a read-only kernel-info probe")
+    choice.add_argument("--lora-job-id", help="Execute the generated SDXL LoRA training cell for an existing Drive job")
     parser.add_argument("--timeout", type=int, default=30, help="Seconds to wait for the initial reply")
     args = parser.parse_args(argv)
     if not 3 <= args.timeout <= 600:
@@ -36,7 +38,16 @@ def main(argv=None) -> int:
     if requested not in ("", V1):
         parser.error("subprotocol must be blank or v1.kernel.websocket.jupyter.org")
     origin = os.environ.get("HERMES_KERNEL_ORIGIN", "").strip() or None
-    if args.execute_file:
+    if args.lora_job_id:
+        from hermes_hybrid.vault_kv import validate_id
+        from hermes_hybrid.lora_training import build_notebook
+
+        job_id = validate_id(args.lora_job_id)
+        notebook = build_notebook(job_id)
+        source = "".join(notebook["cells"][2]["source"])
+        msg_type, content = "execute_request", {"code": source}
+        print("Executing validated Hermes LoRA job:", job_id)
+    elif args.execute_file:
         if not args.execute_file.is_file() or args.execute_file.stat().st_size > 1_048_576:
             parser.error("--execute-file must be an existing Python source file <=1 MiB")
         source = args.execute_file.read_text(encoding="utf-8")
@@ -72,11 +83,11 @@ def main(argv=None) -> int:
         message_id = request["header"]["msg_id"]
         ws.send(encode(request, protocol), opcode=websocket.ABNF.OPCODE_BINARY)
         deadline = time.monotonic() + args.timeout
-        while time.monotonic() < deadline or args.execute_file is not None:
+        while time.monotonic() < deadline or args.execute_file is not None or args.lora_job_id is not None:
             try:
                 response = decode(ws.recv(), protocol)
             except socket.timeout:
-                if args.execute_file is None:
+                if args.execute_file is None and args.lora_job_id is None:
                     break
                 continue
             if response.get("parent_header", {}).get("msg_id") != message_id:
