@@ -15,7 +15,7 @@ from hermes_hybrid.jupyter_ws_protocol import (
 def test_kernel_info_roundtrip(protocol):
     request = kernel_request("kernel_info_request", {}, session="test")
     payload = encode(request, protocol)
-    assert isinstance(payload, bytes)
+    assert isinstance(payload, bytes if protocol == V1 else str)
     result = decode(payload, protocol)
     assert result["header"] == request["header"]
     assert result["channel"] == "shell"
@@ -78,3 +78,18 @@ def test_wrong_wire_type_and_wrong_payload_rejected():
 def test_legacy_json_message_decode():
     data = '{"channel":"shell","content":{"ok":true}}'
     assert decode_default(data)["content"]["ok"] is True
+
+
+def test_default_no_buffers_emits_text_json():
+    req = kernel_request("execute_request", {"code": "print(1)"})
+    payload = encode(req, None)
+    assert isinstance(payload, str)
+    assert decode(payload, None)["header"]["msg_type"] == "execute_request"
+
+
+def test_default_with_buffers_emits_binary():
+    req = kernel_request("kernel_info_request")
+    req["buffers"] = [b"test"]
+    payload = encode(req, None)
+    assert isinstance(payload, bytes)
+    assert decode(payload, None)["buffers"] == [b"test"]
