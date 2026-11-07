@@ -38,7 +38,7 @@ jobs:
       - name: Check watchdog and boot launcher shell syntax
         run: bash -n deploy/hermes-colab-watchdog.sh deploy/start-hermes-colab-worker.sh
       - name: Hermes to Colab and resident Linux worker test suite
-        run: python -m pytest tests/hermes_hybrid/test_colab_dispatch.py tests/hermes_hybrid/test_cli_drive_transport_pagination.py -q -o addopts=""
+        run: python -m pytest tests/hermes_hybrid/test_colab_dispatch.py tests/hermes_hybrid/test_cli_drive_transport_pagination.py tests/hermes_hybrid/test_colab_manager.py tests/hermes_hybrid/test_resident_heartbeat.py -q -o addopts=""
       - name: Existing Drive Vault and integration regression
         run: python -m pytest tests/hermes_hybrid/test_drive_vault.py tests/hermes_hybrid/test_drive_integration_ops.py -q -o addopts=""
       - name: Build self-contained Colab worker notebook
