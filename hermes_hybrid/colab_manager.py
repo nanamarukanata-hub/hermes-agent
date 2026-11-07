@@ -30,7 +30,7 @@ import os
 from datetime import datetime, timezone
 from typing import Optional
 
-from hermes_hybrid import colab_dispatch, colab_job_recovery
+from hermes_hybrid import colab_dispatch, colab_job_recovery, lora_training
 from hermes_hybrid.drive_vault import DriveVault
 
 MANAGER_FILE = colab_dispatch.colab_jobs._BASE + "/manager-state.json"
@@ -65,6 +65,20 @@ def probe_resident(vault: DriveVault, *, at: Optional[datetime] = None) -> dict:
             "restart_count": health.get("restart_count")}
 
 
+def probe_lora(vault: DriveVault, *, at: Optional[datetime] = None) -> dict:
+    """LoRA notebook is its own GPU backend, never a generic queue worker."""
+    at = at or _now()
+    health = colab_dispatch._health(
+        vault, lora_training.LORA_ROOT + "/worker.json", current_time=at
+    )
+    raw = vault.read_json(lora_training.LORA_ROOT + "/worker.json") or {}
+    device = raw.get("device") if isinstance(raw.get("device"), dict) else None
+    return {"backend": "lora_colab", "online": bool(health.get("online")),
+            "reason": health.get("reason"),
+            "last_seen_at": health.get("last_seen_at"),
+            "job_id": raw.get("job_id"), "device": device}
+
+
 def probe_colab_enterprise() -> dict:
     """Official Colab Enterprise (Vertex AI) API backend readiness.
 
@@ -94,6 +108,7 @@ class ColabManager:
         at = at or _now()
         return {"colab": probe_colab(self.vault, at=at),
                 "resident": probe_resident(self.vault, at=at),
+                "lora_colab": probe_lora(self.vault, at=at),
                 "colab_enterprise": probe_colab_enterprise()}
 
     def route(self, spec: dict, *, at: Optional[datetime] = None) -> dict:
