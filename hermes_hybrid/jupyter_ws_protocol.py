@@ -136,8 +136,17 @@ def decode_default(data: bytes | str) -> dict:
     return msg
 
 
-def encode(message: dict, subprotocol: str | None) -> bytes:
-    return encode_v1(message) if subprotocol == V1 else encode_default(message)
+def encode(message: dict, subprotocol: str | None) -> bytes | str:
+    """Match JupyterLab: legacy bufferless messages are TEXT WebSocket frames.
+
+    Default-protocol binary framing is reserved for messages with binary
+    buffers; the negotiated v1 subprotocol is always binary.
+    """
+    if subprotocol == V1:
+        return encode_v1(message)
+    if not message.get("buffers"):
+        return _json(message).decode("utf-8")
+    return encode_default(message)
 
 
 def decode(data: bytes | str, subprotocol: str | None) -> dict:
