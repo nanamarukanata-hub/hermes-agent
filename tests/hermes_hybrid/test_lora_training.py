@@ -83,6 +83,26 @@ def test_submit_notebook_and_progress_status(vault):
         submit(vault, spec(steps=900), job_id="lora-test-1")
 
 
+def test_pinned_wai_v14_without_local_model():
+    spec_without_path = spec()
+    del spec_without_path["model_path"]
+    clean = validate_lora_spec(spec_without_path)
+    assert clean["model_path"] is None
+    assert clean["model_source"] == "wai_v140"
+    with pytest.raises(ValueError):
+        validate_lora_spec(spec(model_source="wai_v140"))
+    with pytest.raises(ValueError):
+        validate_lora_spec({"model_source": "arbitrary_url", "dataset_path": spec()["dataset_path"]})
+
+
+def test_public_wai_model_hash_in_notebook():
+    code = "".join(build_notebook("lora-abc")["cells"][2]["source"])
+    compile(code, "colab-lora-trainer", "exec")
+    assert "bdb59bac77d94ae7a55ff893170f9554c3f349e48a1b73c0c17c0b7c6f4d41a2" in code
+    assert "MODEL_URL" in code
+    assert "downloading_model" in code
+
+
 def test_generated_notebook_never_executed_on_hermes_host():
     notebook = build_notebook("lora-123")
     assert all(cell["execution_count"] is None for cell in notebook["cells"][1:])
