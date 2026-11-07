@@ -162,7 +162,31 @@ class ColabManager:
         at = at or _now()
         state = {"at": at.isoformat(), "monitor_interval_seconds": MONITOR_INTERVAL_SECONDS,
                  "backends": self.backends(at=at),
-                 "queue": colab_job_recovery.classify_all(self.vault, at=at)["counts"]}
+                 "queue": colab_job_recovery.classify_all(self.vault, at=at)["counts"],
+                 "queue_observed_at": at.isoformat()}
+        self.vault.write_json(MANAGER_FILE, state)
+        return state
+
+    def publish_liveness(self, *, at: Optional[datetime] = None) -> dict:
+        """Refresh backend health without re-scanning/recovering the full queue.
+
+        A queue reconciliation can take minutes with Drive I/O. Publishing
+        liveness independently prevents manager-state.json from reporting an
+        offline resident worker while its heartbeat is fresh. Preserve the
+        previous queue snapshot with its separate observation timestamp.
+        """
+        at = at or _now()
+        previous = manager_state(self.vault)
+        if not isinstance(previous, dict):
+            previous = {}
+        state = {
+            "at": at.isoformat(),
+            "monitor_interval_seconds": MONITOR_INTERVAL_SECONDS,
+            "backends": self.backends(at=at),
+            "queue": previous.get("queue", {}),
+            "queue_observed_at": previous.get("queue_observed_at", previous.get("at")),
+            "recovery_actions": previous.get("recovery_actions", []),
+        }
         self.vault.write_json(MANAGER_FILE, state)
         return state
 
@@ -174,6 +198,7 @@ class ColabManager:
                  "monitor_interval_seconds": MONITOR_INTERVAL_SECONDS,
                  "backends": self.backends(at=at),
                  "queue": colab_job_recovery.classify_all(self.vault, at=at)["counts"],
+                 "queue_observed_at": at.isoformat(),
                  "recovery_actions": recovery["actions"]}
         self.vault.write_json(MANAGER_FILE, state)
         return state
