@@ -122,6 +122,68 @@ def _health_status(_args: dict, **_kwargs) -> str:
         return tool_error("Colab worker health unavailable: " + type(exc).__name__)
 
 
+def _lora_submit(args: dict, **_kwargs) -> str:
+    """Queue one strictly validated SDXL LoRA job and write its Colab notebook."""
+    if not _enabled():
+        return tool_error("Hermes Drive credentials and pinned Vault root are not configured")
+    try:
+        from hermes_hybrid.lora_training import submit
+        keys = ("model_path", "dataset_path", "trigger", "steps", "resolution",
+                "network_dim", "network_alpha", "seed", "checkpoint_steps",
+                "monochrome_weight", "learning_rate")
+        spec = {key: args[key] for key in keys if key in args}
+        return tool_result(success=True, **submit(_vault(), spec, args.get("job_id") or None))
+    except (ValueError, TypeError, KeyError) as exc:
+        return tool_error(str(exc))
+    except Exception as exc:
+        return tool_error("LoRA submit unavailable: " + type(exc).__name__)
+
+
+def _lora_status(args: dict, **_kwargs) -> str:
+    if not _enabled():
+        return tool_error("Hermes Drive credentials and pinned Vault root are not configured")
+    try:
+        from hermes_hybrid.lora_training import report
+        return tool_result(success=True, **report(_vault(), args.get("job_id", "")))
+    except (ValueError, TypeError, KeyError) as exc:
+        return tool_error(str(exc))
+    except Exception as exc:
+        return tool_error("LoRA status unavailable: " + type(exc).__name__)
+
+
+LORA_SUBMIT_SCHEMA = {
+    "name": "lora_submit",
+    "description": "Queue a constrained SDXL LoRA training job with a generated Colab notebook in the canonical Hermes Drive Vault. Requires an existing local SDXL .safetensors model and captioned image dataset in the pinned Vault. This queues work but cannot start a Colab GPU or fix a disconnected kernel.",
+    "parameters": {
+        "type": "object",
+        "properties": {
+            "model_path": {"type": "string", "description": "Vault relative existing SDXL .safetensors under 06_Automation/Hermes/"},
+            "dataset_path": {"type": "string", "description": "Vault relative captioned images directory under 06_Automation/Hermes/"},
+            "trigger": {"type": "string", "description": "ASCII LoRA trigger token, default keinastyle"},
+            "steps": {"type": "integer", "minimum": 100, "maximum": 8000},
+            "resolution": {"type": "integer", "enum": [512, 640, 768, 896, 1024]},
+            "network_dim": {"type": "integer", "enum": [8, 16, 32, 64]},
+            "network_alpha": {"type": "integer"},
+            "checkpoint_steps": {"type": "integer", "minimum": 100},
+            "monochrome_weight": {"type": "number", "minimum": 0.1, "maximum": 1},
+            "learning_rate": {"type": "number", "minimum": 0.00001, "maximum": 0.0005},
+            "seed": {"type": "integer"},
+            "job_id": {"type": "string", "description": "Optional idempotency key"},
+        },
+        "required": ["model_path", "dataset_path"],
+    },
+}
+
+LORA_STATUS_SCHEMA = {
+    "name": "lora_status",
+    "description": "Read one Hermes SDXL LoRA job, training step, loss, checkpoint result, and error, as last written by the Colab training notebook.",
+    "parameters": {
+        "type": "object", "properties": {"job_id": {"type": "string"}},
+        "required": ["job_id"],
+    },
+}
+
+
 COLAB_HEALTH_SCHEMA = {
     "name": "colab_health",
     "description": "Read Colab notebook and 24h Linux resident worker heartbeats and current process uptime from Google Drive. No job ID required. Not proof of 24-hour uninterrupted availability.",
@@ -179,4 +241,16 @@ registry.register(
     name="colab_health", toolset="colab", schema=COLAB_HEALTH_SCHEMA,
     handler=_health_status, check_fn=_enabled, requires_env=[],
     description=COLAB_HEALTH_SCHEMA["description"], emoji="🩺",
+)
+
+
+registry.register(
+    name="lora_submit", toolset="colab", schema=LORA_SUBMIT_SCHEMA,
+    handler=_lora_submit, check_fn=_enabled, requires_env=[],
+    description=LORA_SUBMIT_SCHEMA["description"], emoji="🧬",
+)
+registry.register(
+    name="lora_status", toolset="colab", schema=LORA_STATUS_SCHEMA,
+    handler=_lora_status, check_fn=_enabled, requires_env=[],
+    description=LORA_STATUS_SCHEMA["description"], emoji="📈",
 )
