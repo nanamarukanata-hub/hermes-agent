@@ -81,7 +81,10 @@ def main(argv=None) -> int:
         protocol = selected or None
         request = kernel_request(msg_type, content)
         message_id = request["header"]["msg_id"]
-        ws.send(encode(request, protocol), opcode=websocket.ABNF.OPCODE_BINARY)
+        wire_payload = encode(request, protocol)
+        opcode = (websocket.ABNF.OPCODE_TEXT if isinstance(wire_payload, str)
+                  else websocket.ABNF.OPCODE_BINARY)
+        ws.send(wire_payload, opcode=opcode)
         deadline = time.monotonic() + args.timeout
         while time.monotonic() < deadline or args.execute_file is not None or args.lora_job_id is not None:
             try:
