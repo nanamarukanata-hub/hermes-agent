@@ -90,6 +90,9 @@ def submit(vault: DriveVault, spec: dict, job_id: str | None = None) -> dict:
     if existing is not None:
         if existing.get("spec") != clean:
             raise ValueError("job_id already exists with a different LoRA spec")
+        if not vault.exists(base + "/train.ipynb"):
+            vault.write_bytes(base + "/train.ipynb", notebook_bytes(name),
+                              mime_type="application/x-ipynb+json")
         return {"job_id": name, "state": "already_exists", "notebook": base + "/train.ipynb"}
     notebook = notebook_bytes(name)
     vault.write_json(base + "/job.json", {
@@ -103,6 +106,13 @@ def submit(vault: DriveVault, spec: dict, job_id: str | None = None) -> dict:
             "note": "Notebook must be executed by an authorized Colab GPU session."}
 
 
+def lora_health(vault: DriveVault) -> dict:
+    """Separate heartbeat: LoRA-only GPU notebook does not consume ColabJobs."""
+    from hermes_hybrid.colab_dispatch import _health
+
+    return _health(vault, LORA_ROOT + "/worker.json", current_time=None)
+
+
 def report(vault: DriveVault, job_id: str) -> dict:
     name = validate_id(job_id)
     base = LORA_ROOT + "/" + name
@@ -114,6 +124,7 @@ def report(vault: DriveVault, job_id: str) -> dict:
             "status": vault.read_json(base + "/status.json"),
             "progress": vault.read_json(base + "/progress.json"),
             "result": vault.read_json(base + "/result.json"),
+            "lora_worker": lora_health(vault),
             "notebook": base + "/train.ipynb"}
 
 
@@ -189,6 +200,26 @@ def main():
         raise RuntimeError("CUDA GPU unavailable; Colab runtime must be GPU-enabled")
     gpu_name = torch.cuda.get_device_name(0)
     state("preparing", gpu=gpu_name)
+    # Distinct from ColabJobs/worker.json: this notebook trains, but does
+    # not process the ordinary echo/hash queue. A daemon heartbeat survives
+    # lengthy dependency installation and dataset staging.
+    def lora_heartbeat():
+        beat_file = VAULT / "06_Automation" / "Hermes" / "LoRAJobs" / "worker.json"
+        while True:
+            try:
+                status = json.loads((JOB / "status.json").read_text(encoding="utf-8"))
+                terminal = status.get("state") in ("done", "failed")
+                write_json(beat_file, {
+                    "job_id": JOB_ID, "worker_id": JOB_ID, "state": "stopped" if terminal else "running",
+                    "last_seen_at": stamp(), "device": {"gpu": {"available": True, "name": gpu_name}}
+                })
+                if terminal:
+                    return
+            except Exception:
+                pass
+            time.sleep(30)
+    threading.Thread(target=lora_heartbeat, name="hermes-lora-heartbeat",
+                     daemon=True).start()
     images = sorted(p for p in dataset.rglob("*") if p.suffix.lower() in IMAGES and p.is_file())
     if not 10 <= len(images) <= 6000:
         raise ValueError("dataset must contain between 10 and 6000 image files")
