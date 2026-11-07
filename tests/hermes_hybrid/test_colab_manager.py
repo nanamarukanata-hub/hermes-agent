@@ -118,3 +118,37 @@ def test_tick_publishes_state_and_recovers_interrupted_job(vault):
     saved = manager_state(vault)
     assert saved["backends"]["resident"]["online"] is True
     assert saved["monitor_interval_seconds"] == 60
+
+
+def test_publish_liveness_updates_fresh_health_without_queue_scan(vault, monkeypatch):
+    from hermes_hybrid.colab_manager import MANAGER_FILE
+
+    manager = ColabManager(vault)
+    old = T0 - timedelta(hours=2)
+    vault.write_json(MANAGER_FILE, {
+        "at": old.isoformat(),
+        "queue": {"completed": 7, "pending": 21, "failed": 7},
+        "recovery_actions": [],
+    })
+    _resident_heartbeat(vault, T0)
+    # Health refresh must not perform the costly full Drive-queue scan.
+    def must_not_scan(*_args, **_kwargs):
+        raise AssertionError("queue scan called from lightweight health publisher")
+
+    monkeypatch.setattr(
+        "hermes_hybrid.colab_job_recovery.classify_all", must_not_scan
+    )
+    state = manager.publish_liveness(at=T0)
+    assert state["backends"]["resident"]["online"] is True
+    assert state["at"] == T0.isoformat()
+    assert state["queue"] == {"completed": 7, "pending": 21, "failed": 7}
+    assert state["queue_observed_at"] == old.isoformat()
+    assert manager_state(vault)["backends"]["resident"]["online"] is True
+
+
+def test_publish_liveness_without_prior_state(vault):
+    _resident_heartbeat(vault, T0)
+    state = ColabManager(vault).publish_liveness(at=T0)
+    assert state["queue"] == {}
+    assert state["queue_observed_at"] is None
+    assert state["backends"]["resident"]["online"] is True

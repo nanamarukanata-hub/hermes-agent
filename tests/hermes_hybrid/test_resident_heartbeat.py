@@ -80,3 +80,25 @@ def test_heartbeat_thread_publishes_without_scan(vault):
     assert data["worker_id"] == "resident-th"
     assert data["state"] == "running"
     assert data["cycle_count"] == 7
+
+
+def test_manager_health_thread_publishes_independently(vault):
+    from hermes_hybrid.colab_manager import MANAGER_FILE
+
+    v, _ = vault
+    resident_worker.heartbeat(v, "resident-live", "running", started_at=resident_worker.now())
+    publisher = resident_worker._ManagerHealthThread(v, interval=0.2)
+    publisher.start()
+    try:
+        state = None
+        for _ in range(15):
+            state = v.read_json(MANAGER_FILE)
+            if state is not None:
+                break
+            time.sleep(0.1)
+        assert state is not None
+        assert state["backends"]["resident"]["online"] is True
+        assert state["queue_observed_at"] is None
+    finally:
+        publisher.request_stop()
+        publisher.join(timeout=5)

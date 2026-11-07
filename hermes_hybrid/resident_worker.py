@@ -181,6 +181,34 @@ class _HeartbeatThread(threading.Thread):
                           self.consecutive_failures)
 
 
+class _ManagerHealthThread(threading.Thread):
+    """Keep manager health fresh even when the queue reconciler is slow.
+
+    This thread NEVER reconciles, requeues or executes jobs. It only
+    publishes the backend liveness snapshot; heartbeat has its own thread.
+    """
+
+    def __init__(self, vault: DriveVault, interval: float = 60.0):
+        super().__init__(name="resident-manager-health", daemon=True)
+        self._vault = vault
+        self._interval = max(0.2, interval)
+        self._stop_event = threading.Event()
+
+    def request_stop(self) -> None:
+        self._stop_event.set()
+
+    def run(self) -> None:
+        from .colab_manager import ColabManager
+
+        manager = ColabManager(self._vault)
+        while not self._stop_event.is_set():
+            try:
+                manager.publish_liveness()
+            except Exception as exc:
+                LOG.warning("manager health publish failed (%s)", type(exc).__name__)
+            self._stop_event.wait(self._interval)
+
+
 @contextlib.contextmanager
 def single_instance():
     # This local lock is held for the entire process lifetime, not a Drive
@@ -210,6 +238,7 @@ def run(vault: DriveVault, *, interval: float = 30.0,
     heartbeat_with_retry(vault, worker_id, "running", started_at=started_at,
                          restart_count=restart_count)
     beat = None
+    publisher = None
     if not once:
         beat = _HeartbeatThread(vault, worker_id, started_at=started_at,
                                 restart_count=restart_count,
@@ -218,6 +247,8 @@ def run(vault: DriveVault, *, interval: float = 30.0,
                                           is not None else
                                           min(max(interval, 5.0), 60.0)))
         beat.start()
+        publisher = _ManagerHealthThread(vault)
+        publisher.start()
     try:
         while not stopper():
             try:
@@ -245,6 +276,9 @@ def run(vault: DriveVault, *, interval: float = 30.0,
                 elapsed += step
         return 0
     finally:
+        if publisher is not None:
+            publisher.request_stop()
+            publisher.join(timeout=2.0)
         if beat is not None:
             beat.request_stop()
         if not heartbeat_with_retry(vault, worker_id, "stopped",
