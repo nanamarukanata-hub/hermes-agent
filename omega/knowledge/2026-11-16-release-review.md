@@ -1,0 +1,21 @@
+# OMEGA upstream review — 2026-11-16 JST
+
+Status: **verified public upstream release notes; no deployment, integration test, or production configuration change.**
+
+## Stable release radar
+No confirmed new non-prerelease GitHub release versus 2026-11-15: Codex `rust-v0.169.0`, Claude Code `v2.1.325`, Hermes Agent `v0.23.1`, GBrain `v0.60.722.0`, Obsidian `v1.15.1`. Sources: official repositories' Releases pages. Codex alpha, Hermes canary and GBrain prereleases must not be represented as stable.
+
+## Important GBrain prerelease changes — **not recommended for production deployment**
+- **v0.60.727.0 (2026-11-15 UTC)** introduces `gbrain transcripts archive`, daily redacted searchable agent-conversation pages; archive is **enabled by default for personal brains**. `gbrain transcripts archive off` is the documented opt-out. The archived data can contain private prompts, RP messages, project details and copyrighted creative drafts despite credential redaction. Before adopting, verify source-specific read permissions, retention, external model egress, backup and purge behavior, and the real opt-out state in an isolated synthetic brain. https://github.com/garrytan/gbrain/releases/tag/v0.60.727.0
+- **v0.60.728.0 (2026-11-15 UTC)** adds optional import of exported call transcripts to company source via `gbrain setup ... --transcripts DIR` / `gbrain import DIR --calls`; import redacts credentials and defaults to keyword-only, but **company-source readers can access imported pages** and scheduled extraction may process them. Do not ingest a private Obsidian Vault or conversation exports into a shared source. Also adds `docs/STABILITY.md` explaining stable versus alpha channels and fixes project-level Codex MCP registration detection and write-receipt lookup. https://github.com/garrytan/gbrain/releases/tag/v0.60.728.0
+- **v0.60.725.0 (2026-11-15 UTC)** changes doctor Git-integrity checks to sample the most recently changed 800 pages per source; inconclusive scans now report health unknown, not healthy. Full audit requires `gbrain sources git-gap <source-id>`. Also improves webhook, stdio, search and Codex setup backup handling. https://github.com/garrytan/gbrain/releases/tag/v0.60.725.0
+
+**Security priority:** conversation archiving opt-in/out and data classification outrank minor release-number tracking. Credential redaction is not equivalent to privacy-safe archiving. For multi-user RP, test that one user cannot search another user's archived conversations or derived facts; keep production archive disabled until these checks pass. Rollback: pin previous verified stable version and restore synthetic-test data from backup; do not assume an application downgrade erases previously archived pages.
+
+## DTM/audio value and licenses
+Potential benefit: searchable provenance for JUCE/VST3, Kontakt/KSP, MIDI, sound-design and mix revisions. Risk: leaking unpublished lyrics, stems descriptions, session notes, licensing discussions or client material into shared knowledge. No verified DSP/DAW rendering or sound-quality improvement. No upstream code or Skills copied; therefore no new code redistribution obligations in this change. Verify upstream license and dependency licenses before any future implementation.
+
+## OMEGA repository and integration state
+Reviewed `omega/AGENTS.md`, `omega/skills/omega-ai-updates/SKILL.md`, `omega/knowledge/latest-releases.md`, `.github/workflows/omega-release-radar.yml` on `omega/daily-maintenance-20261024`. `omega/docs/gbrain-obsidian-bridge.md` is absent on this branch (404); PR #8 and the SQLite-free persistence decision require separate review. The radar workflow's `releases/latest` source intentionally excludes prereleases; stable metadata therefore remains unchanged.
+
+ChatGPT/Work, MCP and Agent Skills: no independently verified new mandatory implementation change in this pass; this is not an exhaustive product audit. No private Drive Vault access, note writes, software updates, plugin registration, or secrets transfer. No code, Skill or workflow modifications. No unit/integration tests run for this documentation-only assessment; CI remains unverified. Existing draft PR #10 is the proposed review vehicle; do not merge automatically.
