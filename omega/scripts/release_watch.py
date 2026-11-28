@@ -1,5 +1,6 @@
 """Read official GitHub Releases and write deterministic Markdown. No code installs."""
 import argparse
+from datetime import datetime
 import json
 import os
 from pathlib import Path
@@ -11,6 +12,7 @@ SOURCES = [
     ("Codex", "openai/codex"),
     ("Claude Code", "anthropics/claude-code"),
     ("Hermes Agent", "NousResearch/hermes-agent"),
+    ("GBrain", "garrytan/gbrain"),
     ("Obsidian", "obsidianmd/obsidian-releases"),
 ]
 
@@ -21,8 +23,19 @@ def fetch_latest(repo, token=""):
     api = "https://api.github.com/repos/" + repo + "/releases/latest"
     with urlopen(Request(api, headers=headers), timeout=25) as response:
         data = json.load(response)
-    return {"tag": str(data.get("tag_name", "")), "published": str(data.get("published_at", ""))[:10],
-            "url": str(data.get("html_url", ""))}
+    tag = data.get("tag_name")
+    published = data.get("published_at")
+    url = data.get("html_url")
+    expected = "https://github.com/" + repo + "/releases/tag/"
+    if (not isinstance(tag, str) or not tag.strip() or
+            not isinstance(url, str) or not url.startswith(expected) or
+            not isinstance(published, str)):
+        raise ValueError("Invalid official release metadata for " + repo)
+    try:
+        datetime.strptime(published, "%Y-%m-%dT%H:%M:%SZ")
+    except ValueError as exc:
+        raise ValueError("Invalid release publication time for " + repo) from exc
+    return {"tag": tag, "published": published[:10], "url": url}
 
 def render(rows):
     lines = ["---", "type: release-radar", "status: verified-github-release-metadata", "---", "",
